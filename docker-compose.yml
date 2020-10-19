@@ -1,0 +1,28 @@
+version: '3.8'
+services:
+  db:
+    container_name: sgl_db
+    image: datajoint/mysql:5.7
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=coltrane
+    volumes:
+      - ./data:/var/lib/mysql
+    networks:
+      - sgl_network
+  backend:
+    container_name: sgl_backend
+    build: backend
+    ports:
+      - "8050:8050"
+    # This bind mount allows updating backend app during development via Flask reloader module (debug mode)
+    volumes:
+      - ./backend/src:/code
+    depends_on:
+      - db
+    networks:
+      - sgl_network
+
+networks:
+  sgl_network:
