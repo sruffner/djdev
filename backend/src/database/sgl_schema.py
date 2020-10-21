@@ -79,7 +79,6 @@ Created on Wed Jun  3 14:13:38 2020
 
 import datajoint as dj
 
-
 schema = dj.schema('sgl')
 
 

@@ -1,11 +1,12 @@
+import sys
+import dash
 import dash_html_components as html
-# import dash_core_components as dcc
-# import dash_table as dt
 import dash_bootstrap_components as dbc
-from dash.dependencies import Input, Output
+from dash.dependencies import Input, Output, State
 from app import app
 
 import pages.curate_panels as cp
+import database.table_views as tv
 
 user_panel = cp.UserPanel(app)
 subj_panel = cp.SubjectPanel(app)
@@ -35,19 +36,39 @@ layout = html.Div([
                 html.H3("Curate the laboratory database", className="text-center"),
                 className="mb-3 mt-3")
         ]),
+        dbc.Row([dbc.Col(html.H5(children='*** UNDER CONSTRUCTION ***'), className="mb-2")]),
         dbc.Row([
-            dbc.Col(html.H5(children='*** UNDER CONSTRUCTION ***'), className="mb-2")
-            ]),
+            dbc.Button("Reset database", id="reset_db_btn", color="primary", className="mr-2 mb-3"),
+            dbc.Button("Seed database", id="seed_db_btn", color="primary", className="mr-2 mb-3")
+        ]),
         tabs_card
     ])
 ])
 
 
-@app.callback(Output("sel-tab-content", "children"), [Input("tabs", "active_tab")])
-def update_tab_content(active_tab):
-    tabpane = None
-    try:
-        tabpane = tab_to_panel[active_tab]
-    except Exception:
-        pass
-    return tabpane.layout() if tabpane else html.Div(["No tab selected"])
+@app.callback(Output("sel-tab-content", "children"),
+              [Input("tabs", "active_tab"), Input("reset_db_btn", "n_clicks"), Input("seed_db_btn", "n_clicks")],
+              [State("tabs", "active_tab")])
+def update_tab_content(active_tab, *args):
+    ctx = dash.callback_context
+    out = dash.no_update
+    btn_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ''
+    curr_active_tab = args[2]
+    if btn_id.find("reset_db_btn") > -1:
+        msg = tv.reset_database()
+        print(f"Reset database, msg={msg}", file=sys.stdout, flush=True)
+        if curr_active_tab:
+            out = tab_to_panel[curr_active_tab].layout()
+    elif btn_id.find("seed_db_btn") > -1:
+        msg = tv.seed_database()
+        print(f"Seeded database, msg={msg}", file=sys.stdout, flush=True)
+        if curr_active_tab:
+            out = tab_to_panel[curr_active_tab].layout()
+    else:
+        tabpane = None
+        try:
+            tabpane = tab_to_panel[active_tab]
+        except Exception:
+            pass
+        out = tabpane.layout() if tabpane else html.Div(["No tab selected"])
+    return out
