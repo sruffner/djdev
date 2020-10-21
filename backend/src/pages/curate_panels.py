@@ -312,23 +312,20 @@ class _BasePanel:
 
         pfx = self._prefix
         num_xref_dropdowns = 0
-
-        state_vector = [State(f"{pfx}_table", "selected_rows"), State(f"{pfx}_table", "data")]
         for subpanel in self.__subpanels:
-            map_view = subpanel.mapping_view_for_subpanel()
-            if map_view:
-                state_vector.append(State(f"{pfx}_{subpanel.id_prefix()}_drop", "value"))
+            if subpanel.mapping_view_for_subpanel():
                 num_xref_dropdowns += 1
-        if num_xref_dropdowns > 0:
-            state_vector.append(State(f"{pfx}_xref_for", "value"))
-        state_vector.extend([State(f"{attr.id}_input", "value") for attr in self._table_view.attributes()])
 
         input_vector = [Input(f"del_{pfx}_btn", "n_clicks"), Input(f"{pfx}_entry_submit_btn", "n_clicks")]
+        state_vector = [State(f"{pfx}_table", "selected_rows"), State(f"{pfx}_table", "data")]
         if num_xref_dropdowns > 0:
             input_vector.append(Input(f"{pfx}_upd_xref_btn", "n_clicks"))
             for subpanel in self.__subpanels:
                 if subpanel.mapping_view_for_subpanel():
+                    state_vector.append(State(f"{pfx}_{subpanel.id_prefix()}_drop", "value"))
                     input_vector.append(Input(f"{subpanel.id_prefix()}_table", "data"))
+            state_vector.append(State(f"{pfx}_xref_for", "value"))
+        state_vector.extend([State(f"{attr.id}_input", "value") for attr in self._table_view.attributes()])
 
         @app.callback([Output(f"{pfx}_table", "data"), Output(f"{pfx}_table", "tooltip_data"),
                        Output(f"{pfx}_table", "selected_rows"),
@@ -364,11 +361,12 @@ class _BasePanel:
             clear_selection = False
             error_msg = ""
             btn_id = ctx.triggered[0]['prop_id'].split('.')[0]
-            ofs = 2 + ((1 + num_xref_dropdowns) if (num_xref_dropdowns > 0) else 0)
+            drop_ofs = (1 + num_xref_dropdowns) if num_xref_dropdowns > 0 else 0
+            ofs = 2 + drop_ofs
             selected_rows = args[ofs]
             rows = args[ofs+1]
             ofs_to_first_drop = ofs + 2
-            attr_input_ofs = ofs_to_first_drop + num_xref_dropdowns + 1
+            attr_input_ofs = ofs_to_first_drop + drop_ofs
 
             if (num_xref_dropdowns > 0) and (btn_id.find('_table') > -1):
                 update = True
@@ -384,9 +382,8 @@ class _BasePanel:
                 idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
                 selected_row = rows[idx] if (-1 < idx < len(rows)) else None
                 if selected_row:
-                    if btn_id.find(f"del_{pfx}_btn") > -1:
-                        error_msg = self._table_view.remove_row(selected_row)
-                        update = clear_selection = (len(error_msg) == 0)
+                    error_msg = self._table_view.remove_row(selected_row)
+                    update = clear_selection = (len(error_msg) == 0)
             else:
                 ofs = ofs_to_first_drop
                 src_pk_val = args[ofs + num_xref_dropdowns]
