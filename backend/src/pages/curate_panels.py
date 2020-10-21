@@ -331,6 +331,7 @@ class _BasePanel:
                     input_vector.append(Input(f"{subpanel.id_prefix()}_table", "data"))
 
         @app.callback([Output(f"{pfx}_table", "data"), Output(f"{pfx}_table", "tooltip_data"),
+                       Output(f"{pfx}_table", "selected_rows"),
                        Output(f"{pfx}_error", "children"), Output(f"{pfx}_error", "is_open")],
                       input_vector, state_vector)
         def callback_update_data_table(*args):
@@ -360,6 +361,7 @@ class _BasePanel:
                 raise dash.exceptions.PreventUpdate
 
             update = False
+            clear_selection = False
             error_msg = ""
             btn_id = ctx.triggered[0]['prop_id'].split('.')[0]
             ofs = 2 + ((1 + num_xref_dropdowns) if (num_xref_dropdowns > 0) else 0)
@@ -384,7 +386,7 @@ class _BasePanel:
                 if selected_row:
                     if btn_id.find(f"del_{pfx}_btn") > -1:
                         error_msg = self._table_view.remove_row(selected_row)
-                        update = (len(error_msg) == 0)
+                        update = clear_selection = (len(error_msg) == 0)
             else:
                 ofs = ofs_to_first_drop
                 src_pk_val = args[ofs + num_xref_dropdowns]
@@ -400,7 +402,7 @@ class _BasePanel:
 
             table_data = self._table_view.rows() if update else dash.no_update
             tooltip_data = self._table_view.tooltip_data_for(table_data) if isinstance(table_data, list) else []
-            return table_data, tooltip_data, error_msg, len(error_msg) > 0
+            return table_data, tooltip_data, [] if clear_selection else dash.no_update, error_msg, len(error_msg) > 0
 
         @app.callback(Output(f"del_{pfx}_btn", "disabled"), [Input(f"{pfx}_table", "selected_rows")])
         def callback_on_table_row_select(selected_rows):
