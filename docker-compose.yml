@@ -21,6 +21,8 @@ services:
       - db
     networks:
       - sgl_network
+    environment:
+      - MYSQL_ROOT_PASSWORD=coltrane
 
 networks:
   sgl_network:
