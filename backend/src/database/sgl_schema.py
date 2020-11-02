@@ -87,7 +87,8 @@ while True:
         db_connection = dj.conn()
         break
     except Exception as connection_error: 
-        warnings.warn(RuntimeWarning("Unable to connect to the database with error {0}. Trying again in 5s.".format(connection_error)))
+        warnings.warn(RuntimeWarning(
+            "Unable to connect to the database with error {0}. Trying again in 5s.".format(connection_error)))
         time.sleep(5)
 schema = dj.schema('sgl', connection=db_connection)
 
