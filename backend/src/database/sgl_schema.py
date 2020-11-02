@@ -78,8 +78,19 @@ Created on Wed Jun  3 14:13:38 2020
 """
 
 import datajoint as dj
+import time
+import warnings
 
-schema = dj.schema('sgl')
+# Attempt to create a connection to the database
+while True:
+    try:
+        db_connection = dj.conn()
+        break
+    except Exception as connection_error: 
+        warnings.warn(RuntimeWarning(
+            "Unable to connect to the database with error {0}. Trying again in 5s.".format(connection_error)))
+        time.sleep(5)
+schema = dj.schema('sgl', connection=db_connection)
 
 
 @schema
