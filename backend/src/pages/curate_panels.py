@@ -130,24 +130,25 @@ class _BasePanel:
         pfx = self._prefix
         layout = [
             html.Div(id=f"{pfx}_table_div", children=[self._data_table()]),
+            dbc.Alert("", id=f"{self._prefix}_alert", color="danger", dismissable=True, duration=10000, fade=True,
+                      is_open=False, className="mt-3 mb-1"),
             dbc.Button("Add", id=f"add_{pfx}_btn", color="primary", className="mr-2 mt-3"),
             dbc.Button("Remove", id=f"del_{pfx}_btn", color="primary", className="mr-2 mt-3", disabled=True),
             dbc.Modal(
                 [
-                    dbc.ModalHeader("Header", id=f"{pfx}_entry_hdr"),
-                    dbc.ModalBody(self._entry_form(), id=f"{pfx}_entry_body"),
-                    dbc.ModalFooter(dbc.Row([
-                        dbc.Button(f"Add {self._table_view.row_label()}", id=f"{pfx}_entry_submit_btn",
-                                   color="primary"),
-                        dbc.Button("Done", id=f"{pfx}_entry_done_btn", color="primary", className="ml-3")
+                    dbc.ModalHeader(f"Add {self._table_view.row_label()}"),
+                    dbc.ModalBody(self._entry_form()),
+                    dbc.ModalFooter(
+                        dbc.Row([
+                            dbc.Button("Add", id=f"{pfx}_entry_submit_btn", color="primary"),
+                            dbc.Button("Done", id=f"{pfx}_entry_done_btn", color="primary", className="ml-3")
                         ])
                     )
                 ],
                 id=f"{pfx}_entry_form", backdrop="static", size="xl", centered=True
             ),
-            dbc.Toast("Error message", id=f"{pfx}_error", header="Error", is_open=False, dismissable=True,
-                      duration=5000, icon="danger", style={"position": "fixed", "top": 50, "right": 20, "width": 500})
-
+            # the number inside this invisible DIV is set to 1 if any changes are made in the add-entry modal window
+            html.Div(children=0, id=f"{pfx}_entry_added_div", style={"display": "none"}),
         ]
 
         accordion_cards = []
@@ -160,7 +161,7 @@ class _BasePanel:
                                style={'padding': '.1rem .2rem'}),
                     style={'padding': '.25rem'}),
                 dbc.Collapse(dbc.CardBody(subpanel.layout()), id=f"{pfx}_{sub_pfx}_collapse")
-                ], style={'overflow': 'visible'})
+            ], style={'overflow': 'visible'})
             accordion_cards.append(card)
             map_view = subpanel.mapping_view_for_subpanel()
             if map_view:
@@ -178,11 +179,15 @@ class _BasePanel:
             form_kids = []
             for i, grp in enumerate(assoc_form_grps):
                 form_kids.append(grp)
-                if i < len(assoc_form_grps):
+                if i < (len(assoc_form_grps) - 1):
                     form_kids.append(html.Hr())
+            form_kids.append(
+                dbc.Alert("", id=f"{self._prefix}_xref_alert", color="success", dismissable=True, duration=10000,
+                          fade=True, is_open=False, className="mt-2 mb-1")
+            )
             layout.append(
                 dbc.Button("Related info", id=f"{pfx}_raise_xref_btn", color="primary", className="mr-2 mt-3")
-                )
+            )
             layout.append(
                 dbc.Modal(
                     [
@@ -194,7 +199,10 @@ class _BasePanel:
                         ]))
                     ],
                     id=f"{pfx}_upd_xref_modal", backdrop="static", size="xl", centered=True)
-                )
+            )
+            # the number inside this invisible DIV is set to 1 if any changes are made in the mapping view modal window
+            layout.append(html.Div(children=0, id=f"{pfx}_mapping_updated_div", style={"display": "none"}))
+
         if len(accordion_cards) > 0:
             layout.append(html.Div(accordion_cards, className="mt-3 accordion"))
 
@@ -222,7 +230,7 @@ class _BasePanel:
                 display: block;
                 overflow-y: hidden;
                 '''
-            }]
+        }]
 
         data_table = dt.DataTable(
             id=f"{self._prefix}_table",
@@ -240,7 +248,7 @@ class _BasePanel:
             style_table={'height': '200px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
             # fixed_rows={'headers': True} UNABLE TO DO THIS B/C IT LEADS TO MYSTERIOUS FLICKERING OF
             # BROWSER WINDOW'S VERTICAL SCROLLBAR WHEN MOUSE EXITS OR ENTERS THE DATATABLE
-            )
+        )
         return data_table
 
     def _entry_form(self) -> dbc.Form:
@@ -254,6 +262,9 @@ class _BasePanel:
             for that foreign key, and no value is selected initially.
             3) 'text' (length > 100): A Bootstrap Textarea widget with 2 or 4 rows (depending on max text length).
             4) Otherwise: A Bootstrap Input widget of type 'number', 'email', or 'text'.
+
+        The form includes a Bootstrap Alert component in which an error message can be displayed in the event that an
+        error occurs while trying to add an entry to the underlying database table.
 
         Returns:
             A Dash Bootstrap Form component, as described.
@@ -299,6 +310,11 @@ class _BasePanel:
                 row=True,
             ))
 
+        # alert raised when an add operation fails - displays a brief error message. Otherwise hidden.
+        form_groups.append(dbc.FormGroup(
+            dbc.Alert("", id=f"{self._prefix}_entry_alert", dismissable=True, duration=10000, fade=True, is_open=False)
+        ))
+
         return dbc.Form(form_groups)
 
     def _callbacks(self, app: dash.Dash):
@@ -312,46 +328,43 @@ class _BasePanel:
 
         pfx = self._prefix
         num_xref_dropdowns = 0
+
+        input_vector = [Input(f"del_{pfx}_btn", "n_clicks"), Input(f"{pfx}_entry_done_btn", "n_clicks")]
+        state_vector = [State(f"{pfx}_table", "selected_rows"), State(f"{pfx}_table", "data"),
+                        State(f"{pfx}_entry_added_div", "children")]
+
         for subpanel in self.__subpanels:
             if subpanel.mapping_view_for_subpanel():
+                input_vector.append(Input(f"{subpanel.id_prefix()}_table", "data"))
                 num_xref_dropdowns += 1
-
-        input_vector = [Input(f"del_{pfx}_btn", "n_clicks"), Input(f"{pfx}_entry_submit_btn", "n_clicks")]
-        state_vector = [State(f"{pfx}_table", "selected_rows"), State(f"{pfx}_table", "data")]
         if num_xref_dropdowns > 0:
-            input_vector.append(Input(f"{pfx}_upd_xref_btn", "n_clicks"))
-            for subpanel in self.__subpanels:
-                if subpanel.mapping_view_for_subpanel():
-                    state_vector.append(State(f"{pfx}_{subpanel.id_prefix()}_drop", "value"))
-                    input_vector.append(Input(f"{subpanel.id_prefix()}_table", "data"))
-            state_vector.append(State(f"{pfx}_xref_for", "value"))
-        state_vector.extend([State(f"{attr.id}_input", "value") for attr in self._table_view.attributes()])
+            input_vector.append(Input(f"{pfx}_lower_xref_btn", "n_clicks"))
+            state_vector.append(State(f"{pfx}_mapping_updated_div", "children"))
 
         @app.callback([Output(f"{pfx}_table", "data"), Output(f"{pfx}_table", "tooltip_data"),
                        Output(f"{pfx}_table", "selected_rows"),
-                       Output(f"{pfx}_error", "children"), Output(f"{pfx}_error", "is_open")],
+                       Output(f"{pfx}_alert", "children"), Output(f"{pfx}_alert", "is_open")],
                       input_vector, state_vector)
         def callback_update_data_table(*args):
             """
             Update the row and tooltip data for the panel's Dash DataTable component, as well as the error message
-            string and open/hidden state of the error pop-up (a Dash Bootstrap Toast component) that appears in the
-            top-right corner of the web page.
+            string and open/hidden state of the Bootstrap Alert component that appears immediately below the data table
+            on the panel.
 
-            This is a complex callback, and the number and type of its arguments depend on the exact configuration of
-            the panel. It is triggered by clicking the 'Remove' button, the 'submit' button on the add-entry modal
-            form, and the 'Update' button on the modal form that updates one or more mapping views (present only if
-            panel contains a subpanel with a mapping table view). Changes in the tables rendered in any subpanel will
-            also trigger the callback, since changes in those subpanels may alter the current contents of the main
-            panel DataTable.
+            This callback is triggered by clicking the 'Remove' button on the main panel, the 'Done' button that hides
+            the modal form by which the user adds entries to the underlying database table, or the 'Done' button that
+            hides another modal by which the user updates one or more mapping views (present only if panel contains a
+            subpanel with a mapping table view). Changes in the tables rendered in any subpanel will also trigger the
+            callback, since changes in those subpanels may alter the current contents of the main panel's data table.
 
             In addition to the input triggers, the current state of several component properties are also supplied:
                 1) The row data of the main table and the index of the currently selected row -- in order to perform
                 the "Remove" operation.
-                2) The current "value" of the dropdown(s) in the modal form that updates what entities in a subpanel
-                table are associated with an entity E in the main panel, and the current value of the dropdown that
-                selects entity E (the primary key value).
-                3) The current "value" in each input widget on the add-entry modal form -- to perform the "Add"
-                operation when the "submit" button on that form is clicked.
+                2) The current value of the "children" property of two invisible DIVs in the layout, "entry_added_div"
+                and "mapping_updated_div". Each property is reset to 0 when the corresponding modal window is raised,
+                and set to 1 if any changes are successfully completed while the modal window is up. This method checks
+                the property when the modal window is extinguished to determine if any changes were made, in which case
+                it is necessary to refresh the contents of the panel's data table.
             """
             ctx = dash.callback_context
             if not ctx.triggered:
@@ -361,41 +374,24 @@ class _BasePanel:
             clear_selection = False
             error_msg = ""
             btn_id = ctx.triggered[0]['prop_id'].split('.')[0]
-            drop_ofs = (1 + num_xref_dropdowns) if num_xref_dropdowns > 0 else 0
-            ofs = 2 + drop_ofs
-            selected_rows = args[ofs]
-            rows = args[ofs+1]
-            ofs_to_first_drop = ofs + 2
-            attr_input_ofs = ofs_to_first_drop + drop_ofs
+            neg_ofs = -3 if num_xref_dropdowns == 0 else -4
+            selected_rows = args[neg_ofs]
+            rows = args[neg_ofs + 1]
+            entry_added = (args[neg_ofs + 2] != 0)
+            mapping_updated = False if num_xref_dropdowns == 0 else (args[-1] != 0)
 
             if (num_xref_dropdowns > 0) and (btn_id.find('_table') > -1):
                 update = True
-            elif btn_id.find(f"{pfx}_entry_submit_btn") > -1:
-                attrs = self._table_view.attributes()
-                input_values = [args[i+attr_input_ofs] for i in range(len(attrs))]
-                entry = dict()
-                for i, attr in enumerate(attrs):
-                    entry[attr.id] = str(input_values[i])
-                error_msg = self._table_view.add_row(entry)
-                update = (len(error_msg) == 0)
-            elif btn_id.find(f"del_{pfx}_btn") > -1:
+            elif btn_id.find("entry_done_btn") > -1:
+                update = entry_added
+            elif btn_id.find("lower_xref_btn") > -1:
+                update = mapping_updated
+            else:
                 idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
                 selected_row = rows[idx] if (-1 < idx < len(rows)) else None
                 if selected_row:
                     error_msg = self._table_view.remove_row(selected_row)
                     update = clear_selection = (len(error_msg) == 0)
-            else:
-                ofs = ofs_to_first_drop
-                src_pk_val = args[ofs + num_xref_dropdowns]
-                for subpanel in self.__subpanels:
-                    map_view = subpanel.mapping_view_for_subpanel()
-                    if map_view:
-                        assoc_set = set(args[ofs])
-                        ofs += 1
-                        error_msg = map_view.update_mappings_for(src_pk_val, assoc_set)
-                        if len(error_msg) > 0:
-                            break
-                update = (len(error_msg) == 0)
 
             table_data = self._table_view.rows() if update else dash.no_update
             tooltip_data = self._table_view.tooltip_data_for(table_data) if isinstance(table_data, list) else []
@@ -416,26 +412,61 @@ class _BasePanel:
             idx = selected_rows[0] if (selected_rows and len(selected_rows) > 0) else -1
             return idx < 0
 
-        @app.callback(
-            [Output(f"{pfx}_entry_form", "is_open"), Output(f"{pfx}_entry_hdr", "children"),
-             Output(f"{pfx}_entry_body", "children")],
-            [Input(f"add_{pfx}_btn", "n_clicks"), Input(f"{pfx}_entry_done_btn", "n_clicks")])
-        def callback_on_add_entry(add_btn, cancel_btn):
+        state_vector = [State(f"{attr.id}_input", "value") for attr in self._table_view.attributes()]
+        output_vector = [Output(f"{pfx}_entry_form", "is_open"), Output(f"{pfx}_entry_added_div", "children"),
+                         Output(f"{pfx}_entry_alert", "children"), Output(f"{pfx}_entry_alert", "is_open")]
+        output_vector.extend([Output(f"{attr.id}_input", "value") for attr in self._table_view.attributes()])
+
+        @app.callback(output_vector,
+                      [Input(f"add_{pfx}_btn", "n_clicks"), Input(f"{pfx}_entry_submit_btn", "n_clicks"),
+                       Input(f"{pfx}_entry_done_btn", "n_clicks")],
+                      state_vector)
+        def callback_on_add_entry(add_btn, submit_btn, done_btn, *args):
             """
-            Raise the add-entry modal form to allow user to add new entries to the database table represented in this
-            panel, or lower the form when the user clicks the 'Done' button in the modal footer.
+            Raise/lower the add-entry modal form by which user adds new entries to the database table represented in
+            this panel, or add an entry when the user clicks the submit button in the modal body.
+
+            Relevant triggers and actions taken:
+            1) "Add" button on main panel: Entry widgets are cleared. The "children" property of an invisible DIV in
+            the layout -- {pfx}_need_refresh_div -- is set to the number 0, indicating that no changes have yet been
+            made to the underlying database table. The modal window is raised.
+            2) "Add" button on the modal window: An attempt is made to add an entry to the database table based on the
+            values collected from the form widgets. If successful, the widgets are cleared to indicate that the entry
+            succeeded, and the "children" property of the invisible "entry_added_div" is set to 1. If an error occurred,
+            the Alert component is raised to display the error message, and the widgets are left unchanged.
+            3) "Done" button on the modal window: The modal window is extinguished. Clicking this button will also
+            trigger callback_update_data_table(). That callback will check the "children" property of "entry_added_div"
+            and, if it is not zero, refresh the contents of the panel's data table to reflect the changes made.
             """
             ctx = dash.callback_context
             if not ctx.triggered:
                 raise dash.exceptions.PreventUpdate
 
-            btn_id = ctx.triggered[0]['prop_id'].split('.')[0]
-            if btn_id.find('done') > -1:
-                return False, dash.no_update, dash.no_update
+            attrs = self._table_view.attributes()
+            out = [True, 0, "", False]
+            for attr in attrs:
+                out.append(attr.options[0] if attr.type == 'enum' else "")
 
-            hdr = f"Add {self._table_view.row_label()}"
-            body = self._entry_form()
-            return True, hdr, body
+            btn_id = ctx.triggered[0]['prop_id'].split('.')[0]
+            if btn_id.find(f"{pfx}_entry_done_btn") > -1:
+                out[0] = False
+                out[1] = dash.no_update
+            elif btn_id.find(f"{pfx}_entry_submit_btn") > -1:
+                entry = dict()
+                for i, attr in enumerate(attrs):
+                    entry[attr.id] = str(args[i])
+                error_msg = self._table_view.add_row(entry)
+
+                # on successful add, put 1 (true) in the invisible DIV so that data table will be refreshed when modal
+                # is extinguished; else show error msg and ensure that widget values are not cleared
+                if len(error_msg) == 0:
+                    out[1] = 1
+                else:
+                    out = [dash.no_update] * (4 + len(attrs))
+                    out[2] = error_msg
+                    out[3] = True
+
+            return tuple(out)
 
         if len(self.__subpanels) > 0:
             output_vector = []
@@ -466,47 +497,71 @@ class _BasePanel:
                 return tuple(out)
 
         if num_xref_dropdowns > 0:
+            input_vector = [Input(f"{pfx}_raise_xref_btn", "n_clicks"), Input(f"{pfx}_lower_xref_btn", "n_clicks"),
+                            Input(f"{pfx}_upd_xref_btn", "n_clicks")]
             output_vector1 = [Output(f"{pfx}_upd_xref_modal", "is_open"), Output(f"{pfx}_xref_for", "options"),
-                              Output(f"{pfx}_xref_for", "value")]
+                              Output(f"{pfx}_xref_for", "value"), Output(f"{pfx}_xref_alert", "children"),
+                              Output(f"{pfx}_xref_alert", "color"), Output(f"{pfx}_xref_alert", "is_open"),
+                              Output(f"{pfx}_mapping_updated_div", "children")]
             output_vector2 = []
+            state_vector = [State(f"{pfx}_table", "selected_rows"), State(f"{pfx}_table", "data")]
             for subpanel in self.__subpanels:
                 sub_pfx = subpanel.id_prefix()
                 map_view = subpanel.mapping_view_for_subpanel()
                 if map_view:
                     output_vector1.append(Output(f"{pfx}_{sub_pfx}_drop", "options"))
                     output_vector2.append(Output(f"{pfx}_{sub_pfx}_drop", "value"))
+                    state_vector.append(State(f"{pfx}_{sub_pfx}_drop", "value"))
+            state_vector.append(State(f"{pfx}_xref_for", "value"))
 
-            @app.callback(output_vector1,
-                          [Input(f"{pfx}_raise_xref_btn", "n_clicks"), Input(f"{pfx}_lower_xref_btn", "n_clicks")],
-                          [State(f"{pfx}_table", "selected_rows"), State(f"{pfx}_table", "data")])
-            def callback_on_raise_xref_modal(raise_btn, lower_btn, selected_rows, rows):
+            @app.callback(output_vector1, input_vector, state_vector)
+            def callback_on_raise_xref_modal(*args):
                 """
                 Optional callback -- present only if the panel includes one or more subpanels having a table that is
-                related to the main panel table through an associative view. It raises and lowers the modal form that
-                updates the mapping view for any row in the main table. The single-select dropdown menu "xref_for" is
-                populated with the primary key values of every row in the main table, and the first row or the
-                currently selected row in the main table is chosen as the dropdown initial value V. The multi-select
-                dropdown(s) that define the mappings for V are populated with the primary key values for all rows in
-                the associated table(s).
+                related to the main panel table through an associative view. Raises/lowers the modal window by which
+                user updates the mapping view(s) for any row in the main database table, and also handles an update
+                triggered by pressing the "Update" button in the modal's footer.
 
-                This callback will, in turn, trigger a call to callback_on_select_xref_key(), which will update the
-                current value for each multi-select dropdown that displays the entities in the corresponding subpanel
-                table that are currently mapped to V.
+                Triggers and actions:
+                1) "Related info" button on the main panel: This raises the modal window "upd_xref_modal" by which user
+                updates the mapping(s) for any row in the main data table. The "children" property of the invisible DIV
+                "mapping_updated_div" is reset to 0 to indicate that no changes have been made via this modal window so
+                far. The single-select dropdown menu "xref_for" is populated with the primary key values of every row in
+                the main table, and the first row or the currently selected row in the main table is chosen as the
+                dropdown initial value V. The multi-select dropdown(s) that define the mappings for V are populated with
+                the primary key values for all rows in the associative table(s). Setting the value V in "xref_for" will,
+                in turn, trigger a call to callback_on_select_xref_key(), which will update the current value for each
+                multi-select dropdown to display the entities in the corresponding subpanel table that map to V.
+                2) "Update" button in the modal footer: The user presses this button to confirm any changes made in the
+                multi-select dropdowns. If the relevant mapping views are successfully updated in the database, the
+                Alert component is shown to indicate this fact. If the update fails, the Alert displays the error
+                message and is styled to indicate the failure. On success, the "children" property of "mapping_updated"
+                DIV is set to 1; otherwise it is left unchanged.
+                3) "Done" button in the modal footer: This extinguishes the modal window without changing most of the
+                other output properties -- particularly, the "children" property of the "mapping_updated" DIV. Clicking
+                this button will also trigger callback_update_data_table(), which checks the "mapping_updated" DIV to
+                see if any changes occurred while the modal window was raised.
                 """
                 ctx = dash.callback_context
                 if not ctx.triggered:
                     raise dash.exceptions.PreventUpdate
-                out = [False, dash.no_update, dash.no_update]
+
+                # output vector is initialized for the correct response to extinguishing the modal window
+                out = [False, dash.no_update, "", "", "success", False, dash.no_update]
                 out.extend([dash.no_update for _ in range(num_xref_dropdowns)])
+
                 btn_id = ctx.triggered[0]['prop_id'].split('.')[0]
+                selected_rows = args[3]
+                rows = args[4]
                 idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
                 selected_row = rows[idx] if (-1 < idx < len(rows)) else None
-                if (len(rows) > 0) and (btn_id.find('raise') > -1):
+                if (len(rows) > 0) and (btn_id.find('raise_xref_btn') > -1):
                     src_pk = list(self._table_view.primary_key_ids())[0]  # There should only be one PK attribute!
                     out[0] = True
                     out[1] = [{'label': row[src_pk], 'value': row[src_pk]} for row in rows]
                     out[2] = selected_row[src_pk] if selected_row else rows[0][src_pk]
-                    ofs = 3
+                    out[6] = 0
+                    ofs = 7
                     for subpanel in self.__subpanels:
                         map_view = subpanel.mapping_view_for_subpanel()
                         if map_view:
@@ -516,6 +571,26 @@ class _BasePanel:
                             else:
                                 out[ofs] = list()
                             ofs += 1
+                elif btn_id.find('upd_xref_btn') > -1:
+                    src_pk_val = args[-1]
+                    ofs = 5  # points to State(first_drop, "value")
+                    error_msg = ""
+                    for subpanel in self.__subpanels:
+                        map_view = subpanel.mapping_view_for_subpanel()
+                        if map_view:
+                            assoc_set = set(args[ofs])
+                            ofs += 1
+                            error_msg = map_view.update_mappings_for(src_pk_val, assoc_set)
+                            if len(error_msg) > 0:
+                                break
+                    ok = (len(error_msg) == 0)
+
+                    out[0] = out[1] = out[2] = dash.no_update
+                    out[3] = "Updated successfully." if ok else error_msg
+                    out[4] = "success" if ok else "danger"
+                    out[5] = True
+                    out[6] = 1 if ok else dash.no_update
+
                 return tuple(out)
 
             @app.callback(output_vector2, [Input(f"{pfx}_xref_for", "value")])
@@ -573,7 +648,7 @@ class SubjectPanel(_BasePanel):
             dbc.Collapse(
                 dbc.Card(
                     dbc.CardBody([], id="implhist_panel")
-                    ),
+                ),
                 id=f"implhist_collapse", className="mt-3")
         ])
         return base_layout

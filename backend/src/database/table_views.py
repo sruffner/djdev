@@ -151,7 +151,7 @@ def json_parse(file_obj, decoder: JSONDecoder = JSONDecoder(), buffer_size: int 
 
 
 _nt_TableAttr = namedtuple("TableAttr", [
-    'id', 'label', 'type', 'pkey', 'options', 'textrange', 'regex', 'placeholder', 'col_width'
+    'id', 'label', 'type', 'pkey', 'options', 'textrange', 'regex', 'regex_hint', 'placeholder', 'col_width'
     ])
 
 
@@ -167,6 +167,9 @@ class TableAttr(_nt_TableAttr):
         'textrange' - (List[int], None) The [min, max] number of allowed characters in a valid attribute value.
         'regex' - (str, None) For certain 'text' attributes, this is a regular expression that must be satisfied by
             the attribute value. Will be None for all other types and for unrestricted 'text' attributes.
+        'regex_hint' - (str, None) For 'text' attributes validated by a regular expression, this is a user-facing
+            message that further describes the domain of valid attribute values. It will be included in the error
+            message when a proposed attribute value does not satisfy the regular expression.
         'placeholder' - (str, None) Brief string intended as placeholder for attribute value in an input widget; it
             should characterize the domain of valid attribute values. Not applicable to all attribute types.
         'col_width' - (str) The suggested column width for the attribute value when displaying table contents in a
@@ -593,39 +596,39 @@ class BaseTableView:
             attr_value = ""
         if attr.pkey:
             if attr_value == "":
-                raise ValueError(f"Missing value for primary key attribute: '{attr.id}'")
+                raise ValueError(f"Missing value for primary key attribute: '{attr.label}'")
         if attr.type == 'fkey':
             foreign_table_class: dj.Table
             foreign_table_class, fk_attr_id = self._foreign_key_descriptor(attr)
             restriction = f'{fk_attr_id} = "{attr_value}"'
             try:
                 if not bool(foreign_table_class & restriction):
-                    raise ValueError(f"Missing foreign key: {attr.id} = '{attr_value}'")
+                    raise ValueError(f"Missing foreign key: '{attr.label}' = '{attr_value}'")
             except DataJointError:
-                raise ValueError(f"Database error. Unable to verify foreign key: {attr.id} = '{attr_value}'")
+                raise ValueError(f"Database error. Unable to verify foreign key: '{attr.label}' = '{attr_value}'")
         elif attr.type == 'enum':
             if not (attr_value in attr.options):
-                raise ValueError(f"Invalid option for {attr.id}: '{attr_value}'")
+                raise ValueError(f"Invalid option for '{attr.label}': '{attr_value}'")
         elif attr.type == 'date':
             try:
                 date_obj = date.fromisoformat(attr_value)
                 if not ((date_obj.year > 1899) and (date_obj < date.today())):
                     raise ValueError("out of range")
             except(TypeError, ValueError):
-                raise ValueError("Date is invalid, earlier than 1900-01-01, or in the future.")
+                raise ValueError(f"'{attr.label}': Date is invalid, earlier than 1900-01-01, or in the future.")
         elif attr.type == 'float':
             try:
                 float(attr_value)
             except(TypeError, ValueError):
-                raise ValueError(f"{attr.id} = '{attr_value}' cannot be parsed as a floating-point value")
+                raise ValueError(f"'{attr.label}' = '{attr_value}' cannot be parsed as a floating-point value")
         else:
             if attr.textrange:
                 min_len, max_len = attr.textrange
                 if (len(attr_value) < min_len) | (len(attr_value) > max_len):
-                    raise ValueError(f"{attr.id} must be {min_len}-{max_len} characters long.")
+                    raise ValueError(f"'{attr.label}': Value must be {min_len}-{max_len} characters long.")
             if attr.regex:
                 if re.fullmatch(attr.regex, attr_value) is None:
-                    raise ValueError(f"Invalid value for {attr.id}.")
+                    raise ValueError(f"Invalid value for {attr.label}: {attr.regex_hint}")
 
 
 class MappingView:
@@ -777,16 +780,19 @@ class UserView(BaseTableView):
     def __init__(self):
         attrs = [
             TableAttr('username', 'Username', 'text', True, None, [3, 20], r"^[a-z]{1}[a-z0-9]{2,19}$",
+                      'Contains an invalid character or does not start with lowercase a-z',
                       'Enter username (unique, lowercase a-z or digit, 3-20 characters)', '100px'),
             TableAttr('full_name', 'Full Name', 'text', False, None, [3, 50],
                       r"^[A-Z][a-zA-Z'-]{3,}(?: [A-Z][a-zA-Z'-]*){0,2}$",
+                      "Too many names, not capitalized, or contains a character other than [A-Za-z'-]",
                       'Enter full name (as it would appear in publication; 50 chars max)', '150px'),
             TableAttr('contact_email', 'Email Address', 'email', False, None, [7, 80],
                       r'^[A-Za-z0-9._+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,6}$',
+                      'Does not appear to be a valid email address',
                       'Enter email address (80 chars max)', '200px'),
             TableAttr('role', 'Role', 'enum', False,
                       ["Principal Investigator", "Post Doctoral Researcher", "Graduate Student", "Administrator"],
-                      None, None, None, '150px')
+                      None, None, None, None, '150px')
         ]
         super().__init__(sgl.User(), 'Lab members', 'member', attrs)
 
@@ -803,9 +809,10 @@ class RigView(BaseTableView):
     def __init__(self):
         attrs = [
             TableAttr('rig_id', 'Rig ID', 'text', True, None, [1, 10], r'^[A-Z]{1}[\w .-]{0,9}$',
+                      'Does not start with capital A-Z or contains an invalid character',
                       'Enter short rig name, eg "Rm 1A" (unique, 1-10 characters)', '100px'),
             TableAttr('rig_loc', 'Location', 'text', False, None, [0, 50], r'[\s\S]*',
-                      'Enter rig location (eg, building and room number) [optional, up to 50 chars]', '500px'),
+                      'Enter rig location (eg, building and room number) [optional, up to 50 chars]', '', '500px'),
         ]
         super().__init__(sgl.Rig(), 'Experiment rigs', 'rig', attrs)
 
@@ -829,17 +836,17 @@ class _SubjectImplantView(BaseTableView):
             table view exposes the entire table. Defaults to None.
         """
         attrs = [
-            TableAttr('subj_id', 'Subject ID', 'fkey', True, None, None, None, None, None),
-            TableAttr('implant_date', 'Surgery Date', 'data', True, None, [10, 10], None, 'YYYY-MM-DD', '100px'),
-            TableAttr('st_ap', 'AP (mm)', 'float', False, None, [1, 10], None,
+            TableAttr('subj_id', 'Subject ID', 'fkey', True, None, None, None, None, None, None),
+            TableAttr('implant_date', 'Surgery Date', 'data', True, None, [10, 10], None, None, 'YYYY-MM-DD', '100px'),
+            TableAttr('st_ap', 'AP (mm)', 'float', False, None, [1, 10], None, None,
                       'Enter anterior-posterior coordinate of cylinder implant, in millimeters', '75px'),
-            TableAttr('st_ml', 'ML (mm)', 'float', False, None, [1, 10], None,
+            TableAttr('st_ml', 'ML (mm)', 'float', False, None, [1, 10], None, None,
                       'Enter medial-lateral coordinate of cylinder implant, in millimeters', '75px'),
-            TableAttr('st_dv', 'DV (mm)', 'float', False, None, [1, 10], None,
+            TableAttr('st_dv', 'DV (mm)', 'float', False, None, [1, 10], None, None,
                       'Enter dorsal-ventral coordinate of cylinder implant, in millimeters', '75px'),
-            TableAttr('ap_angle', 'AP angle (deg)', 'float', False, None, [1, 10], None,
+            TableAttr('ap_angle', 'AP angle (deg)', 'float', False, None, [1, 10], None, None,
                       'Enter cylinder angle relative to anterior-posterior axis, in degrees CCW', '75px'),
-            TableAttr('ml_angle', 'ML angle (deg)', 'float', False, None, [1, 10], None,
+            TableAttr('ml_angle', 'ML angle (deg)', 'float', False, None, [1, 10], None, None,
                       'Enter cylinder angle relative to medial-dorsal axis, in degrees CCW', '75px'),
         ]
         restrict = ('subj_id', subj_id) if subj_id else None
@@ -877,11 +884,12 @@ class SubjectView(BaseTableView):
     def __init__(self):
         attrs = [
             TableAttr('subj_id', 'Subject ID', 'text', True, None, [3, 20], r"^[a-zA-z]{3,20}$",
+                      'May only contain the letters A-Z (uppercase or lowercase)',
                       'Enter subject ID/nickname (unique, 3-20 characters)', '150px'),
             TableAttr('species', 'Species', 'enum', False, ["Macaca mulatta", "Homo sapiens"],
-                      None, None, None, '150px'),
-            TableAttr('dob', 'Date of Birth', 'date', False, None, [10, 10], None, 'YYYY-MM-DD', '150px'),
-            TableAttr('sex', 'Sex', 'enum', False, ['M', 'F', '?'], None, None, None, '150px')
+                      None, None, None, None, '150px'),
+            TableAttr('dob', 'Date of Birth', 'date', False, None, [10, 10], None, None, 'YYYY-MM-DD', '150px'),
+            TableAttr('sex', 'Sex', 'enum', False, ['M', 'F', '?'], None, None, None, None, '150px')
         ]
         super().__init__(sgl.Subject(), 'Experiment subjects', 'subject', attrs)
 
@@ -908,8 +916,9 @@ class NeuronTypeView(BaseTableView):
     def __init__(self):
         attrs = [
             TableAttr('neuron_type', 'Neuron Type', 'text', True, None, [1, 20], r'^[A-Z]{1}[\w .-]{0,19}$',
+                      'Contains an invalid character or is not capitalized',
                       'Enter concise name or abbreviation of neuron type (unique, 1-20 characters)', '100px'),
-            TableAttr('neuron_type_desc', 'Description', 'text', False, None, [0, 255], r'[\s\S]*',
+            TableAttr('neuron_type_desc', 'Description', 'text', False, None, [0, 255], r'[\s\S]*', '',
                       'Enter a longer description of the neuron type (optional, up to 255 chars)', '500px')
         ]
         super().__init__(sgl.NeuronType(), 'Neuron Types', 'neuron type', attrs)
@@ -939,8 +948,9 @@ class BrainRegionView(BaseTableView):
     def __init__(self):
         attrs = [
             TableAttr('brain_area', 'Brain Region', 'text', True, None, [1, 20], r'^[A-Z]{1}[\w .-]{0,19}$',
+                      'Contains an invalid character or is not capitalized',
                       'Enter short name for brain region (unique, 1-10 characters)', '100px'),
-            TableAttr('brain_area_desc', 'Description', 'text', False, None, [0, 255], r'[\s\S]*',
+            TableAttr('brain_area_desc', 'Description', 'text', False, None, [0, 255], r'[\s\S]*', '',
                       'Enter a longer description of the brain region (optional, up to 255 chars)', '400px')
         ]
         super().__init__(sgl.BrainArea(), 'Brain regions', 'region', attrs)
@@ -984,10 +994,11 @@ class PublicationView(BaseTableView):
     def __init__(self):
         attrs = [
             TableAttr('pub_id', 'Publication ID', 'text', True, None, [3, 20], r'^[\w .-]{3,20}$',
+                      'Must contain only Unicode word characters, plus spaces, periods or dashes',
                       'Enter publication nickname/ID (unique, 3-20 characters)', '120px'),
-            TableAttr('citation', 'Citation', 'text', False, None, [50, 300], r'^[\s\S]{50,300}$',
+            TableAttr('citation', 'Citation', 'text', False, None, [50, 300], r'^[\s\S]{50,300}$', '',
                       'Enter formal citation (50-300 chars)', '480px'),
-            TableAttr('doi', 'DOI', 'text', False, None, [0, 100], r'[\s\S]*',
+            TableAttr('doi', 'DOI', 'text', False, None, [0, 100], r'[\s\S]*', '',
                       "Enter publication's digital object ID (optional; 100 chars max)", '0px')
         ]
         super().__init__(sgl.Publication(), 'Publications', 'publication', attrs)
@@ -1044,6 +1055,7 @@ class KeywordView(BaseTableView):
     def __init__(self):
         attrs = [
             TableAttr('keyword', 'Keyword', 'text', True, None, [3, 20], r'^[\w .-]{3,20}$',
+                      'Must contain only Unicode word characters, plus spaces, periods or dashes',
                       'Enter new, unique keyword (3-20 characters)', '600px')
         ]
         super().__init__(sgl.Keyword(), 'Research keywords', 'keyword', attrs)
@@ -1068,9 +1080,10 @@ class StudyView(BaseTableView):
     def __init__(self):
         attrs = [
             TableAttr('study', 'Project ID', 'text', True, None, [3, 20], r'^[\w .-]{3,20}$',
+                      'Must contain only Unicode word characters, plus spaces, periods or dashes',
                       'Enter project ID/nickname (unique, 3-20 characters)', '150px'),
-            TableAttr('study_lead', 'Prj Lead', 'fkey', False, None, None, None, None, '150px'),
-            TableAttr('study_desc', 'Description', 'text', False, None, [0, 2048], r'[\s\S]*',
+            TableAttr('study_lead', 'Prj Lead', 'fkey', False, None, None, None, None, None, '150px'),
+            TableAttr('study_desc', 'Description', 'text', False, None, [0, 2048], r'[\s\S]*', '',
                       'Enter a description of the research project (optional, up to 2048 chars)', '700px')
         ]
         super().__init__(sgl.Study(), 'Research projects', 'project', attrs)
