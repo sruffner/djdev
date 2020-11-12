@@ -146,9 +146,10 @@ class Rig(dj.Manual):
 class BrainArea(dj.Manual):
     definition = """
     # Brain regions investigated in laboratory experiments
-    brain_area : varchar(20)            # Concise abbreviation for brain region (unique)
+    ba_id : int auto_increment          # Opaque ID# for brevity (not intended for display)
     ---
-    brain_area_desc : varchar(255)      # Longer name for brain region, with description if necessary
+    ba_name : varchar(50)               # The name of the brain region. Must be unique.
+    unique index (ba_name)
     """
 
 
@@ -156,9 +157,10 @@ class BrainArea(dj.Manual):
 class NeuronType(dj.Manual):
     definition = """
     # Types of neurons studied in laboratory experiments
-    neuron_type : varchar(20)           # Concise name or abbreviation for the neuron type (unique)
+    nt_id : int auto_increment          # Opaque ID# for brevity (not intended for display)
     ---
-    neuron_type_desc : varchar(255)     # Longer description for the neuron type
+    nt_name : varchar(50)               # The name of the neuron type. Must be unique.
+    unique index (nt_name)
     """
 
 
@@ -175,10 +177,12 @@ class BrainAreaNeuronType(dj.Manual):
 class Study(dj.Manual):
     definition = """
     # Research projects/studies conducted in the laboratory
-    study : varchar(20)                 # Short nickname for the study
+    study_id: int auto_increment        # Opaque ID# for brevity (not intended for display)
     ---
+    study_title : varchar(50)           # Abbreviated project title. Must be unique.
     (study_lead) -> User                # Lab member with primary responsibility for the study
     study_desc : varchar(2048)          # A fuller description of the project
+    unique index (study_title)
     """
 
 
@@ -186,7 +190,10 @@ class Study(dj.Manual):
 class Keyword(dj.Manual):
     definition = """
     # Keywords categorizing laboratory research
-    keyword : varchar(20)               # The keyword
+    kw_id : int auto_increment          # Opaque ID# for brevity (not intended for display)
+    ---
+    keyword : varchar(80)             # The keyword or phrase. Must be unique.
+    unique index (keyword)
     """
 
 
@@ -203,10 +210,11 @@ class StudyKeyword(dj.Manual):
 class Publication(dj.Manual):
     definition = """
     # Research publications by members of the laboratory
-    pub_id: varchar(20)                 # A short, abbreviated name for the publication (must be unique)
+    pub_id: int auto_increment          # Opaque ID# for brevity (not intended for display)
     ---
-    doi  : varchar(100)                 # Digital Object Identifier for the publication
-    citation : varchar(255)             # Formal citation of research article
+    citation : varchar(500)             # Formal citation of research article
+    doi : varchar(100)                  # Digital Object Identifier for the publication. Must be unique.
+    unique index (doi)
     """
 
 

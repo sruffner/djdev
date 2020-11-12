@@ -21,52 +21,34 @@
 { "table": "SubjectImplant", "entry": {"subj_id": "yolanda", "implant_date": "2020-01-08", "st_ap": "4", "st_ml": "3", "st_dv": "5", "ap_angle": "8.6", "ml_angle": "15.2"}}
 { "table": "SubjectImplant", "entry": {"subj_id": "yolanda", "implant_date": "2019-06-09", "st_ap": "12", "st_ml": "14", "st_dv": "8", "ap_angle": "0", "ml_angle": "11"}}
 
-{ "table": "BrainArea", "entry": {"brain_area": "Cortex", "brain_area_desc": ""}}
-{ "table": "BrainArea", "entry": {"brain_area": "Fake_reg", "brain_area_desc": "Some imaginary area in the brain."}}
-{ "table": "BrainArea", "entry": {"brain_area": "Fake_reg2", "brain_area_desc": "Another imaginary area in the brain."}}
-{ "table": "BrainArea", "entry": {"brain_area": "Flocculus", "brain_area_desc": "This is a description of the flocculus.\nIt consists of three text lines.\nHere is the third one."}}
-{ "table": "BrainArea", "entry": {"brain_area": "Hippocampus", "brain_area_desc": "Do we really need a description attribute?"}}
-{ "table": "BrainArea", "entry": {"brain_area": "Vermis",
-"brain_area_desc": "Here is a two-line description of the oculomotor vermis (is there another kind of vermis?).\nHere is the second line."}}
+{ "table": "BrainArea", "entry": {"ba_name": "Cortex"}}
+{ "table": "BrainArea", "entry": {"ba_name": "Amygdala"}}
+{ "table": "BrainArea", "entry": {"ba_name": "Medulla oblongata"}}
+{ "table": "BrainArea", "entry": {"ba_name": "Flocculus"}}
+{ "table": "BrainArea", "entry": {"ba_name": "Hippocampus"}}
+{ "table": "BrainArea", "entry": {"ba_name": "Vermis"}}
 
-{ "table": "NeuronType", "entry": {"neuron_type": "Golgi cell",
-"neuron_type_desc": "Here is a placeholder description for a Golgi cell. Here is a second sentence about the Golgi cell so that the description is uselessly long. Garbage, garbage, garbage."}}
-{ "table": "NeuronType", "entry": {"neuron_type": "Granule cell", "neuron_type_desc": "Here is a description of the granule cell type."}}
-{ "table": "NeuronType", "entry": {"neuron_type": "Purkinje cell", "neuron_type_desc": "Here is a description of the Purkinje cell type."}}
-{ "table": "NeuronType", "entry": {"neuron_type": "Stellate",
-"neuron_type_desc": "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat."}}
-{ "table": "NeuronType", "entry": {"neuron_type": "Super cell", "neuron_type_desc": "An imaginary type of neuron in the brain."}}
-{ "table": "NeuronType", "entry": {"neuron_type": "Unipolar brush", "neuron_type_desc": "Here is a description."}}
-{ "table": "NeuronType", "entry": {"neuron_type": "Unknown", "neuron_type_desc": "A generic uncharacterized neuron"}}
+{ "table": "NeuronType", "entry": {"nt_name": "Golgi cell"}}
+{ "table": "NeuronType", "entry": {"nt_name": "Granule cell"}}
+{ "table": "NeuronType", "entry": {"nt_name": "Purkinje cell"}}
+{ "table": "NeuronType", "entry": {"nt_name": "Stellate"}}
+{ "table": "NeuronType", "entry": {"nt_name": "Unipolar brush"}}
+{ "table": "NeuronType", "entry": {"nt_name": "Unknown"}}
 
-{ "table": "BrainAreaNeuronType", "entry": {"brain_area": "Cortex", "neuron_type": "Unknown"}}
-{ "table": "BrainAreaNeuronType", "entry": {"brain_area": "Fake_reg", "neuron_type": "Purkinje cell"}}
-{ "table": "BrainAreaNeuronType", "entry": {"brain_area": "Fake_reg", "neuron_type": "Golgi cell"}}
-{ "table": "BrainAreaNeuronType", "entry": {"brain_area": "Fake_reg", "neuron_type": "Unknown"}}
-{ "table": "BrainAreaNeuronType", "entry": {"brain_area": "Fake_reg2", "neuron_type": "Golgi cell"}}
-{ "table": "BrainAreaNeuronType", "entry": {"brain_area": "Fake_reg2", "neuron_type": "Unknown"}}
-{ "table": "BrainAreaNeuronType", "entry": {"brain_area": "Flocculus", "neuron_type": "Granule cell"}}
-{ "table": "BrainAreaNeuronType", "entry": {"brain_area": "Hippocampus", "neuron_type": "Stellate"}}
-{ "table": "BrainAreaNeuronType", "entry": {"brain_area": "Hippocampus", "neuron_type": "Super cell"}}
-{ "table": "BrainAreaNeuronType", "entry": {"brain_area": "Hippocampus", "neuron_type": "Unknown"}}
-{ "table": "BrainAreaNeuronType", "entry": {"brain_area": "Vermis", "neuron_type": "Purkinje cell"}}
-{ "table": "BrainAreaNeuronType", "entry": {"brain_area": "Vermis", "neuron_type": "Golgi cell"}}
-{ "table": "BrainAreaNeuronType", "entry": {"brain_area": "Vermis", "neuron_type": "Unknown"}}
-
-{ "table": "Study", "entry": {"study": "Pursuit_with_deficit", "study_lead": "sruffner",
+{ "table": "Study", "entry": {"study_title": "Pursuit with deficit", "study_lead": "sruffner",
 "study_desc": "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum."}}
-{ "table": "Study", "entry": {"study": "Search_with_Cue", "study_lead": "dhr",
+{ "table": "Study", "entry": {"study_title": "Search with cues", "study_lead": "dhr",
 "study_desc": "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Felis eget nunc lobortis mattis. Leo vel orci porta non pulvinar neque laoreet. Quis blandit turpis cursus in. Non curabitur gravida arcu ac tortor dignissim convallis. Non diam phasellus vestibulum lorem sed. Sed pulvinar proin gravida hendrerit lectus a. At quis risus sed vulputate odio ut enim blandit. Pulvinar elementum integer enim neque. Quis viverra nibh cras pulvinar mattis. Odio pellentesque diam volutpat commodo sed egestas. Venenatis a condimentum vitae sapien pellentesque. Felis eget velit aliquet sagittis. Fermentum iaculis eu non diam phasellus. Ornare massa eget egestas purus viverra accumsan in nisl nisi. Sapien et ligula ullamcorper malesuada proin. Nulla facilisi etiam dignissim diam quis. Tempor commodo ullamcorper a lacus. Sit amet tellus cras adipiscing enim eu turpis egestas pretium. Quis auctor elit sed vulputate.\n\nNulla facilisi cras fermentum odio. In hac habitasse platea dictumst vestibulum rhoncus est. Sapien et ligula ullamcorper malesuada proin libero nunc. Consectetur purus ut faucibus pulvinar. At urna condimentum mattis pellentesque id nibh tortor. Pulvinar elementum integer enim neque volutpat ac tincidunt vitae. Ultricies lacus sed turpis tincidunt id aliquet risus feugiat in. Vitae nunc sed velit dignissim sodales."}}
 
-{ "table": "Publication", "entry": {"pub_id": "dir_learning_pursuit", "doi": "https:\/\/doi.org\/10.1152\/jn.00261.2018",
+{ "table": "Publication", "entry": {"doi": "https:\/\/doi.org\/10.1152\/jn.00261.2018",
 "citation": "Hall, Nathan J., Yan Yang, and Stephen G. Lisberger. \u0022Multiple components in direction learning in smooth pursuit eye movements of monkeys.\u0022 J Neurophysiol 120, no. 4 (October 1, 2018): 2020–35."}}
-{ "table": "Publication", "entry": {"pub_id": "learning_dh", "doi": "https:\/\/doi.org\/10.7554\/eLife.55217",
+{ "table": "Publication", "entry": {"doi": "https:\/\/doi.org\/10.7554\/eLife.55217",
 "citation": "Herzfeld, David J., Nathan J. Hall, Marios Tringides, and Stephen G. Lisberger. \u0022Principles of operation of a cerebellar learning circuit.\u0022 Elife 9 (April 30, 2020)."}}
-{ "table": "Publication", "entry": {"pub_id": "mod_pursuit", "doi": "https:\/\/doi.org\/10.1152\/jn.00710.2019",
+{ "table": "Publication", "entry": {"doi": "https:\/\/doi.org\/10.1152\/jn.00710.2019",
 "citation": "Behling, Stuart, and Stephen G. Lisberger. \u0022Different mechanisms for modulation of the initiation and steady-state of smooth pursuit eye movements.\u0022 J Neurophysiol 123, no. 3 (March 1, 2020): 1265–76."}}
-{ "table": "Publication", "entry": {"pub_id": "purkinje_pursuit", "doi": "https:\/\/doi.org\/10.1152\/jn.00209.2017",
+{ "table": "Publication", "entry": {"doi": "https:\/\/doi.org\/10.1152\/jn.00209.2017",
 "citation": "Raghavan, Ramanujan T, and Stephen G Lisberger. \u0022Responses of Purkinje cells in the oculomotor vermis of monkeys during smooth pursuit eye movements and saccades: comparison with floccular complex.\u0022 J Neurophysiol 118, no. 2 (August 1, 2017): 986–1001."}}
-{ "table": "Publication", "entry": {"pub_id": "resp_latency", "doi": "https:\/\/doi.org\/10.109\/cercor\/bhz294",
+{ "table": "Publication", "entry": {"doi": "https:\/\/doi.org\/10.109\/cercor\/bhz294",
 "citation": "Lee, Joonyeol, Timothy R. Darlington, and Stephen G. Lisberger. \u0022The Neural Basis for Response Latency in a Sensory-Motor Behavior.\u0022 Cereb Cortex 30, no. 5 (May 14, 2020): 3055–73."}}
 
 { "table": "Keyword", "entry": {"keyword": "cerebellum"}}
@@ -85,11 +67,3 @@
 { "table": "Keyword", "entry": {"keyword": "smooth pursuit"}}
 { "table": "Keyword", "entry": {"keyword": "transfer of memory"}}
 { "table": "Keyword", "entry": {"keyword": "visual motion"}}
-
-{ "table": "StudyPublication", "entry": {"study": "Search_with_Cue", "pub_id": "learning_dh"}}
-
-{ "table": "StudyKeyword", "entry": {"study": "Pursuit_with_deficit", "keyword": "motor learning"}}
-{ "table": "StudyKeyword", "entry": {"study": "Pursuit_with_deficit", "keyword": "sensory-motor adapt."}}
-{ "table": "StudyKeyword", "entry": {"study": "Pursuit_with_deficit", "keyword": "cerebellum"}}
-{ "table": "StudyKeyword", "entry": {"study": "Search_with_Cue", "keyword": "cerebellum"}}
-{ "table": "StudyKeyword", "entry": {"study": "Search_with_Cue", "keyword": "smooth pursuit"}}

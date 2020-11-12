@@ -44,8 +44,7 @@ class _BasePanel:
     The base implementation displays the contents of the underlying table view in a Dash DataTable with single-row
     selection. An "Add" button raises a modal form by which the user can add one or more entries to the table. A
     "Remove" button -- enabled only when an entry is selected in the DataTable -- triggers removal of the selected
-    entity. Any caught errors are displayed in a Dash Bootstrap "Toast" element that pops up in the top-right corner
-    of the web page.
+    entity.
 
     In addition, _BasePanel supports the display of subpanels -- which also descend from _BasePanel -- within an
     "accordion"-style widget below the main table. This design compactly encapsulates table views that are related to
@@ -54,6 +53,9 @@ class _BasePanel:
     mapping relationship, and each table view in a subpanel is the "destination table". When such subpanels are
     included, _BasePanel includes a "Related information" button that raises a modal form by which the user can select
     which entities in a "destination" table are related to a selected entity from the source table.
+
+    Any caught errors are displayed in a Dash Bootstrap "Alert" element either below the DataTable in the panel or on
+    one of the modal entry forms.
 
     The implementation of _BasePanel is rather complex in order to accommodate the various manual tables in the
     Lisberger lab database and their relationships. On the other hand, that serves to simplify the definition of the
@@ -67,7 +69,7 @@ class _BasePanel:
         the table or removing a selected entity.
 
         If the main table view is related to another table view, that latter view can be displayed in a subpanel that,
-        in turn, is embedded in an accordion-style widget within the main panel. Furthermore, if the two view are
+        in turn, is embedded in an accordion-style widget within the main panel. Furthermore, if the two views are
         related through a cross-reference or associative table, the subpanel should expose that mapping via the
         mapping_view_for_subpanel() method. In that scenario, the parent _BasePanel() will provide the infrastructure
         for selecting what entity(ies) in the subpanel table view are related to a given entity in the parent panel
@@ -147,12 +149,14 @@ class _BasePanel:
                 ],
                 id=f"{pfx}_entry_form", backdrop="static", size="xl", centered=True
             ),
-            # the number inside this invisible DIV is set to 1 if any changes are made in the add-entry modal window
+            # the number inside this invisible DIV is reset to 0 when the add-entry modal window is raised and set to
+            # 1 if any changes are made in the add-entry modal window while it is open
             html.Div(children=0, id=f"{pfx}_entry_added_div", style={"display": "none"}),
         ]
 
         accordion_cards = []
         assoc_form_grps = []
+        related_btn_labels = []
         for subpanel in self.__subpanels:
             sub_pfx = subpanel.id_prefix()
             card = dbc.Card([
@@ -170,6 +174,7 @@ class _BasePanel:
                     dcc.Dropdown(id=f"{pfx}_{sub_pfx}_drop", multi=True, clearable=True, searchable=False),
                     dbc.FormText(f"Use the dropdown to select any related {subpanel.tab_label().lower()}")
                 ]))
+                related_btn_labels.append(subpanel.tab_label().lower())
 
         if len(assoc_form_grps) > 0:
             xref_selector = dbc.InputGroup([
@@ -186,7 +191,8 @@ class _BasePanel:
                           fade=True, is_open=False, className="mt-2 mb-1")
             )
             layout.append(
-                dbc.Button("Related info", id=f"{pfx}_raise_xref_btn", color="primary", className="mr-2 mt-3")
+                dbc.Button("Related " + ", ".join(related_btn_labels),
+                           id=f"{pfx}_raise_xref_btn", color="primary", className="mr-2 mt-3")
             )
             layout.append(
                 dbc.Modal(
@@ -394,7 +400,8 @@ class _BasePanel:
                     update = clear_selection = (len(error_msg) == 0)
 
             table_data = self._table_view.rows() if update else dash.no_update
-            tooltip_data = self._table_view.tooltip_data_for(table_data) if isinstance(table_data, list) else []
+            tooltip_data = \
+                self._table_view.tooltip_data_for(table_data) if isinstance(table_data, list) else dash.no_update
             return table_data, tooltip_data, [] if clear_selection else dash.no_update, error_msg, len(error_msg) > 0
 
         @app.callback(Output(f"del_{pfx}_btn", "disabled"), [Input(f"{pfx}_table", "selected_rows")])
@@ -523,7 +530,7 @@ class _BasePanel:
                 triggered by pressing the "Update" button in the modal's footer.
 
                 Triggers and actions:
-                1) "Related info" button on the main panel: This raises the modal window "upd_xref_modal" by which user
+                1) "Related ..." button on the main panel: This raises the modal window "upd_xref_modal" by which user
                 updates the mapping(s) for any row in the main data table. The "children" property of the invisible DIV
                 "mapping_updated_div" is reset to 0 to indicate that no changes have been made via this modal window so
                 far. The single-select dropdown menu "xref_for" is populated with the primary key values of every row in
@@ -556,9 +563,10 @@ class _BasePanel:
                 idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
                 selected_row = rows[idx] if (-1 < idx < len(rows)) else None
                 if (len(rows) > 0) and (btn_id.find('raise_xref_btn') > -1):
-                    src_pk = list(self._table_view.primary_key_ids())[0]  # There should only be one PK attribute!
+                    src_pk = self._table_view.auto_primary_key_id()
                     out[0] = True
-                    out[1] = [{'label': row[src_pk], 'value': row[src_pk]} for row in rows]
+                    row_aliases = sorted([self._table_view.to_row_alias(row) for row in rows], key=lambda x: x.label)
+                    out[1] = [{'label': r.label, 'value': r.pk[src_pk], 'title': r.tip} for r in row_aliases]
                     out[2] = selected_row[src_pk] if selected_row else rows[0][src_pk]
                     out[6] = 0
                     ofs = 7
@@ -567,7 +575,9 @@ class _BasePanel:
                         if map_view:
                             all_options = map_view.mappings_for(None)
                             if all_options:
-                                out[ofs] = [{'label': opt, 'value': opt} for opt in sorted(all_options)]
+                                dst_pk = map_view.to_key()
+                                out[ofs] = [{'label': opt.label, 'value': opt.pk[dst_pk], 'title': opt.tip}
+                                            for opt in all_options]
                             else:
                                 out[ofs] = list()
                             ofs += 1
@@ -598,8 +608,8 @@ class _BasePanel:
                 """
                 Optional callback -- present only if the panel includes one or more subpanels having a table that is
                 related to the main panel table through an associative view. Whenever the main table entity selected
-                in the "xref_for" dropdown changes, the current value(s) in the multi-select dropdown(s) are updated
-                to reflect the current mapping table view(s).
+                in the "xref_for" dropdown in the modal window changes, the current value(s) in the multi-select
+                dropdown(s) in that same window are updated to reflect the current mapping table view(s).
                 """
                 ctx = dash.callback_context
                 if not ctx.triggered:
@@ -608,8 +618,9 @@ class _BasePanel:
                 for subpanel in self.__subpanels:
                     map_view = subpanel.mapping_view_for_subpanel()
                     if map_view:
-                        curr_value = map_view.mappings_for(src_pk_val)
-                        out.append(list(curr_value) if curr_value else list())
+                        curr_mapped_list = map_view.mappings_for(src_pk_val) if src_pk_val else None
+                        dst_pk = map_view.to_key()
+                        out.append([alias.pk[dst_pk] for alias in curr_mapped_list] if curr_mapped_list else list())
                 return tuple(out)
 
 

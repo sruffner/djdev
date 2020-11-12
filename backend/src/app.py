@@ -15,6 +15,6 @@ app.config.suppress_callback_exceptions = True
 dj.config['database.host'] = 'db'
 dj.config['database.user'] = 'root'
 dj.config['safemode'] = False
-if not 'MYSQL_ROOT_PASSWORD' in os.environ:
+if 'MYSQL_ROOT_PASSWORD' not in os.environ:
     raise RuntimeError('The environment variable MYSQL_ROOT_PASSWORD is required.')
 dj.config['database.password'] = os.environ['MYSQL_ROOT_PASSWORD']
