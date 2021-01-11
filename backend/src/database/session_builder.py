@@ -120,11 +120,13 @@ class SessionBuilder(object):
             client_state (dict): This is the current state of a session build in progress, from client's perspective
             perspective. If the client is in stage 1, then the SessionBuilder is also in stage 1, and the method merely
             returns this argument. Otherwise, this method uses the information in the client state object to locate the
-            staging directory and the build state file on the server. It then returns the build state on the server
+            staging directory and the build state file on the server. If found, then the server has an active commit
+            session in progress with experimenter ID and session UUID as specified in the client state. In this case,
+            the client state is returned, with the 'stage' corrected if necessary to match the server. If not, then
+            the server and client must be in the initial stage 1.
 
         Returns:
-            The client state if it is valid and in sync with the server's state; else the server's state, which always
-            takes precedence.
+            The client state, corrected to match the server, as described.
         """
         if not SessionBuilder._is_valid_build_state(client_state):
             client_state = {'stage': 1, 'experimenter': "", 'uuid': ""}
@@ -132,8 +134,10 @@ class SessionBuilder(object):
             return client_state
         server_state = SessionBuilder._load_build_state(client_state)
         if not server_state:
-            server_state = {'stage': 1, 'experimenter': "", 'uuid': ""}
-        return server_state
+            client_state = {'stage': 1, 'experimenter': "", 'uuid': ""}
+        else:
+            client_state['stage'] = server_state['stage']
+        return client_state
 
     @staticmethod
     def _load_build_state(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
