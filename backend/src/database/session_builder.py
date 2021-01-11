@@ -130,7 +130,7 @@ class SessionBuilder(object):
             SessionBuilderError if client_state is not a dictionary with 3 fields as specified above.
         """
         if not SessionBuilder._is_valid_build_state(client_state):
-            raise SessionBuilderError("Invalid client build state")
+            raise SessionBuilderError(f"Invalid client build state: {client_state}")
         if client_state['stage'] == 1:
             return None
         server_state = SessionBuilder._load_build_state(client_state)
