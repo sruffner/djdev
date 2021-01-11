@@ -406,9 +406,10 @@ def update_layout_on_client_state_change(ts, state):
     if ts is None:
         raise dash.exceptions.PreventUpdate
 
+    # the store will contain None initially -- so we initialize it if necessary
+    if not isinstance(state, dict):
+        state = {'stage': 1, 'experimenter': '', 'uuid': ''}
     session_builder = SessionBuilder()
-    server_state = session_builder.sync_client_state(state)
-    if server_state:
-        state = server_state
+    state = session_builder.sync_client_state(state)
 
     return __session_committer.header(state), __session_committer.body(state), __session_committer.footer(state)

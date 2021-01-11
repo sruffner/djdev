@@ -123,20 +123,17 @@ class SessionBuilder(object):
             staging directory and the build state file on the server. It then returns the build state on the server
 
         Returns:
-            None if the server's build state is in sync with the client's state; else, it returns the build state from
-            the server's perspective.
-
-        Raises:
-            SessionBuilderError if client_state is not a dictionary with 3 fields as specified above.
+            The client state if it is valid and in sync with the server's state; else the server's state, which always
+            takes precedence.
         """
         if not SessionBuilder._is_valid_build_state(client_state):
-            raise SessionBuilderError(f"Invalid client build state: {client_state}")
+            client_state = {'stage': 1, 'experimenter': "", 'uuid': ""}
         if client_state['stage'] == 1:
-            return None
+            return client_state
         server_state = SessionBuilder._load_build_state(client_state)
         if not server_state:
             server_state = {'stage': 1, 'experimenter': "", 'uuid': ""}
-        return None if server_state['stage'] == client_state['stage'] else server_state
+        return server_state
 
     @staticmethod
     def _load_build_state(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
