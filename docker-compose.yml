@@ -14,15 +14,18 @@ services:
     build: backend
     ports:
       - "8050:8050"
-    # This bind mount allows updating backend app during development via Flask reloader module (debug mode)
+    # The first bind mount allows updating backend app during development via Flask reloader module (debug mode).
+    # The second exposes the root repository directory in the file system of the Docker host
     volumes:
       - ./backend/src:/code
+      - ./repository:/repository
     depends_on:
       - db
     networks:
       - sgl_network
     environment:
       - MYSQL_ROOT_PASSWORD=coltrane
+      - DJDEV_ROOT_REPO=/repository
 
 networks:
   sgl_network:

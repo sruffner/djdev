@@ -1,6 +1,10 @@
 data/**
+repository/**
+testsession/**
 venv/**
 .idea/**
 .DS_Store
 **/__pycache/**
 *.pyc
+/backend/src/database/test.zip
+/backend/src/test_maestro.py

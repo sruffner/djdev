@@ -274,12 +274,13 @@ Finally, it will call populate() on the one imported table in this pipeline - Tr
 class Session(dj.Manual):
     definition = """
     # Experimental sessions conducted in the laboratory
+    (experimenter) -> User              # The user conducting the experiment
     -> Subject                          # The animal subject for the session
     session_date : date                 # Date of session
-    session_sfx : tinyint unsigned      # To distinguish multiple sessions on the same date
+    session_sfx : tinyint unsigned      # To distinguish multiple sessions on the same date (range [0..9])
     ---
-    (experimenter) -> User              # The user conducting the experiment
     -> Rig                              # The lab rig on which experiment session was conducted
+    -> Study                            # The research project with which this session is associated
     session_notes : varchar(2048)       # Notes about session
     """
 
@@ -349,10 +350,10 @@ stimulus paradigms? The idea here is to be able to search for particular trial p
 class TrialProtocol(dj.Manual):
     definition = """
     # Stimulus-target trial protocol
-    proto_hash : char(24)               # MD5 hash of trial protocol definition (encoded in url-safe Base64 ASCII)
+    proto_hash : char(32)               # MD5 hash of trial protocol definition (encoded in url-safe Base64 ASCII)
     ---
     proto_name : varchar(50)            # Trial name
-    proto_set : varchar(50)             # Name of trial set to which trial belongs
+    proto_set : varchar(50)             # Name of trial set to which trial belongs (may be empty string)
     proto_subset : varchar(50)          # Name of trial subset to which trial belongs (may be empty string)
     proto_segs : tinyint unsigned       # Number of trial segments
     proto_tgts : tinyint unsigned       # Number of participating targets

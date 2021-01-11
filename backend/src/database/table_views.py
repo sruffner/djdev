@@ -156,6 +156,27 @@ def json_parse(file_obj, decoder: JSONDecoder = JSONDecoder(), buffer_size: int 
                 break
 
 
+def check_date_string(date_str: str) -> bool:
+    """
+    Validate a date string that appears in the laboratory database. It must exactly match the ISO format 'YYYY-DD-MM',
+    with a 4-digit year, 2-digit day, and 2-digit month. The year must be 1900 or greater, and the date cannot be in
+    the future.
+
+    Args:
+        date_str: The date string to test
+
+    Returns:
+        (bool) True if date string satisfies the requirements described.
+    """
+    ok = False
+    try:
+        date_obj = date.fromisoformat(date_str)
+        ok = ((date_obj.year > 1899) and (date_obj < date.today()))
+    except(TypeError, ValueError):
+        pass
+    return ok
+
+
 _nt_TableAttr = namedtuple("TableAttr", [
     'id', 'label', 'type', 'pkey', 'options', 'textrange', 'regex', 'regex_hint', 'placeholder', 'col_width'
     ])
@@ -169,17 +190,17 @@ class TableAttr(_nt_TableAttr):
 
         'label' - (str) User-facing label.
 
-        'type' - (str) Data type: 'text', 'email', 'date', 'float', 'enum', 'fkey', 'auto'. NOTES: (1) The 'auto' type
-        is shorthand for 'int auto_increment' and is applicable only to a PK attribute; by convention, a table PK
-        containing an 'auto' attribute will have no other attributes in the primary key. Also, an 'auto' attribute is
-        not really intended for user-facing display. (2) A text area should be used as an input widget for 'text' if the
-        maximum text range exceeds 100 characters. (3) The 'email' type refers to a string that matches the regular
-        expression for a valid email address. (4) A 'date" attribute must match 'YYYY-MM-DD' exactly, where Y, M and D
-        are digits. (5) The 'float' type is a string parsable as a floating-point or integer value. (6) The 'enum' type
-        is an enumerated attribute with a fixed list of options; its value is one of those options. The default value is
-        the first option in the list. (7) 'fkey' is a foreign key attribute. Its value identifies a single existing
-        entity in a parent table. Unlike the other attributes, its domain of values is dynamic -- determined by the
-        contents of that parent table.
+        'type' - (str) Data type: 'text', 'email', 'date', 'float', 'int', 'enum', 'fkey', 'auto'. NOTES: (1) The
+        'auto' type is shorthand for 'int auto_increment' and is applicable only to a PK attribute; by convention, a
+        table PK containing an 'auto' attribute will have no other attributes in the primary key. Also, an 'auto'
+        attribute is not really intended for user-facing display. (2) A text area should be used as an input widget for
+        'text' if the maximum text range exceeds 100 characters. (3) The 'email' type refers to a string that matches
+        the regular expression for a valid email address. (4) A 'date" attribute must match 'YYYY-MM-DD' exactly, where
+        Y, M and D are digits. (5) The 'float' type is a string parsable as a floating-point or integer value, while the
+        'int' type is a string parsable as an integer only. (6) The 'enum' type is an enumerated attribute with a fixed
+        list of options; its value is one of those options. The default value is the first option in the list. (7)
+        'fkey' is a foreign key attribute. Its value identifies a single existing entity in a parent table. Unlike the
+        other attributes, its domain of values is dynamic -- determined by the contents of that parent table.
 
         'pkey' - (bool) True if attribute is part of the table's primary key; else False.
 
@@ -497,17 +518,22 @@ class BaseTableView:
         """Get the set of attribute IDs comprising the primary key for the underlying table."""
         return {attr.id for attr in self._attrs if attr.pkey}
 
-    def foreign_key_choices(self, attr: TableAttr) -> Set[object]:
+    def foreign_key_choices(self, attr: TableAttr) -> List[Tuple[str, Any]]:
         """
-        Retrieve the set of available choices for a 'fkey' attribute. This is simply the set of all existing values of
-        the foreign key attribute in the parent table.
+        Retrieve the list of available choices for a 'fkey' attribute. To support using this list in a user-facing
+        dropdown or list widget, each "choice" is represented by 2-tuple (label, fkey_value), where fkey_value is the
+        actual value of the foreign key and label is a unique user-facing string identifying that value.
+
+        This implementation assumes that each foreign key value is suitable as a user-facing label. Subclasses should
+        override if this is not the case (eg., if the foreign key value is a meaningless number).
 
         Args:
             attr (TableAttr): The attribute.
 
         Returns:
-            Set[object]: Set of all available value choices for the specified table attribute. Returns an empty set
-                if unable to access the database.
+            List[Tuple[str, Any]]: List of all available value choices for the foreign key table attribute, with
+                companion label as described. Sorted alphabetically by the label. Returns an empty list if unable to
+                access the database.
 
         Raises:
             ValueError: If the specified attribute is unrecognized or is not a foreign key attribute.
@@ -521,12 +547,12 @@ class BaseTableView:
         attr_id: str
         parent_table, attr_id = self._foreign_key_descriptor(attr)
 
+        res = []
         try:
-            res = set(parent_table().fetch(attr_id))
-        except DataJointError:
-            res = {}
-        except Exception:
-            res = {}
+            fkey_values = sorted(parent_table().fetch(attr_id))
+            res = [(v, v) for v in fkey_values]
+        except (DataJointError, Exception):
+            pass
         return res
 
     def num_rows(self) -> int:
@@ -689,6 +715,7 @@ class BaseTableView:
             'text': The value must satisfy any regular expression defined for the attribute (if any), as well as the
                 min/max restriction on text length.
             'float': Value must satisfy min/max restriction on text length and be parsable as a floating-point number.
+            'int': Value must satisfy min/max restrictions on text length and be parsable as an integer.
             'date': Value must represent a valid date in the string format 'YYYY-MM-DD', and it must represent a date
                 after 12/31/1899 and before today.
             'enum': Value must be one of the valid options for the attribute.
@@ -723,17 +750,18 @@ class BaseTableView:
             if not (attr_value in attr.options):
                 raise ValueError(f"Invalid option for '{attr.label}': '{attr_value}'")
         elif attr.type == 'date':
-            try:
-                date_obj = date.fromisoformat(attr_value)
-                if not ((date_obj.year > 1899) and (date_obj < date.today())):
-                    raise ValueError("out of range")
-            except(TypeError, ValueError):
+            if not check_date_string(attr_value):
                 raise ValueError(f"'{attr.label}': Date is invalid, earlier than 1900-01-01, or in the future.")
         elif attr.type == 'float':
             try:
                 float(attr_value)
             except(TypeError, ValueError):
                 raise ValueError(f"'{attr.label}' = '{attr_value}' cannot be parsed as a floating-point value")
+        elif attr.type == 'int':
+            try:
+                int(attr_value)
+            except(TypeError, ValueError):
+                raise ValueError(f"'{attr.label}' = '{attr_value}' cannot be parsed as an integer")
         else:
             if attr.textrange:
                 min_len, max_len = attr.textrange
@@ -823,7 +851,7 @@ class MappingView:
             src_pk_val = row[self._src_pk]
             if not (src_pk_val in src_to_dst):
                 src_to_dst[src_pk_val] = list()
-            src_to_dst[src_pk_val].append(dst_map[row[self._dst_pk]])
+            src_to_dst.get(src_pk_val).append(dst_map[row[self._dst_pk]])
         for k, v in src_to_dst.items():
             src_to_dst[k] = sorted(v, key=lambda alias: alias.label)
         return src_to_dst
@@ -955,7 +983,7 @@ class _SubjectImplantView(BaseTableView):
         """
         attrs = [
             TableAttr('subj_id', 'Subject ID', 'fkey', True, None, None, None, None, None, None),
-            TableAttr('implant_date', 'Surgery Date', 'data', True, None, [10, 10], None, None,
+            TableAttr('implant_date', 'Surgery Date', 'date', True, None, [10, 10], None, None,
                       'YYYY-MM-DD', '100px'),
             TableAttr('st_ap', 'AP (mm)', 'float', False, None, [1, 10], None, None,
                       'Enter anterior-posterior coordinate of cylinder implant, in millimeters', '75px'),
@@ -1301,3 +1329,73 @@ class StudyToPublicationView(MappingView):
 
     def __init__(self):
         super().__init__(StudyView(), PublicationView(), sgl.StudyPublication())
+
+
+class SessionView(BaseTableView):
+    """
+    View implementing read/write to the Sessions table that persists all experiment sessions in the Lisberger lab
+    research database. Currently, it does not support reading or writing the part tables Session.Ephys and
+    Session.Neuron.
+    """
+
+    def __init__(self):
+        attrs = [
+            TableAttr('experimenter', 'Experimenter', 'fkey', True, None, None, None, None, None, None),
+            TableAttr('subj_id', 'Subject ID', 'fkey', True, None, None, None, None, None, None),
+            TableAttr('session_date', 'Session Date', 'date', True, None, [10, 10], None, None,
+                      'YYYY-MM-DD', '100px'),
+            TableAttr('session_sfx', 'Suffix', 'int', True, None, [1, 1], None, None,
+                      'Enter an integer in [0..9] to distinguish multiple sessions on the same date', '50px'),
+            TableAttr('rig_id', 'Rig', 'fkey', False, None, None, None, None, None, None),
+            TableAttr('study_id', 'Study', 'fkey', False, None, None, None, None, None, None),
+            TableAttr('session_notes', 'Notes', 'text', False, None, [0, 2048], r'[\s\S]*', '',
+                      'Enter any notes about this particular session (optional, up to 2048 chars)', '500px')
+        ]
+        super().__init__(sgl.Session(), "Experiment Sessions", "session", attrs)
+
+    __fkey_info = {'experimenter': (sgl.User, 'username'), 'subj_id': (sgl.Subject, 'subj_id'),
+                   'rig_id': (sgl.Rig, 'rig_id'), 'study_id': (sgl.Study, 'study_id')}
+
+    def _foreign_key_descriptor(self, fkey_attr: TableAttr) -> Tuple[Type[dj.Table], str]:
+        """ Overridden to supply the necessary information for all foreign keys in the Session table. """
+        if fkey_attr and (fkey_attr.id in SessionView.__fkey_info):
+            return SessionView.__fkey_info[fkey_attr.id]
+        else:
+            raise ValueError("Not a recognized foreign key on this table")
+
+    def foreign_key_choices(self, attr: TableAttr) -> List[Tuple[str, Any]]:
+        """ Overridden to supply a user-facing label for each research study in the foreign table sgl.Study. The actual
+        foreign key value is an integer ID. Otherwise, defers to base class. """
+        if attr and (attr.id == 'study_id'):
+            res = []
+            try:
+                studies = sorted(sgl.Study().proj('study_id', 'study_title').fetch(as_dict=True),
+                                 key=lambda study: study['study_title'])
+                res = [(study['study_title'], study['study_id']) for study in studies]
+            except (DataJointError, Exception):
+                pass
+            return res
+        else:
+            return super().foreign_key_choices(attr)
+
+    def check_row(self, row: Dict[str, Any]) -> Optional[str]:
+        """
+        Check whether or not the proposed row entry represents a valid experiment session that does not yet exist in
+        the underlying sessions table.
+
+        Args:
+            row (Dict[str, Any]): The proposed entry. It must contain a valid attribute value for each table attribute
+                specified by attributes(), and it must not yet exist in the database.
+        Returns:
+            str: None if operation succeeds, else a user-facing description of the error (missing attribute, invalid
+            attribute value, entry already exists, database error).
+        """
+        err_msg = None
+        try:
+            super()._validate_row(row)
+            sfx = int(row['session_sfx'])
+            if not (0 <= sfx <= 9):
+                raise ValueError("Invalid value for session suffix (must lie in 0..9)")
+        except (Exception, ValueError) as err:
+            err_msg = f"Invalid session info: {str(err)}"
+        return err_msg

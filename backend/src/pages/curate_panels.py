@@ -287,7 +287,7 @@ class _BasePanel:
             elif attr.type == 'fkey':
                 entry_widget = dbc.Select(
                     id=f"{attr.id}_input",
-                    options=[{"label": opt, "value": opt} for opt in self._table_view.foreign_key_choices(attr)],
+                    options=[{"label": opt[0], "value": opt[1]} for opt in self._table_view.foreign_key_choices(attr)],
                     value=""
                 )
             elif attr.textrange[1] > 100:
