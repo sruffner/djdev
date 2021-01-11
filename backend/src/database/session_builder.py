@@ -388,6 +388,7 @@ class ProcessArchiveThread(threading.Thread):
                         return
                 else:
                     n_parts_uploaded = n_chunks
+                    t0 = -1
                     self.msg_q.put_nowait(f"Uploading archive - {n_parts_uploaded} parts received")
             except Exception as err:
                 # check to see if the upload has finished - in which case the temporary upload folder will have been
