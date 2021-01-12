@@ -29,8 +29,6 @@ import json
 from database.session_builder import SessionBuilder, SessionBuilderError
 from database.table_views import SessionView
 from typing import Any, List, Dict
-import sys
-import time
 
 
 class _SessionCommitter:
@@ -109,7 +107,7 @@ class _SessionCommitter:
         system for the file. The upload should start automatically. **Do NOT close browser tab while upload is in
         progress**.*
         ''')
-        uploader = du.Upload(id="session_archive_uploader", max_file_size=2000, max_files=1, cancel_button=False,
+        uploader = du.Upload(id="session_archive_uploader", max_file_size=10000, max_files=1, cancel_button=False,
                              filetypes=['zip'], upload_id=f"{state['experimenter']}-{state['uuid']}")
         div = html.Div(uploader, id="uploader_container")
         intv_check = dcc.Interval(id="stage2_check_progress", disabled=True, interval=1000)
@@ -307,7 +305,6 @@ class _SessionCommitter:
             out = [dash.no_update, True, "", False, False, dash.no_update]
             trigger = ctx.triggered[0]['prop_id'].split('.')[0]
             if (trigger.find('stage2_check_progress') > -1) and (n_intervals is not None):
-                print(f"Progress check at t={time.time()}", file=sys.stdout, flush=True)
                 session_builder = SessionBuilder()
                 try:
                     msg, server_state = session_builder.stage2_progress_update(client_state)
@@ -321,10 +318,8 @@ class _SessionCommitter:
                 out[3] = True
                 out[4] = changing_state
             elif (trigger.find('stage2_cancel_btn') > -1) and (n_cancel is not None):
-                print(f"Starting cancel at t={time.time()}", file=sys.stdout, flush=True)
                 session_builder = SessionBuilder()
                 session_builder.cancel(client_state)
-                print(f"Operation cancelled at t={time.time()}", file=sys.stdout, flush=True)
                 out[0] = json.dumps({'stage': 1, 'experimenter': '', 'uuid': ''})
                 out[1] = True
                 out[2] = "Cancelled by user!"

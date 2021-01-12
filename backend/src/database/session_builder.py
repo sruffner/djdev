@@ -350,60 +350,52 @@ class ProcessArchiveThread(threading.Thread):
         self.cancel_request = threading.Event()
 
     def run(self):
-        # Step 1: Wait for upload to begin, but give up after 10 minutes (or if requested to stop)
         cancelled = False
         self.msg_q.put_nowait("Awaiting upload...")
+
+        # Steps 1 & 2: Wait for upload to begin, then monitor progress until ZIP file is present in staging directory.
+        # Fail if upload does not start within 10 minutes or, once started, if it stalls for longer than 1 minute. NOTE:
+        # If upload is fast enough, the ZIP file could be present before even detecting that the upload started!
         t0 = time.time()
         upload_path: Optional[Path] = None
-        while (not upload_path) and (not cancelled):
-            time.sleep(1)
-            if time.time() - t0 > 600:
-                self.msg_q.put_nowait("Error: Upload failed to start for more than 10 minutes")
-                return
-            if self.cancel_requested():
-                cancelled = True
-            # if temporary ZIP folder present in staging directory, then upload has started -- proceed to step 2
-            elif self.staging_dir.is_dir():
-                for child in self.staging_dir.iterdir():
-                    if child.is_dir() and child.name.endswith('zip'):
-                        upload_path = child
-                        self.msg_q.put_nowait("Upload started...")
-                        break
-
-        # Step 2: Monitor upload and report progress, but give up if upload stalls for more than 10 minutes. The
-        # temporary folder into which chunks of the ZIP file are uploaded will exist until upload is complete, at which
-        # point it is removed and the ZIP file should exist in the staging directory. Deliver progress messages
-        # indicating how many chunks have been uploaded thus far.
+        zip_path: Optional[Path] = None
         n_parts_uploaded = 0
-        t0 = -1
-        zip_path = None
         while (not zip_path) and (not cancelled):
             time.sleep(1)
             if self.cancel_requested():
                 cancelled = True
-                break
-            try:
-                n_chunks = len([f for f in upload_path.iterdir() if f.is_file()])
-                if n_chunks == n_parts_uploaded:
-                    if t0 < 0:
-                        t0 = time.time()
-                    elif time.time() - t0 > 60:
-                        self.msg_q.put_nowait("Error: Upload has stalled for more than 1 minute.")
-                        return
-                else:
-                    n_parts_uploaded = n_chunks
-                    t0 = -1
-                    self.msg_q.put_nowait(f"Uploading archive - {n_parts_uploaded} parts received")
-            except Exception as err:
-                # check to see if the upload has finished - in which case the temporary upload folder will have been
-                # replaced by a ZIP file (causing exception in code above)
-                for child in self.staging_dir.iterdir():
-                    if child.is_file() and child.name.endswith('.zip'):
-                        zip_path = child
-                        self.msg_q.put_nowait("Archive upload complete - processing...")
-                if not zip_path:
-                    self.msg_q.put_nowait(f"Error: Archive upload failed, ZIP file missing ({err})")
+            elif not upload_path:
+                if time.time() - t0 > 600:
+                    self.msg_q.put_nowait("Error: Upload failed to start for more than 10 minutes")
                     return
+                for child in self.staging_dir.iterdir():
+                    if child.is_dir() and child.name.endswith('zip'):
+                        upload_path = child
+                        t0 = time.time()
+                        self.msg_q.put_nowait("Upload started...")
+                    elif child.is_file() and child.name.endswith('.zip'):
+                        zip_path = child
+            else:
+                try:
+                    n_chunks = len([f for f in upload_path.iterdir() if f.is_file()])
+                    if n_chunks == n_parts_uploaded:
+                        if time.time() - t0 > 60:
+                            self.msg_q.put_nowait("Error: Upload has stalled for more than 1 minute.")
+                            return
+                    else:
+                        n_parts_uploaded = n_chunks
+                        t0 = time.time()
+                        self.msg_q.put_nowait(f"Uploading archive - {n_parts_uploaded} parts received")
+                except Exception as err:
+                    # check to see if the upload has finished - in which case the temporary upload folder will have been
+                    # replaced by a ZIP file (causing exception in code above)
+                    for child in self.staging_dir.iterdir():
+                        if child.is_file() and child.name.endswith('.zip'):
+                            zip_path = child
+                            break
+                    if not zip_path:
+                        self.msg_q.put_nowait(f"Error: Archive upload failed, ZIP file missing ({err})")
+                        return
 
         # Steps 3-5: Verify archive (this may take a while), extract trial protocols (0.5 secs for 1000 data files),
         # and pickle the list of protocols to 'protocols.pickle' in staging directory
