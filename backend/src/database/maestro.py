@@ -14,6 +14,9 @@ RandomVariables....Discuss with David -- how to identify trial reps when digesti
 """
 
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
+
+import sys
+import traceback
 from typing import NamedTuple, List, Optional, Dict, Any, Set
 from datetime import date
 import struct
@@ -112,8 +115,8 @@ class DataFile(NamedTuple):
         if (num_total_bytes % RECORD_SIZE) != 0:
             raise DataFileError(f"Maestro data file size in bytes ({num_total_bytes}) is not a multiple of 1024!")
         header = DataFileHeader.parse_header(content)
-        if (header.version < 2) or header.is_continuous_mode():
-            raise DataFileError("No support for version<2 Maestro data files or files recorded in Continuous mode!")
+        if (header.version < 21) or header.is_continuous_mode():
+            raise DataFileError("No support for version<21 Maestro data files or files recorded in Continuous mode!")
         try:
             offset = RECORD_SIZE
             while offset < num_total_bytes:
@@ -170,8 +173,8 @@ class DataFile(NamedTuple):
         if (num_total_bytes % RECORD_SIZE) != 0:
             raise DataFileError(f"Maestro data file size in bytes ({num_total_bytes}) is not a multiple of 1024!")
         header = DataFileHeader.parse_header(content)
-        if (header.version < 2) or header.is_continuous_mode():
-            raise DataFileError("No support for version<2 Maestro data files or files recorded in Continuous mode!")
+        if (header.version < 21) or header.is_continuous_mode():
+            raise DataFileError("No support for version<21 Maestro data files or files recorded in Continuous mode!")
         try:
             offset = RECORD_SIZE
             while offset < num_total_bytes:
@@ -186,6 +189,8 @@ class DataFile(NamedTuple):
             return Trial.prepare_trial(data['trial_codes'], header, data['targets'],
                                        data['tagged_sections'] if ('tagged_sections' in data) else None)
         except DataFileError as err:
+            # TODO: DEBUGGING
+            traceback.print_exc(file=sys.stdout)
             raise DataFileError(f"({file_name}) {str(err)}")
         except Exception as err:
             raise DataFileError(f"({file_name} Unexpected failure while loading trial from data file: str{err}")
@@ -360,7 +365,7 @@ class DataFileHeader(NamedTuple):
                         f"{MAX_NAME_SIZE}s{MAX_NAME_SIZE}s2hi{RMVIDEO_DUPE_SZ}i"
         try:
             raw_fields = struct.unpack_from(header_format, record, 0)
-            version = raw_fields[40]
+            version = raw_fields[39]
             if version < 2:
                 raise DataFileError("Data file version 1 or earlier is not supported")
             kept_fields = list()
@@ -414,7 +419,7 @@ class DataFileHeader(NamedTuple):
         except DataFileError:
             raise
         except Exception as err:
-            raise DataFileError(f"Unexpected failure: {str(err)}")
+            raise DataFileError(f"Unexpected failure while parsing data file header: {str(err)}")
 
     def is_continuous_mode(self):
         return (self.flags & FLAG_IS_CONTINUOUS) != 0
@@ -1228,9 +1233,12 @@ class RMVideoTarget(NamedTuple):
             adj_fields.append(raw_fields[20:22])
             adj_fields.append(raw_fields[22:24])
             adj_fields.append(raw_fields[24:26])
-            # process additional fields added in versions 13, 23; for earlier versions, use default values
-            adj_fields.append(raw_fields[26].decode('ascii').split('\0', 1)[0] if version > 12 else "")
-            adj_fields.append(raw_fields[27].decode('ascii').split('\0', 1)[0] if version > 12 else "")
+            # process additional fields added in versions 13, 23; for earlier versions, use default values. NOTE that
+            # the folder, file names MUST be set to "" if the type is neither RMV_MOVIE or RMV_IMAGE, because they may
+            # contain garbage bytes otherwise!
+            valid_file_folder = (version > 12) and ((raw_fields[0] == RMV_MOVIE) or (raw_fields[0] == RMV_IMAGE))
+            adj_fields.append(raw_fields[26].decode('ascii').split('\0', 1)[0] if valid_file_folder else "")
+            adj_fields.append(raw_fields[27].decode('ascii').split('\0', 1)[0] if valid_file_folder else "")
             adj_fields.extend(raw_fields[28:31] if version > 22 else [0, 0, 0])
 
             target = RMVideoTarget._make(adj_fields)

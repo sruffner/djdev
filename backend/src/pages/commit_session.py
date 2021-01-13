@@ -29,6 +29,7 @@ import json
 from database.session_builder import SessionBuilder, SessionBuilderError
 from database.table_views import SessionView
 from typing import Any, List, Dict
+import sys
 
 
 class _SessionCommitter:
@@ -311,6 +312,11 @@ class _SessionCommitter:
                 except SessionBuilderError as err:
                     msg = str(err)
                     server_state = {'stage': 1, 'experimenter': '', 'uuid': ''}
+
+                # TODO: Temporary -- printing error message for debugging purposes
+                if msg.startswith("Error"):
+                    print(f"====> {msg}", file=sys.stdout, flush=True)
+
                 changing_state = server_state['stage'] != 2
                 out[0] = json.dumps(server_state) if changing_state else dash.no_update
                 out[1] = changing_state
