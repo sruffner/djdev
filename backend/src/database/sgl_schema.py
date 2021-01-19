@@ -1,14 +1,10 @@
 """
 sgl_schema.py: A database schema for the Lisberger laboratory.
 
-08jul2020: Discarding some of the manual tables that are mostly fluff. We can add them back in once we have a working
-full-stack app with DataJoint backend and Dash frontend with web server in a Docker compose application. It will be
-some time before we get to that point!
-
 This module defines all of the DataJoint classes (aka database tables) comprising a common framework pipeline for the
-Lisberger laboratory. The primary purpose of this framework pipeline  is to "digest" raw data from experiment sessions
-into a MySQL database, storing the behavioral and neural data, along with stimulus protocols and other important
-metadata in a logical structure that will facilitate finding/selecting specific data collections within the database.
+Lisberger laboratory database. The primary purpose of this pipeline is to "digest" raw data from experiment sessions,
+storing the behavioral and neural data, along with stimulus protocols and other important metadata in a logical
+structure that will facilitate finding/selecting specific data collections within the database.
 
 The "raw data repository" is a file system accessible to the DataJoint pipeline. The repository serves a two-fold
 purpose:
@@ -22,37 +18,31 @@ purpose:
     becomes corrupted and recovery is not possible, it can be rebuilt from scratch -- without user input -- by
     digesting the contents of the entire repository.
 
-Here is the prescribed layout for the repository's directory structure:
+Here is the prescribed layout for the repository's directory structure. This has changed over the course of early
+development efforts
     $DATA_ROOT
-        /metadata  (content for lab-wide lookup and manual tables)
-            1-metadata.json
-            2-metadata.json
-            ...
-        /trialprotocols (all distinct trial protocols are defined in JSON files within this directory)
-            1-proto.json
-            2-proto.json
-            ...
+        /logs
+            This directory will contain log-style files that encapsulate all changes made to the lab database since
+            the database was created. To reconstruct the database, a script would digest these log files in
+            chronological order, performing the operations defined therein.
+        /staging
+            This is a scratch directory that the backend uses to store information during an active session commit,
+            which is a multi-step, user-interactive procedure. When a commit is initiated, a temporary directory is
+            created to hold the uploaded session data archive, and some other files. Once the commit is fully executed,
+            this temporary directory is removed.
         /username1
-            /studyName
-                /animalName
-                    /session_date+suffix (in case of multiple sessions on same date)
-                        session-metadata.json (session meta-data required to commit without user interaction)
-                        neural-units.mat OR neural-units.npy (experimenter-curated neuron spike train data)
-                        /maestro
-                            Maestro data files (ending in .0001, ...)
-                            ?? Maestro experiment document(s) -- for record-keeping only
-                        /omniplex
-                            Omniplex (2nd gen Plexon) data files (PL2)
-                            -OR-
-                            Plexon MAP data files
-            ...
-        /username2 ...
+            All experiment sessions committed by the user 'username1' will be kept in this directory. All required data
+            for a given session will be stored in two files: {subj_name}_{session_date}_{sfx}.zip is the ZIP file
+            uploaded by the user during the original commit, and {subj_name}_{session_date}_{sfx}.json is a small JSON
+            file containing all metadata entered manually by the user during the commit process.
+        /username2
+            Similarly for all sessions committed by 'username2'
 
 A dynamic web application will serve as the primary interface to the DJ-administered lab database and its associated
 raw data repository. This web application will allow an authorized user to perform a variety of tasks:
     1. Add new entities to the various "metadata" tables in the schema -- Lab, User, Subject, Rig, Study, Publication,
-    BrainArea, NeuronType, and so on. All of the information in these relatively small, simple tables are backed up by
-    the contents of the JSON files in $DATA_ROOT/metadata.
+    BrainArea, NeuronType, and so on. All of the changes in these relatively small, simple tables are recorded in a
+    log file in $DATA_ROOT/logs so that the database can be reconstructed from scratch.
     2. Upload the raw data files from an experiment session and digest them via helper scripts and the pipeline code.
     This is the most complex and time-consuming task. For each experiment a new Session entity is inserted into the
     database, plus any new TrialProtocols discovered. If neural activity was recorded during the session, an entity
@@ -70,7 +60,10 @@ To simplify initial development, we are making a number of assumptions:
     2) The experimenter must supply their "spike sorting" results. This is because every researcher seems to use their
     own spike sorting algorithm, and in some situations "by eye" spike editing happens. TODO: We still need to specify
     the exact format for the spike train data. Anticipate that spike occurrence times will be in the Omniplex timeline.
-    Need to fully identify the Omniplex channel from which the spike train was extracted.
+    Need to fully identify the Omniplex channel from which the spike train was extracted. In order to map spikes from a
+    neural unit to the timeline of any particular trial, we need to read the large PL2 files, which will contain the
+    trial sync pulses (record start, stop, trial name, etc)
+
 
 Created on Wed Jun  3 14:13:38 2020
 
@@ -228,38 +221,22 @@ class StudyPublication(dj.Manual):
 
 
 """
-Data files for each experimental session are digested from a raw data repository with a prescribed directory layout.
-Given the experimenter's username, the study name, the subject ID, and the session date and suffix, all data files
-(both behavioral trial data and, if relevant, any electrophysiological recordings) will be found at:
-    $SESSION_ROOT = $DATA_ROOT/username/study/subj_id/YYYY_MM_DD_sfx/
+While the Session table is 'manual', new entries are added through an interactive web application. Prior to the commit,
+the user must compress all session data (Maestro trial files, Omniplex PL2 file(s), and the spike sorting results) into
+a single ZIP archive file. Then, after entering some essential session information (date, subject, rig, etc), the user
+uploads the ZIP file through the web app into a staging directory with the data repository. The backend server will 
+scan all the Maestro data files within the ZIP (in situ, without extracting the archive) to identify the distinct trial
+protocols presented during the experimental session. It will query the user to verify the trial protocols and to collect
+other session metadata.
 
-The session directory is laid out as follows:
-    $SESSION_ROOT
-        session-metadata.json (session meta-data required to commit without user interaction)
-        neural-units.mat OR neural-units.npy (experimenter-curated neuron spike train data)
-        /maestro
-            Maestro data files (ending in .0001, ...)
-            ?? Maestro experiment document(s) -- for record-keeping only
-        /omniplex
-            Omniplex (2nd gen Plexon) data files (PL2)
-            -OR-
-            Plexon MAP data files
-
-While the Session table is 'manual', new entries are added through an interactive web application. First, the session
-data files (Maestro trial files, Omniplex PL2 file(s), and the spike sorting results) are pushed into the raw data
-repository as described above. The app will scan all the Maestro data files to identify the distinct trial protocols
-presented during the experimental session. It will query the user to verify the trial protocols and to collect other
-session metadata. The general session metadata is saved in session-metadata.json in the above directory, while any new
-trial protocols are persisted in individual JSON files in $DATA_ROOT/trialprotocols/. These files are stored in the
-data repository so that the lab database can be repopulated without intervention if a catastrophic failure occurs.
-
-The experimenter MUST provide a neural-units.* file containing the results of their spike-sorting analysis to identify
-the distinct neural units recorded during the session. The exact format of this file is TBD, but it must contain, for
-each identified unit: Omniplex/Plexon source channel number, mean firing rate in Hz, signal-to-noise ratio, a vector
-holding the average spike waveform, the sample interval for that waveform, a potentially long vector holding the
-spike occurrence times (in seconds) across the session timeline. The interactive script will ask the user to specify
-the (putative) neuron type (choose from an entity in the NeuronType table). With the exception of the spike times, this
-information is stored in the Session.Neuron part table.
+The experimenter MUST provide a file containing the results of their spike-sorting analysis to identify the distinct
+neural units recorded during the session. The exact format of this file is TBD, but it must contain, for
+each identified unit: Omniplex/Plexon source channel number ('spkNN', with two-digit channel number NN), the Plexon
+source filename (to support multiple Plexon files recorded during one session), and a potentially long vector holding
+the spike occurrence times (in seconds) in the Plexon timeline. The web app will ask the user to specify the (putative)
+neuron type (choose from an entity in the NeuronType table). The backend will analyze the Plexon data to calculate the
+unit's mean firing rate in Hz, signal-to-noise ration, and the average spike waveform template. With the exception of
+the spike times, this information is stored in the Session.Neuron part table.
 
 Once the script has prepared the session directory and collected all required metadata, it will then insert a new
 entry in the Session table. If the session included an electrophysiological recording, the requisite information is

@@ -62,9 +62,10 @@ staging directory from the data repository, and the client returns to stage 1.
 """
 
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
+
 import threading
 from queue import Queue
-from typing import Optional, Dict, Any, NamedTuple, Tuple, List
+from typing import Optional, Dict, Any, Tuple, List
 import os
 import time
 import shutil
@@ -101,7 +102,7 @@ class SessionBuilder(object):
     def __init__(self):
         """ Initialize the SessionBuilder """
         if not hasattr(self, 'running_tasks'):
-            self.running_tasks: Dict[str, SessionWorker] = dict()
+            self.running_tasks: Dict[str, ProcessArchiveThread] = dict()
 
     @staticmethod
     def sync_client_state(client_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -217,14 +218,12 @@ class SessionBuilder(object):
     def _start_process_archive_task(self, staging_dir: Path) -> Optional[str]:
         if len(self.running_tasks) > SessionBuilder._MAX_WORKERS:
             return "Server is too busy; try again later"
-        msg_q = Queue()
-        worker = ProcessArchiveThread(staging_dir, msg_q)
-        key = staging_dir.name
-        self.running_tasks[key] = SessionWorker(worker, ['Awaiting upload...'], msg_q)
+        worker = ProcessArchiveThread(staging_dir)
+        self.running_tasks[staging_dir.name] = worker
         worker.start()
         return None
 
-    def stage2_progress_update(self, client_state: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    def stage2_progress_update(self, client_state: Dict[str, Any]) -> Tuple[Optional[bool], List[str], Dict[str, Any]]:
         if not SessionBuilder._is_valid_build_state(client_state):
             raise SessionBuilderError("Invalid client build state")
         if client_state['stage'] != 2:
@@ -233,62 +232,53 @@ class SessionBuilder(object):
         if not server_state:
             raise SessionBuilderError("Staging directory not found; recommend starting over")
         if server_state['stage'] != 2:
-            return "Client out of sync with server", server_state
+            return None, ["Client out of sync with server"], server_state
         if 'cancelled' in server_state:
-            return "Session commit cancelled by user", server_state
+            return None, ["Session commit cancelled by user"], server_state
         staging_dir = SessionBuilder._get_staging_directory_for(server_state)
         session_worker = self.running_tasks[staging_dir.name]
-        latest_msg = None
-        while session_worker.msg_queue.qsize() > 0:
-            latest_msg = session_worker.msg_queue.get_nowait()
-        if latest_msg:
-            session_worker.last_msg_list[0] = latest_msg
-        else:
-            latest_msg = session_worker.last_msg_list[0]
+        latest_messages = list()
+        while session_worker.msg_q.qsize() > 0:
+            latest_messages.append(session_worker.msg_q.get_nowait())
 
-        if session_worker.thread.is_alive():
-            if latest_msg.startswith("Error"):
-                session_worker.thread.join()
+        if session_worker.is_alive():
+            if (len(latest_messages) > 0) and latest_messages[-1].startswith("Error"):
+                session_worker.join()
             else:
-                return latest_msg, server_state
+                return None, latest_messages, server_state
 
-        # stage 2 worker has terminated. Remove if from set of running tasks. If archive upload or processing failed,
-        # remove staging directory, recreate it with only the build-state file, and respawn a worker to await upload
-        # retry. Otherwise, stage 2 completed successfully -- transition to stage 3.
+        # worker has terminated
+        return session_worker.result, latest_messages, server_state
+
+    def stage2_next(self, client_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # transition from stage 2 to stage 3 if stage 2 processing was completed successfully. Include the culled trial
+        # protocols in the state object. Return to stage 1 if an error occurs while preparing protocols. Do nothing if
+        # stage 2 processing in progress or failed.
+        if not SessionBuilder._is_valid_build_state(client_state):
+            raise SessionBuilderError("Invalid client build state")
+        if client_state['stage'] != 2:
+            raise SessionBuilderError("Incorrect stage on client (must be stage 2)")
+        server_state = SessionBuilder._load_build_state(client_state)
+        if not server_state:
+            raise SessionBuilderError("Staging directory not found; recommend starting over")
+        if (server_state['stage'] != 2) or ('cancelled' in server_state):
+            return None
+        staging_dir = SessionBuilder._get_staging_directory_for(server_state)
+        session_worker = self.running_tasks[staging_dir.name]
+        if not session_worker.result:
+            return None
+
         self.running_tasks.pop(staging_dir.name, None)
-        if latest_msg.startswith("Error"):
-            SessionBuilder.delete_directory_tree(staging_dir)
-            err_msg = None
+        server_state['stage'] = 3
+        err_msg = SessionBuilder._write_build_state(server_state)
+        if not err_msg:
             try:
-                staging_dir.mkdir(parents=True, exist_ok=False)
+                with open(Path(staging_dir, 'protocols.pickle'), 'rb') as file:
+                    protocols = pickle.load(file)
+                    server_state['protocols'] = {protocol.md5_digest: protocol.summary() for protocol in protocols}
             except Exception as err:
-                err_msg = f"Failed to create staging directory on server: {str(err)}"
-
-            if not err_msg:
-                err_msg = SessionBuilder._write_build_state(server_state)
-            if not err_msg:
-                err_msg = self._start_process_archive_task(staging_dir)
-            if err_msg:
-                self.delete_directory_tree(staging_dir)
-                return err_msg, {'stage': 1, 'experimenter': '', 'uuid': ''}
-
-            return latest_msg, server_state
-        else:
-            server_state['stage'] = 3
-            err_msg = SessionBuilder._write_build_state(server_state)
-            if err_msg:
-                self.delete_directory_tree(staging_dir)
-                return "Failed to save commit build state... resetting", {'stage': 1, 'experimenter': '', 'uuid': ''}
-            else:
-                try:
-                    with open(Path(staging_dir, 'protocols.pickle'), 'rb') as file:
-                        protocols = pickle.load(file)
-                        server_state['protocols'] = {protocol.md5_digest: protocol.summary() for protocol in protocols}
-                except Exception as err:
-                    latest_msg = f"Failed to retrieve trial protocols from staging directory [{str(err)}]:... resetting"
-                    self.delete_directory_tree(staging_dir)
-                    server_state = {'stage': 1, 'experimenter': '', 'uuid': ''}
-            return latest_msg, server_state
+                err_msg = str(err)
+        return {'stage': 1, 'experimenter': '', 'uuid': ''} if err_msg else server_state
 
     def cancel(self, client_state: Dict[str, Any]) -> None:
         if not SessionBuilder._is_valid_build_state(client_state):
@@ -302,10 +292,10 @@ class SessionBuilder(object):
         if not staging_dir.exists():
             return
         session_worker = self.running_tasks.pop(staging_dir.name, None)
-        if session_worker:
+        if session_worker and session_worker.is_alive():
+            session_worker.cancel()
             server_state['cancelled'] = True
             SessionBuilder._write_build_state(server_state)
-            session_worker.thread.cancel()
         else:
             SessionBuilder.delete_directory_tree(staging_dir)
 
@@ -343,10 +333,11 @@ class ProcessArchiveThread(threading.Thread):
     immediately. The worker thread will stop its work in progress and remove the staging directory in its entirety --
     which could take a significant amount of time depending on the directory content at the time.
     """
-    def __init__(self, staging_dir: Path, msg_q: Queue):
+    def __init__(self, staging_dir: Path):
         super(ProcessArchiveThread, self).__init__(name=f"ProcessArchive-{staging_dir.name}")
         self.staging_dir = staging_dir
-        self.msg_q = msg_q
+        self.msg_q = Queue()
+        self.result: Optional[bool] = None   # set to True/False to indicate success upon termination
         self.cancel_request = threading.Event()
 
     def run(self):
@@ -367,6 +358,7 @@ class ProcessArchiveThread(threading.Thread):
             elif not upload_path:
                 if time.time() - t0 > 600:
                     self.msg_q.put_nowait("Error: Upload failed to start for more than 10 minutes")
+                    self.result = False
                     return
                 for child in self.staging_dir.iterdir():
                     if child.is_dir() and child.name.endswith('zip'):
@@ -381,6 +373,7 @@ class ProcessArchiveThread(threading.Thread):
                     if n_chunks == n_parts_uploaded:
                         if time.time() - t0 > 60:
                             self.msg_q.put_nowait("Error: Upload has stalled for more than 1 minute.")
+                            self.result = False
                             return
                     else:
                         n_parts_uploaded = n_chunks
@@ -395,6 +388,7 @@ class ProcessArchiveThread(threading.Thread):
                             break
                     if not zip_path:
                         self.msg_q.put_nowait(f"Error: Archive upload failed, ZIP file missing ({err})")
+                        self.result = False
                         return
 
         # Steps 3-5: Verify archive (this may take a while), extract trial protocols (0.5 secs for 1000 data files),
@@ -405,6 +399,7 @@ class ProcessArchiveThread(threading.Thread):
                     self.msg_q.put_nowait("Verifying archive...")
                     if archive.testzip():
                         self.msg_q.put_nowait("Error: Uploaded archive appears to be corrupted.")
+                        self.result = False
                         return
                 cancelled = self.cancel_requested()
             trial_protocols: List[maestro.Protocol] = []
@@ -413,6 +408,7 @@ class ProcessArchiveThread(threading.Thread):
                 trial_protocols = maestro.Protocol.extract_protocols_from_session_data(zip_path)
                 if len(trial_protocols) == 0:
                     self.msg_q.put_nowait("Error: No trial protocols found in session archive!")
+                    self.result = False
                     return
                 cancelled = self.cancel_requested()
             if not cancelled:
@@ -422,29 +418,24 @@ class ProcessArchiveThread(threading.Thread):
                 cancelled = self.cancel_requested()
         except maestro.DataFileError as err:
             self.msg_q.put_nowait(f"Error while extracting trial protocols: {str(err)}")
+            self.result = False
             return
         except Exception as err:
             msg = f"Error: Unexpected failure -- {str(err)}"
             self.msg_q.put_nowait(msg)
+            self.result = False
             return
 
         if cancelled:
             SessionBuilder.delete_directory_tree(self.staging_dir)
 
         self.msg_q.put_nowait("Processing complete!" if not cancelled else "Staging directory removed after cancel")
+        self.result = False if cancelled else True
 
     def cancel_requested(self) -> bool:
         if self.cancel_request.isSet():
-            self.msg_q.put_nowait("Error: Session commit cancelled")
             return True
         return False
 
     def cancel(self) -> None:
         self.cancel_request.set()
-
-
-class SessionWorker(NamedTuple):
-    thread: ProcessArchiveThread
-    last_msg_list: List[str]
-    msg_queue: Queue
-    pass

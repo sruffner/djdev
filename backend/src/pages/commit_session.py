@@ -29,7 +29,6 @@ import json
 from database.session_builder import SessionBuilder, SessionBuilderError
 from database.table_views import SessionView
 from typing import Any, List, Dict
-import sys
 
 
 class _SessionCommitter:
@@ -107,14 +106,14 @@ class _SessionCommitter:
         *Drag and drop the ZIP file onto the upload component below, or click on the component to browse the file
         system for the file. The upload should start automatically. **Do NOT close browser tab while upload is in
         progress**.*
+        
         ''')
         uploader = du.Upload(id="session_archive_uploader", max_file_size=10000, max_files=1, cancel_button=False,
                              filetypes=['zip'], upload_id=f"{state['experimenter']}-{state['uuid']}")
-        div = html.Div(uploader, id="uploader_container")
+        upload_div = html.Div(uploader, id="uploader_container", className="mb-3")
         intv_check = dcc.Interval(id="stage2_check_progress", disabled=True, interval=1000)
-        alert = dbc.Alert("Awaiting upload...", id="stage2_progress_alert", className="mt-2", color="primary",
-                          dismissable=False, is_open=False)
-        return [markdown, div, intv_check, alert]
+        alert = dbc.Alert(id="stage2_alert", color="info", is_open=False)
+        return [markdown, upload_div, intv_check, alert]
 
     __STAGE_HEADERS = {
         1: 'Step 1: Enter session information',
@@ -153,6 +152,7 @@ class _SessionCommitter:
 
         badges = [
             dbc.Badge(f"Record Seg: {protocol['record_seg']}", color="primary", className="mr-3"),
+            dbc.Badge(f"Transform: {protocol['transform']}", color="primary", className="mr-3"),
             dbc.Badge(f"Targets: {len(target_names)}", id="stage3_targets", color="primary", className="mr-3"),
             dbc.Badge(f"Perturbations: {len(perts)}", id="stage3_perts", color="primary", className="mr-3"),
             dbc.Badge(f"Tagged Sections: {len(sections)}", id="stage3_sections", color="primary", className="mr-3"),
@@ -223,7 +223,7 @@ class _SessionCommitter:
                 {'if': {'row_index': tgt_name_row_indices}, 'backgroundColor': 'rgba(218,165,32,128)', 'color': 'black'}
             ],
             style_data={'whiteSpace': 'pre-wrap'},
-            style_table={'height': '300px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
+            style_table={'height': '330px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
             fixed_rows={'headers': True, 'data': 0},
             fixed_columns={'headers': True, 'data': 0}
         )
@@ -252,7 +252,8 @@ class _SessionCommitter:
         if state['stage'] == 1:
             out = [dbc.Button("Submit", id="stage1_submit_btn", color='primary')]
         elif state['stage'] == 2:
-            out = [dbc.Button("Cancel", id="stage2_cancel_btn", color='primary')]
+            out = [dbc.Button("Continue", id="stage2_continue_btn", color='primary', className='mr-3', disabled=True),
+                   dbc.Button("Cancel", id="stage2_cancel_btn", color='primary')]
         else:
             out = [dbc.Button("Continue", id="stage3_continue_btn", color='primary', className='mr-3', disabled=True),
                    dbc.Button("Cancel", id="stage3_cancel_btn", color='primary')]
@@ -291,56 +292,55 @@ class _SessionCommitter:
             return json.dumps(client_state), dash.no_update, dash.no_update
 
         @dash_app.callback(
-            [Output('stage2_next_state', 'children'), Output('stage2_check_progress', 'disabled'),
-             Output('stage2_progress_alert', 'children'), Output('stage2_progress_alert', 'is_open'),
-             Output('stage2_cancel_btn', 'disabled'), Output('uploader_container', 'style')],
+            [Output('stage2_alert', 'children'), Output('stage2_alert', 'is_open'),
+             Output('stage2_check_progress', 'disabled'), Output('stage2_cancel_btn', 'disabled'),
+             Output('stage2_continue_btn', 'disabled'), Output('uploader_container', 'style')],
             [Input('stage2_check_progress', 'n_intervals'), Input('session_archive_uploader', 'isCompleted'),
-             Input('session_archive_uploader', 'fileNames'), Input('stage2_cancel_btn', 'n_clicks')],
+             Input('session_archive_uploader', 'fileNames')],
             [State('commit_state', 'data')]
         )
-        def on_stage2_progress_check(n_intervals, is_completed, file_names, n_cancel, client_state):
+        def on_stage2_progress_check(n_intervals, is_completed, file_names, client_state):
             ctx = dash.callback_context
             if not ctx.triggered:
                 raise dash.exceptions.PreventUpdate
 
-            out = [dash.no_update, True, "", False, False, dash.no_update]
+            out = [dash.no_update] * 6
             trigger = ctx.triggered[0]['prop_id'].split('.')[0]
             if (trigger.find('stage2_check_progress') > -1) and (n_intervals is not None):
                 session_builder = SessionBuilder()
                 try:
-                    msg, server_state = session_builder.stage2_progress_update(client_state)
+                    result, messages, server_state = session_builder.stage2_progress_update(client_state)
                 except SessionBuilderError as err:
-                    msg = str(err)
-                    server_state = {'stage': 1, 'experimenter': '', 'uuid': ''}
+                    result, messages, server_state = None, [str(err)], client_state
 
-                # TODO: Temporary -- printing error message for debugging purposes
-                if msg.startswith("Error"):
-                    print(f"====> {msg}", file=sys.stdout, flush=True)
-
-                changing_state = server_state['stage'] != 2
-                out[0] = json.dumps(server_state) if changing_state else dash.no_update
-                out[1] = changing_state
-                out[2] = msg
-                out[3] = True
-                out[4] = changing_state
-            elif (trigger.find('stage2_cancel_btn') > -1) and (n_cancel is not None):
-                session_builder = SessionBuilder()
-                session_builder.cancel(client_state)
-                out[0] = json.dumps({'stage': 1, 'experimenter': '', 'uuid': ''})
-                out[1] = True
-                out[2] = "Cancelled by user!"
-                out[3] = True
-                out[4] = True
+                out[0] = messages[-1] if len(messages) > 0 else dash.no_update
+                out[2] = (result is not None)
+                out[3] = False
+                out[4] = not result
             elif trigger.find('session_archive_uploader') > -1:
                 if (not is_completed) and (file_names is not None):
-                    out[4] = True
-                elif is_completed:
-                    out[1] = False
-                    out[2] = f"Finished uploading {file_names[0]}..."
                     out[3] = True
-                    out[4] = False
+                elif is_completed:
+                    out[0] = f"Upload complete: {file_names[0]}"
+                    out[1] = True
+                    out[2] = False
+                    out[3] = False
                     out[5] = {'display': 'none'}
             return tuple(out)
+
+        @dash_app.callback(Output('stage2_next_state', 'children'),
+                           [Input('stage2_cancel_btn', 'n_clicks'), Input('stage2_continue_btn', 'n_clicks')],
+                           [State('commit_state', 'data')])
+        def on_stage2_transition(n_cancel, n_continue, client_state):
+            session_builder = SessionBuilder()
+            next_state = None
+            if n_cancel is not None:
+                session_builder.cancel(client_state)
+                next_state = {'stage': 1, 'experimenter': '', 'uuid': ''}
+            elif n_continue is not None:
+                next_state = session_builder.stage2_next(client_state)
+
+            return dash.no_update if (next_state is None) else json.dumps(next_state)
 
         @dash_app.callback(Output('stage3_protocol_div', 'children'), [Input('stage3_proto_select', 'value')],
                            [State('commit_state', 'data')])

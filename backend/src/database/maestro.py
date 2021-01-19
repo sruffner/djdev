@@ -440,6 +440,35 @@ class TargetTransform(NamedTuple):
     vel_scale: float
     vel_rotate_deg: float
 
+    def __eq__(self, other: TargetTransform) -> bool:
+        """
+        Two target transforms are equal if their corresponding parameters are "close enough" (using math.isclose()).
+        """
+        return (self.__class__ == other.__class__) and math.isclose(self.pos_offsetH_deg, other.pos_offsetH_deg) and \
+            math.isclose(self.pos_offsetV_deg, other.pos_offsetV_deg) and \
+            math.isclose(self.pos_scale, other.pos_scale) and \
+            math.isclose(self.pos_rotate_deg, other.pos_rotate_deg) and \
+            math.isclose(self.vel_scale, other.vel_scale) and \
+            math.isclose(self.vel_rotate_deg, other.vel_rotate_deg)
+
+    def __hash__(self) -> int:
+        return(hash((self.pos_offsetH_deg, self.pos_offsetV_deg, self.pos_scale, self.pos_rotate_deg,
+                     self.vel_scale, self.vel_rotate_deg)))
+
+    def __str__(self) -> str:
+        """
+        Returns compact string representation of target transform: '[(A, B); pos=C, D deg; vel=E, F deg]', where (A, B)
+        are the horizontal and vertical initial position offsets; C is the position scale factor, D is the position
+        rotation angle, E is the velocity scale factor, and F is the velocity rotation angle.
+        """
+        ofs_x = f"{self.pos_offsetH_deg:.2f}".rstrip('0').rstrip('.')
+        ofs_y = f"{self.pos_offsetV_deg:.2f}".rstrip('0').rstrip('.')
+        pos_scale = f"{self.pos_scale:.2f}".rstrip('0').rstrip('.')
+        pos_rotate = f"{self.pos_rotate_deg:.2f}".rstrip('0').rstrip('.')
+        vel_scale = f"{self.vel_scale:.2f}".rstrip('0').rstrip('.')
+        vel_rotate = f"{self.vel_rotate_deg:.2f}".rstrip('0').rstrip('.')
+        return f"[({ofs_x},{ofs_y}); pos={pos_scale}, {pos_rotate} deg; vel={vel_scale}, {vel_rotate} deg]"
+
     def is_identity_for_pos(self) -> bool:
         """
         Is this target transform the identity (unity scale, zero rotation) WRT target position? By convention, a
@@ -1623,6 +1652,20 @@ class Trial(NamedTuple):
     @staticmethod
     def prepare_trial(codes: List[TrialCode], header: DataFileHeader, targets: List[Target],
                       sections: Optional[List[TaggedSection]]) -> Trial:
+        """
+        Reconstruct the definition of a Maestro trial from the trial codes, targets, tagged sections, and file header
+        culled from a Maestro data file. NOTE: We DO NOT invert the trial trajectory parameters IAW the global target
+        transform found in the file header. Because the "similarity test" for two trial instances now requires that
+        they have the same transform, there is no need to do so.
+        Args:
+            codes: The trial codes culled from data file
+            header: The data file header
+            targets: The participating trial target list.
+            sections: List of tagged sections, or None if no sections are defined.
+
+        Returns:
+            The reconstructed trial definition.
+        """
         segments: List[Trial.Segment] = []
         perturbations: List[Trial.Perturbation] = []
         record_seg_idx: int = -1
@@ -1825,6 +1868,7 @@ class Trial(NamedTuple):
             # trial's global target transform (if NOT the identity transform) to all target trajectory parameters to
             # recover their values as the appeared in the original Maestro trial. This is important in order to decide
             # whether or not two trial reps are "similar" (ie, reps of the same trial protocol).
+            ''' NOTE: Keeping this code just in case we decide not to include target transform in similarity test
             xfm = header.global_transform()
             if not (xfm.is_identity_for_vel() and xfm.is_identity_for_pos()):
                 is_first_seg = True
@@ -1845,6 +1889,7 @@ class Trial(NamedTuple):
                         if (header.version < 16) or (not is_first_seg) or seg.tgt_rel[tgt_idx]:
                             xfm.invert_position(seg.tgt_pos[tgt_idx])
                     is_first_seg = False
+            '''
 
             # HACK: Because trial codes store floating-point trajectory parameters as scaled 16-bit integers, there's a
             # loss of precision versus the original values in the Maestro trial. If the inverse transform has to be
@@ -1898,7 +1943,7 @@ class Trial(NamedTuple):
             subset_name = header.trial_subset_name if header.version >= 21 else None
             return Trial._make([header.trial_name, set_name, subset_name, segments, targets, perturbations,
                                 sections if sections else [], record_seg_idx, skip_seg_idx, header.version,
-                                header.xy_random_seed, xfm])
+                                header.xy_random_seed, header.global_transform()])
         except DataFileError:
             raise
         except Exception as err:
@@ -1910,10 +1955,10 @@ class Trial(NamedTuple):
         data collected during the two trials might be usefully compared or combined in some fashion. It requires that
         the trials have the same name, same set and subset names (for file versions >= 21), same number of segments,
         same participating targets (the seeds of RMVideo random-dot patch targets are not compared), same tagged
-        sections, and the same perturbations. Recording must start on the same segment in both trials. Per-segment
-        marker pulse channel, fixation target designations, and XYScope update interval (if XYScope used) must match.
-        Per-segment, per-target on/off states, relative/absolute position flags, and velocity stabilization masks must
-        also match.
+        sections, same perturbations, and the same global target transforms. Recording must start on the same segment
+        in both trials. Per-segment marker pulse channel, fixation target designations, and XYScope update interval
+        (if XYScope used) must match. Per-segment, per-target on/off states, relative/absolute position flags, and
+        velocity stabilization masks must also match.
 
         Args:
             other: The trial to compare.
@@ -1922,7 +1967,8 @@ class Trial(NamedTuple):
         """
         similar = (other is not None) and (self.name == other.name) and (len(self.segments) == len(other.segments)) and\
                   (self.record_seg == other.record_seg) and (self.targets == other.targets) and \
-                  (self.perts == other.perts) and (self.sections == other.sections)
+                  (self.perts == other.perts) and (self.sections == other.sections) and \
+                  (self.global_transform == other.global_transform)
         if similar and not (self.set_name is None):
             similar = (self.set_name == other.set_name) and (self.subset_name == other.subset_name)
         if not similar:
@@ -2176,7 +2222,7 @@ class Protocol(NamedTuple):
                                     break
                             if not found:
                                 hash_attrs = [trial.path_name(), len(trial.segments), trial.targets, trial.perts,
-                                              trial.sections, trial.record_seg]
+                                              trial.sections, trial.record_seg, trial.global_transform]
                                 digester = hashlib.md5()
                                 digester.update(pickle.dumps(hash_attrs))
                                 trial_protocols.append(Protocol._make([trial, set(), digester.hexdigest()]))
@@ -2193,7 +2239,9 @@ class Protocol(NamedTuple):
     def summary(self) -> Dict[str, Any]:
         """
         Generate a summary of this Maestro trial protocol for display purposes only. Returns a dictionary with the
-        following fields: 'digest' is the protocol's 32-character MD5 hexadecimal digest (str); 'diffs' is a list of the
+        following fields: 'digest' is the protocol's 32-character MD5 hexadecimal digest (str); 'path_name' is the
+        trial's full path name, including trial set and subset if applicable and available (str); 'transform' is the
+        global target transform applicable to all instances of the trial protocol (str); 'diffs' is a list of the
         segment table parameters that may randomly vary from one presentation of the trial protocol to the next
         (List[str]); 'targets' is a list of participating target descriptors (List[str]); 'perts' is a list of any
         defined perturbations in the protocol (List[str]); 'sections' is a list of any tagged sections (List[str];
@@ -2201,6 +2249,7 @@ class Protocol(NamedTuple):
         segment descriptors (List[dict]).
         """
         return {'digest': self.md5_digest, 'path_name': self.trial.path_name(),
+                'transform': str(self.trial.global_transform),
                 'diffs': [str(diff) for diff in self.diffs],
                 'targets': [str(target) for target in self.trial.targets],
                 'perts': [str(pert) for pert in self.trial.perts],
