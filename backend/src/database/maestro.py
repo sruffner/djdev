@@ -23,7 +23,6 @@ import struct
 import re
 import math
 from enum import Enum
-from pathlib import Path
 import zipfile
 import hashlib
 import pickle
@@ -2190,14 +2189,15 @@ class Protocol(NamedTuple):
     md5_digest: str
 
     @staticmethod
-    def extract_protocols_from_session_data(zip_path: Path) -> List[Protocol]:
+    def extract_protocols_from_session_data(archive: zipfile.ZipFile) -> List[Protocol]:
         """
         Examine all Maestro data files contained in the ZIP archive specified and return the list of trial protocols
         culled from those files. This is an important task when committing an experiment session's worth of data to
         the lab database.
 
         Args:
-            zip_path: Path to a ZIP archive containing the Maestro data files collected during an experiment session
+            archive: An open ZIP archive containing the Maestro data files collected during an experiment session. Must
+            be open for reading and is NOT closed on return.
 
         Returns:
             List of all Maestro trial protocols culled from the session data.
@@ -2206,34 +2206,33 @@ class Protocol(NamedTuple):
             DataFileError if a problem occurs while reading the ZIP archive and processing the data files therein.
         """
         try:
-            with zipfile.ZipFile(zip_path, 'r') as archive:
-                archive_list = archive.infolist()
-                data_file_name_pattern = re.compile('.[0-9][0-9][0-9][0-9]+$')
-                trial_protocols: List[Protocol] = list()
-                for info in archive_list:
-                    if data_file_name_pattern.search(info.filename) is not None:
-                        try:
-                            trial = DataFile.load_trial(archive.read(info), info.filename)
-                            found = False
-                            for protocol in trial_protocols:
-                                if protocol.trial.is_similar_to(trial):
-                                    found = True
-                                    protocol.diffs.update(protocol.trial.segment_table_differences(trial))
-                                    break
-                            if not found:
-                                hash_attrs = [trial.path_name(), len(trial.segments), trial.targets, trial.perts,
-                                              trial.sections, trial.record_seg, trial.global_transform]
-                                digester = hashlib.md5()
-                                digester.update(pickle.dumps(hash_attrs))
-                                trial_protocols.append(Protocol._make([trial, set(), digester.hexdigest()]))
-                        except DataFileError as err:
-                            msg = f"===> Error: Failed loading file {info.filename}: {str(err)}"
-                            raise DataFileError(msg)
-                return trial_protocols
+            archive_list = archive.infolist()
+            data_file_name_pattern = re.compile('.[0-9][0-9][0-9][0-9]+$')
+            trial_protocols: List[Protocol] = list()
+            for info in archive_list:
+                if data_file_name_pattern.search(info.filename) is not None:
+                    try:
+                        trial = DataFile.load_trial(archive.read(info), info.filename)
+                        found = False
+                        for protocol in trial_protocols:
+                            if protocol.trial.is_similar_to(trial):
+                                found = True
+                                protocol.diffs.update(protocol.trial.segment_table_differences(trial))
+                                break
+                        if not found:
+                            hash_attrs = [trial.path_name(), len(trial.segments), trial.targets, trial.perts,
+                                          trial.sections, trial.record_seg, trial.global_transform]
+                            digester = hashlib.md5()
+                            digester.update(pickle.dumps(hash_attrs))
+                            trial_protocols.append(Protocol._make([trial, set(), digester.hexdigest()]))
+                    except DataFileError as err:
+                        msg = f"===> Error: Failed loading file {info.filename}: {str(err)}"
+                        raise DataFileError(msg)
+            return trial_protocols
         except DataFileError:
             raise
         except Exception as err:
-            msg = f"Unexpected error while extracting trial protocols from session data: {str(zip_path)}:\n {str(err)}"
+            msg = f"Unexpected error while extracting trial protocols from session data: {str(err)}"
             raise DataFileError(msg)
 
     def summary(self) -> Dict[str, Any]:

@@ -76,6 +76,7 @@ import uuid
 import zipfile
 import database.table_views as tv
 import database.maestro as maestro
+import database.spikes as spikes
 
 
 class SessionBuilderError(Exception):
@@ -252,8 +253,8 @@ class SessionBuilder(object):
 
     def stage2_next(self, client_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         # transition from stage 2 to stage 3 if stage 2 processing was completed successfully. Include the culled trial
-        # protocols in the state object. Return to stage 1 if an error occurs while preparing protocols. Do nothing if
-        # stage 2 processing in progress or failed.
+        # protocols in the state object. Return to stage 1 if an error occurs while preparing this information. Do
+        # nothing if stage 2 processing in progress or failed.
         if not SessionBuilder._is_valid_build_state(client_state):
             raise SessionBuilderError("Invalid client build state")
         if client_state['stage'] != 2:
@@ -273,11 +274,38 @@ class SessionBuilder(object):
         err_msg = SessionBuilder._write_build_state(server_state)
         if not err_msg:
             try:
-                with open(Path(staging_dir, 'protocols.pickle'), 'rb') as file:
-                    protocols = pickle.load(file)
-                    server_state['protocols'] = {protocol.md5_digest: protocol.summary() for protocol in protocols}
+                with open(Path(staging_dir, 'preprocessing.pickle'), 'rb') as file:
+                    results = pickle.load(file)
+                    server_state['protocols'] = \
+                        {protocol.md5_digest: protocol.summary() for protocol in results['protocols']}
             except Exception as err:
                 err_msg = str(err)
+        return {'stage': 1, 'experimenter': '', 'uuid': ''} if err_msg else server_state
+
+    @staticmethod
+    def stage3_next(client_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # transition from stage 3 to stage 4, passing neural unit summaries through the returned state object
+        if not SessionBuilder._is_valid_build_state(client_state):
+            raise SessionBuilderError("Invalid client build state")
+        if client_state['stage'] != 3:
+            raise SessionBuilderError("Incorrect stage on client (must be stage 3)")
+        server_state = SessionBuilder._load_build_state(client_state)
+        if not server_state:
+            raise SessionBuilderError("Staging directory not found; recommend starting over")
+        if (server_state['stage'] != 3) or ('cancelled' in server_state):
+            return None
+        staging_dir = SessionBuilder._get_staging_directory_for(server_state)
+
+        server_state['stage'] = 4
+        err_msg = SessionBuilder._write_build_state(server_state)
+        if not err_msg:
+            try:
+                with open(Path(staging_dir, 'preprocessing.pickle'), 'rb') as file:
+                    results = pickle.load(file)
+                    server_state['units'] = [unit.summary() for unit in results['units']]
+            except Exception as err:
+                err_msg = str(err)
+
         return {'stage': 1, 'experimenter': '', 'uuid': ''} if err_msg else server_state
 
     def cancel(self, client_state: Dict[str, Any]) -> None:
@@ -318,10 +346,19 @@ class ProcessArchiveThread(threading.Thread):
 
         2) Once the upload completes, process all Maestro data files in the session archive (in situ -- the files are
         NOT extracted from the ZIP file) and generate the list of distinct trial protocols presented over the course of
-        the experiment session. Pickle the list of protocols in the file 'protocols.pickle' in the staging directory,
-        then terminate. If an error occurs, report the error and terminate.
+        the experiment session. If an error occurs, report the error and terminate.
 
-        3) TODO: Once we've settled on format for neural data, that should be processed as well, if present.
+        3) Load timing information for each trial. The primary purpose of this step is to process the strobed and event
+        data in the Omniplex file(s) in the archive in order to align any neural unit responses with the individual
+        trial timelines.
+
+        4) Further process the archive for any neural unit data in the archive. The experimenter must provide their
+        own spike sorting results in a single pickle file in the archive. See spikes.load_neural_data() for a
+        description of the file contents. For now, we only support neural units recorded on the Omniplex system, and the
+        archive must include the relevant PL2 file(s) for each unit specified in the pickle.
+
+        5) Store the results as a dictionary {'protocols': ..., 'timings': ..., 'units': ...} in the pickle file
+        'preprocessing.pickle' within the staging directory.
 
     To communicate progress to the main thread, the worker will post a message to the synchronous queue passed in the
     constructor. A message is posted whenever there's a significant progress transition (eg., upload started, N parts of
@@ -392,36 +429,48 @@ class ProcessArchiveThread(threading.Thread):
                         return
 
         # Steps 3-5: Verify archive (this may take a while), extract trial protocols (0.5 secs for 1000 data files),
-        # and pickle the list of protocols to 'protocols.pickle' in staging directory
+        # extract trial timing information, and process any neural unit data in archive. Pickle the results of this
+        # preprocessing work in 'preprocessing.pickle' in staging directory
         try:
-            if not cancelled:
-                with zipfile.ZipFile(zip_path, 'r') as archive:
+            with zipfile.ZipFile(zip_path, 'r') as archive:
+                if not cancelled:
                     self.msg_q.put_nowait("Verifying archive...")
                     if archive.testzip():
                         self.msg_q.put_nowait("Error: Uploaded archive appears to be corrupted.")
                         self.result = False
                         return
-                cancelled = self.cancel_requested()
-            trial_protocols: List[maestro.Protocol] = []
-            if not cancelled:
-                self.msg_q.put_nowait("Processing archive for trial protocols...")
-                trial_protocols = maestro.Protocol.extract_protocols_from_session_data(zip_path)
-                if len(trial_protocols) == 0:
-                    self.msg_q.put_nowait("Error: No trial protocols found in session archive!")
-                    self.result = False
-                    return
-                cancelled = self.cancel_requested()
-            if not cancelled:
-                proto_path = Path(self.staging_dir, 'protocols.pickle')
-                with open(proto_path, 'wb') as file:
-                    pickle.dump(trial_protocols, file)
-                cancelled = self.cancel_requested()
+                    cancelled = self.cancel_requested()
+                trial_protocols: List[maestro.Protocol] = list()
+                trial_timings: Dict[str, spikes.TrialTiming] = dict()
+                neural_units: List[spikes.OmniplexUnit] = list()
+                if not cancelled:
+                    self.msg_q.put_nowait("Processing archive for trial protocols...")
+                    trial_protocols = maestro.Protocol.extract_protocols_from_session_data(archive)
+                    if len(trial_protocols) == 0:
+                        self.msg_q.put_nowait("Error: No trial protocols found in session archive!")
+                        self.result = False
+                        return
+                    cancelled = self.cancel_requested()
+                if not cancelled:
+                    self.msg_q.put_nowait("Aligning trials with Omniplex timeline...")
+                    trial_timings = spikes.load_trial_timings(archive)
+                    cancelled = self.cancel_requested()
+                if not cancelled:
+                    self.msg_q.put_nowait("Processing neural unit data in archive...")
+                    neural_units = spikes.load_neural_units(archive)
+                    cancelled = self.cancel_requested()
+                if not cancelled:
+                    proto_path = Path(self.staging_dir, 'preprocessing.pickle')
+                    results = {'protocols': trial_protocols, 'timings': trial_timings, 'units': neural_units}
+                    with open(proto_path, 'wb') as file:
+                        pickle.dump(results, file)
+                    cancelled = self.cancel_requested()
         except maestro.DataFileError as err:
-            self.msg_q.put_nowait(f"Error while extracting trial protocols: {str(err)}")
+            self.msg_q.put_nowait(f"Error occurred while preprocessing session archive: {str(err)}")
             self.result = False
             return
         except Exception as err:
-            msg = f"Error: Unexpected failure -- {str(err)}"
+            msg = f"Error - Unexpected failure while preprocessing session archive: {str(err)}"
             self.msg_q.put_nowait(msg)
             self.result = False
             return

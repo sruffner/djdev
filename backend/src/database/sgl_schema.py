@@ -272,7 +272,7 @@ class Session(dj.Manual):
         ---
         ephys_src : enum('Omniplex', 'Omniplex clips', 'Plexon MAP', 'Maestro Waveform', 'Maestro Spike Ch')
         # NOTE: These are the known ways in which neuronal response data have been recorded in the lab. For now, we
-        # only support the Omniplex as a source, and expect a single Omniplex PL2 file per session.
+        # only support the Omniplex as a source.
         probe_type : enum('single', '32-channel', 'other')
         sampling_rate : float           # Electrode signal sampling rate in Hz
         probe_x : float                 # X,Y location of probe within recording cylinder implant (units?)
@@ -291,7 +291,7 @@ class Session(dj.Manual):
         (unit_type) -> NeuronType           # Identified neuron type
         unit_firing_rate : float            # Mean firing rate of neural unit while held (in Hz)
         unit_snr : float                    # Signal-to-noise ratio (indication of quality of recording?)
-        unit_template : longblob            # Template waveform used for spike detection ??
+        unit_template : longblob            # Average spike waveform template
         """
 
 

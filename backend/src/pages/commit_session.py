@@ -17,6 +17,7 @@ detailed explanation.
 
 @author: sruffner
 """
+
 import dash
 import dash_html_components as html
 import dash_core_components as dcc
@@ -24,6 +25,7 @@ import dash_bootstrap_components as dbc
 import dash_table as dt
 import dash_uploader as du
 from dash.dependencies import Input, Output, State
+import plotly.express as px
 from app import app
 import json
 from database.session_builder import SessionBuilder, SessionBuilderError
@@ -118,7 +120,8 @@ class _SessionCommitter:
     __STAGE_HEADERS = {
         1: 'Step 1: Enter session information',
         2: 'Step 2: Upload session data archive',
-        3: 'Step 3: Review trial protocols'
+        3: 'Step 3: Review trial protocols',
+        4: 'Step 4: Review neural units'
     }
 
     @staticmethod
@@ -230,6 +233,47 @@ class _SessionCommitter:
         return [html.Div(badges, className='mt-3 mb-1'), segment_table]
 
     @staticmethod
+    def stage4_body(state: dict) -> Any:
+        # NOTE - At this point, summaries of the neural units culled in stage 2 have been transferred to the
+        # client and stored as part of the client state, in the field 'units', as a list of dictionaries...
+        markdown = dcc.Markdown('''
+        **After reviewing the neural units here, click "Continue" to proceed to the next step. If you detect an
+        issue, click "Cancel" to start over.**
+        ''')
+        unit_summaries: List[Dict[str, Any]] = state['units']
+        initial_selection = unit_summaries[0]
+        select_unit = dbc.Select(
+            id='stage4_unit_select',
+            options=[{'label': f"Unit {i+1}", 'value': str(i)} for i in range(len(unit_summaries))],
+            value="0"
+        )
+        unit_div = html.Div(_SessionCommitter.stage4_display_unit(initial_selection), id="stage4_unit_div")
+        return [markdown, select_unit, unit_div]
+
+    @staticmethod
+    def stage4_display_unit(unit_summary: Dict[str, Any]) -> List[Any]:
+        spike_times = unit_summary['spike_times']
+        template = unit_summary['template']
+        for i in range(len(template)):
+            template[i] = template[i] * 1000.0   # convert to micro-volts
+        peak_to_peak = max(template) - min(template)
+
+        badges = [
+            dbc.Badge(f"Omniplex Channel: {unit_summary['channel_id']}", color="primary", className="mr-3"),
+            dbc.Badge(f"Mean firing rate: {unit_summary['firing_rate']:.1f} Hz", color="primary", className="mr-3"),
+            dbc.Badge(f"#Spikes: {len(spike_times)}", color="primary", className="mr-3"),
+            dbc.Badge(f"SNR: {unit_summary['snr']:.2f}", color="primary", className="mr-3"),
+            dbc.Badge(f"Peak-to-peak: {peak_to_peak:.1f} \u00B5V", color="primary", className="mr-3"),
+        ]
+
+        # simple graph of template waveform. Note I'm assuming 40KHz sampling rate here!
+        graph = dcc.Graph(figure=px.line(x=[i/40.0 for i in range(len(template))], y=template,
+                                         labels={'x': 'time (ms)', 'y': '\u00B5V'},
+                                         title='Average spike waveform (1-ms pre, 9-ms post)'))
+
+        return [html.Div(badges, className='mt-3 mb-1'), graph]
+
+    @staticmethod
     def header(state: dict = None) -> str:
         stage = state['stage'] if state else 1
         return _SessionCommitter.__STAGE_HEADERS[stage]
@@ -238,7 +282,9 @@ class _SessionCommitter:
     def body(state: dict = None) -> Any:
         if not state:
             state = {'stage': 1, 'experimenter': '', 'uuid': ''}
-        if state['stage'] == 3:
+        if state['stage'] == 4:
+            return _SessionCommitter.stage4_body(state)
+        elif state['stage'] == 3:
             return _SessionCommitter.stage3_body(state)
         elif state['stage'] == 2:
             return _SessionCommitter.stage2_body(state)
@@ -254,9 +300,12 @@ class _SessionCommitter:
         elif state['stage'] == 2:
             out = [dbc.Button("Continue", id="stage2_continue_btn", color='primary', className='mr-3', disabled=True),
                    dbc.Button("Cancel", id="stage2_cancel_btn", color='primary')]
-        else:
-            out = [dbc.Button("Continue", id="stage3_continue_btn", color='primary', className='mr-3', disabled=True),
+        elif state['stage'] == 3:
+            out = [dbc.Button("Continue", id="stage3_continue_btn", color='primary', className='mr-3'),
                    dbc.Button("Cancel", id="stage3_cancel_btn", color='primary')]
+        else:
+            out = [dbc.Button("Continue", id="stage4_continue_btn", color='primary', className='mr-3', disabled=True),
+                   dbc.Button("Cancel", id="stage4_cancel_btn", color='primary')]
         return out
 
     def _callbacks(self):
@@ -349,9 +398,30 @@ class _SessionCommitter:
                 return _SessionCommitter.stage3_display_protocol(state['protocols'][proto_key])
             return dash.no_update
 
-        @dash_app.callback(Output('stage3_next_state', 'children'), [Input('stage3_cancel_btn', 'n_clicks')],
+        @dash_app.callback(Output('stage3_next_state', 'children'),
+                           [Input('stage3_cancel_btn', 'n_clicks'), Input('stage3_continue_btn', 'n_clicks')],
                            [State('commit_state', 'data')])
-        def on_stage3_cancel(n_cancel, client_state):
+        def on_stage3_transition(n_cancel, n_continue, client_state):
+            session_builder = SessionBuilder()
+            next_state = None
+            if n_cancel is not None:
+                session_builder.cancel(client_state)
+                next_state = {'stage': 1, 'experimenter': '', 'uuid': ''}
+            elif n_continue is not None:
+                next_state = SessionBuilder.stage3_next(client_state)
+            return dash.no_update if (next_state is None) else json.dumps(next_state)
+
+        @dash_app.callback(Output('stage4_unit_div', 'children'), [Input('stage4_unit_select', 'value')],
+                           [State('commit_state', 'data')])
+        def on_stage4_unit_select(value, state):
+            unit_idx = int(value) if isinstance(value, str) else -1
+            if ('units' in state) and (0 <= unit_idx < len(state['units'])):
+                return _SessionCommitter.stage4_display_unit(state['units'][unit_idx])
+            return dash.no_update
+
+        @dash_app.callback(Output('stage4_next_state', 'children'), [Input('stage4_cancel_btn', 'n_clicks')],
+                           [State('commit_state', 'data')])
+        def on_stage4_cancel(n_cancel, client_state):
             next_state = dash.no_update
             if n_cancel is not None:
                 session_builder = SessionBuilder()
@@ -367,6 +437,7 @@ layout = html.Div([
     html.Div("", id="stage1_next_state", style={"display": "none"}),
     html.Div("", id="stage2_next_state", style={"display": "none"}),
     html.Div("", id="stage3_next_state", style={"display": "none"}),
+    html.Div("", id="stage4_next_state", style={"display": "none"}),
     dbc.Container([
         dbc.Row([dbc.Col(html.H3("Commit experiment sessions to the laboratory database", className="text-center"),
                 className="mb-3 mt-3")]),
@@ -381,7 +452,7 @@ layout = html.Div([
 
 
 @app.callback(Output('commit_state', 'data'),
-              [Input(f"stage{i+1}_next_state", 'children') for i in range(3)])
+              [Input(f"stage{i+1}_next_state", 'children') for i in range(4)])
 def on_client_state_change(*args):
     ctx = dash.callback_context
     if not ctx.triggered:
@@ -394,6 +465,8 @@ def on_client_state_change(*args):
         client_state = json.loads(args[1])
     elif btn_id.find('stage3') > -1:
         client_state = json.loads(args[2])
+    elif btn_id.find('stage4') > -1:
+        client_state = json.loads(args[3])
     else:
         client_state = dash.no_update
     return client_state
