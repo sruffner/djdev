@@ -5,8 +5,20 @@ Written by David J. Herzfeld <herzfeldd@gmail.com>
 
 This module contains functions written by DH to parse the contents of a Plexon/Omniplex PL2 data file. In the original
 code, the load functions take the filename of the PL2 file to be read. Here, the functions have been adapted to take a
-a Python file-like object so that they can be used with a PL2 file compressed within a ZIP archive. In addition, I have
-made some cosmetic changes such as docstrings and some type annotations.
+a Python file-like object so that they can be used with an already open file handle. All functions leave that file
+handle open on return.
+
+The information returned by load_file_information() is essentially a "table of contents" for the entire PL2 file, and
+we can save time if we supply it to the various load functions rather than re-loading that information on each load()
+call.
+
+Unlike the original implementation, the load methods DO NOT accumulate channel data in the 'info' dictionary object
+that is initially set up by load_file_information(), as that could consume significant memory resources. For example,
+consider a large Omniplex file containing 200,000,000 samples recorded on each of 32 channels!
+
+I have also made some cosmetic changes such as docstrings and some type annotations.
+
+@author sruffner
 """
 
 import struct
@@ -47,7 +59,7 @@ PL2_SPIKE_TYPE_SPK_SPKC = 0x01
 def load_file_information(fp: IO) -> Dict[str, Any]:
     """
     Loads metadata from the header, various channel subheaders, and the footer of a PL2 file. This information can be
-    passed to other loading functions to speed up processing.
+    passed to other loading functions to locate the data for a particular channel.
 
     Args:
         fp: The PL2 file object. The file must be open and is NOT closed on return.
@@ -87,24 +99,6 @@ def load_file_information(fp: IO) -> Dict[str, Any]:
     return data
 
 
-def load_all(fp: IO, info: Dict[str, Any] = None) -> Dict[str, Any]:
-    """
-    Load all of the data and metadata in a PL2 file and store in a dictionary.
-
-    Args:
-        fp: The PL2 file object. The file must be open and is NOT closed on return.
-        info: Dictionary containing information already culled from the file. If None, load_file_information() is
-            called first to load metadata from the file.
-
-    Returns:
-        Dictionary containing all information culled from the PL2 file.
-    """
-    if info is None:
-        info = load_file_information(fp)
-    _parse_data_blocks(fp, info)
-    return info
-
-
 def load_analog_channel(fp: IO, channel: int, info: Dict[str, Any] = None,
                         scale: bool = False) -> Optional[np.ndarray]:
     """
@@ -113,12 +107,11 @@ def load_analog_channel(fp: IO, channel: int, info: Dict[str, Any] = None,
     Args:
         fp: The PL2 file object. The file must be open and is NOT closed on return.
         channel: The analog channel index (zero-based).
-        info: Dictionary containing information already culled from the file. If None, load_file_information() is
-            called first to load basic information from the file. If not None, then the dictionary will be updated to
-            include the specified analog channel's data.
+        info: Dictionary containing "table of contents" information needed to locate channel data. If None,
+            load_file_information() is called first to load the table of contents.
         scale: If True, returns the results as an array of single precision floating point numbers, appropriately scaled
             by the conversion factor specified in the file header and then converted to millivolts. Otherwise, the raw
-            unscaled ADC data is returned.
+            unscaled ADC data is returned. Defaults to False.
 
     Returns:
         A Numpy array of the analog channel data, optionally scaled to millivolts. Returns None if data not found.
@@ -128,40 +121,36 @@ def load_analog_channel(fp: IO, channel: int, info: Dict[str, Any] = None,
 
     # Ensure that the appropriate analog channel exists and there is data there
     if channel >= len(info["analog_channels"]) or channel < 0:
-        raise RuntimeError(f"Invalid analog channel index: {channel}")
+        raise Exception(f"Invalid analog channel index: {channel}")
 
-    if "values" not in info["analog_channels"][channel]:
-        if ("block_offsets" not in info["analog_channels"][channel]) or \
-                (len(info["analog_channels"][channel]["block_offsets"]) == 0):
-            return None
+    if ("block_offsets" not in info["analog_channels"][channel]) or \
+            (len(info["analog_channels"][channel]["block_offsets"]) == 0):
+        return None
 
-        # Attempt to load the results
-        total_items = sum(info["analog_channels"][channel]["block_num_items"])
-        results = np.zeros(total_items, dtype=np.int16)
-        for i in range(0, len(info["analog_channels"][channel]["block_offsets"])):
-            block_offset = info["analog_channels"][channel]["block_offsets"][i]
-            fp.seek(block_offset)
-            _read(fp, "<B")   # data_type not used
-            _read(fp, "<B")   # data_subtype not used
+    # Attempt to load the results
+    total_items = sum(info["analog_channels"][channel]["block_num_items"])
+    results = np.zeros(total_items, dtype=np.int16)
+    for i in range(0, len(info["analog_channels"][channel]["block_offsets"])):
+        block_offset = info["analog_channels"][channel]["block_offsets"][i]
+        fp.seek(block_offset)
+        _read(fp, "<B")   # data_type not used
+        _read(fp, "<B")   # data_subtype not used
 
-            num_items = _read(fp, "<H")
-            if num_items != info["analog_channels"][channel]["block_num_items"][i]:
-                raise RuntimeError(f"Invalid number of items encountered for analog channel index {channel}.")
-            _read(fp, "<H")  # Channel
-            _read(fp, "<H")  # Unknown
-            timestamp = _read(fp, "<Q")  # Timestamp
-            if timestamp != info["analog_channels"][channel]["block_timestamps"][i]:
-                raise RuntimeError(f"Invalid timestamp encountered for analog channel index {channel}")
+        num_items = _read(fp, "<H")
+        if num_items != info["analog_channels"][channel]["block_num_items"][i]:
+            raise RuntimeError(f"Invalid number of items encountered for analog channel index {channel}.")
+        _read(fp, "<H")  # Channel
+        _read(fp, "<H")  # Unknown
+        timestamp = _read(fp, "<Q")  # Timestamp
+        if timestamp != info["analog_channels"][channel]["block_timestamps"][i]:
+            raise Exception(f"Invalid timestamp encountered for analog channel index {channel}")
 
-            # _read each of the items
-            values = _read(fp, "<{:d}h".format(num_items))
-            start = sum(info["analog_channels"][channel]["block_num_items"][0:i])
-            stop = start + num_items
-            results[start:stop] = values
-        # Save our results in the info structure
-        info["analog_channels"][channel]["values"] = results
+        # _read each of the items
+        values = _read(fp, "<{:d}h".format(num_items))
+        start = sum(info["analog_channels"][channel]["block_num_items"][0:i])
+        stop = start + num_items
+        results[start:stop] = values
 
-    results = np.array(info["analog_channels"][channel]["values"])
     if scale:
         results = results.astype(np.float)
         results *= info["analog_channels"][channel]["coeff_to_convert_to_units"] * 1000  # to mV
@@ -176,11 +165,10 @@ def load_event_channel(fp: IO, channel: int, info: Dict[str, Any] = None,
     Args:
         fp: The PL2 file object. The file must be open and is NOT closed on return.
         channel: The event channel index (zero-based).
-        info: Dictionary containing information already culled from the file. If None, load_file_information() is
-            called first to load basic information from the file. If not None, then the dictionary will be updated to
-            include the specified event channel's data.
+        info: Dictionary containing "table of contents" information needed to locate channel data. If None,
+            load_file_information() is called first to load the file's table of contents.
         scale: If True, event timestamps are converted to seconds since the start of the recording; otherwise, they
-            remain as integer tick counts.
+            remain as integer tick counts. Defaults to False.
 
     Returns:
         A dictionary with two keys. "timestamps" is a Numpy array holding the event timestamps (in seconds if scale is
@@ -194,41 +182,34 @@ def load_event_channel(fp: IO, channel: int, info: Dict[str, Any] = None,
     if channel >= len(info["event_channels"]) or channel < 0:
         raise RuntimeError(f"Invalid event channel index: {channel}")
 
-    if "timestamps" not in info["event_channels"][channel]:
-        if ("block_offsets" not in info["event_channels"][channel]) or \
-                (len(info["event_channels"][channel]["block_offsets"]) == 0):
-            return None
+    if ("block_offsets" not in info["event_channels"][channel]) or \
+            (len(info["event_channels"][channel]["block_offsets"]) == 0):
+        return None
 
-        # Attempt to load the results
-        total_items = sum(info["event_channels"][channel]["block_num_items"])
-        results = dict()
-        results["timestamps"] = np.zeros(total_items, dtype=np.uint64)
-        results["strobed"] = np.zeros(total_items, dtype=np.uint16)
-        for i in range(0, len(info["event_channels"][channel]["block_offsets"])):
-            block_offset = info["event_channels"][channel]["block_offsets"][i]
-            fp.seek(block_offset)
-            _read(fp, "<B")   # data_type not used
-            _read(fp, "<B")   # data_subtype not used
-
-            _read(fp, "<H")   # ??
-            _read(fp, "<H")   # Channel not used
-            num_items = _read(fp, "<Q")
-            if num_items != info["event_channels"][channel]["block_num_items"][i]:
-                raise RuntimeError(f"Invalid number of items encountered for event channel index {channel}")
-            _read(fp, "<H")
-
-            # _read each of the items
-            start = sum(info["event_channels"][channel]["block_num_items"][0:i])
-            stop = start + num_items
-            results["timestamps"][start:stop] = _read(fp, "<{:d}Q".format(num_items))
-            results["strobed"][start:stop] = _read(fp, "<{:d}H".format(num_items))
-        # Store the results in the info structure
-        info["event_channels"][channel]["timestamps"] = results["timestamps"]
-        info["event_channels"][channel]["strobed"] = results["strobed"]
-
+    # Attempt to load the results
+    total_items = sum(info["event_channels"][channel]["block_num_items"])
     results = dict()
-    results["timestamps"] = np.array(info["event_channels"][channel]["timestamps"])
-    results["strobed"] = np.array(info["event_channels"][channel]["strobed"])
+    results["timestamps"] = np.zeros(total_items, dtype=np.uint64)
+    results["strobed"] = np.zeros(total_items, dtype=np.uint16)
+    for i in range(0, len(info["event_channels"][channel]["block_offsets"])):
+        block_offset = info["event_channels"][channel]["block_offsets"][i]
+        fp.seek(block_offset)
+        _read(fp, "<B")   # data_type not used
+        _read(fp, "<B")   # data_subtype not used
+
+        _read(fp, "<H")   # ??
+        _read(fp, "<H")   # Channel not used
+        num_items = _read(fp, "<Q")
+        if num_items != info["event_channels"][channel]["block_num_items"][i]:
+            raise RuntimeError(f"Invalid number of items encountered for event channel index {channel}")
+        _read(fp, "<H")
+
+        # _read each of the items
+        start = sum(info["event_channels"][channel]["block_num_items"][0:i])
+        stop = start + num_items
+        results["timestamps"][start:stop] = _read(fp, "<{:d}Q".format(num_items))
+        results["strobed"][start:stop] = _read(fp, "<{:d}H".format(num_items))
+
     if scale:
         results["timestamps"] = results["timestamps"].astype(np.float)
         results["timestamps"] /= info["timestamp_frequency"]
@@ -246,9 +227,8 @@ def load_spike_channel(fp: IO, channel: int, info: Dict[str, Any] = None, scale:
     Args:
         fp: The PL2 file object. The file must be open and is NOT closed on return.
         channel: The spike channel index (zero-based).
-        info: Dictionary containing information already culled from the file. If None, load_file_information() is
-            called first to load basic information from the file. If not None, then the dictionary will be updated to
-            include the specified spike channel's data.
+        info: Dictionary containing "table of contents" information needed to locate channel data. If None,
+            load_file_information() is called first to load the file's table of contents.
         scale: If True, timestamps and spike waveform clips are scaled and converted to seconds (since the start of
             recording) and millivolts, respectively. Otherwise, they are left in their raw digitized form.
         spike_number: A given spike channel may contain multiple identified spike units -- numbered 0..3. If not None,
@@ -267,55 +247,45 @@ def load_spike_channel(fp: IO, channel: int, info: Dict[str, Any] = None, scale:
     if channel >= len(info["spike_channels"]) or channel < 0:
         raise RuntimeError(f"Invalid spike channel index: {channel}")
 
-    if "timestamps" not in info["spike_channels"][channel]:
-        if ("block_offsets" not in info["spike_channels"][channel]) or \
-                (len(info["spike_channels"][channel]["block_offsets"]) == 0):
-            return None
+    if ("block_offsets" not in info["spike_channels"][channel]) or \
+            (len(info["spike_channels"][channel]["block_offsets"]) == 0):
+        return None
 
-        # Attempt to load the results
-        total_items = np.sum(info["spike_channels"][channel]["block_num_items"])
-        results = dict()
-        results["num_points"] = info["spike_channels"][channel]["samples_per_spike"]
-        results["timestamps"] = np.empty(total_items, dtype=np.uint64)
-        results["spikes"] = np.empty((total_items, results["num_points"]), dtype=np.int16)
-        results["assignments"] = np.empty(total_items, dtype=np.uint16)
-
-        for i in range(0, len(info["spike_channels"][channel]["block_offsets"])):
-            block_offset = info["spike_channels"][channel]["block_offsets"][i]
-            fp.seek(block_offset)
-            _read(fp, "<B")   # data_type not used
-            _read(fp, "<B")   # data_subtype not used
-
-            _read(fp, "<H")   # ??
-            _read(fp, "<H")   # Channel
-            num_sample_points = _read(fp, "<H")
-            if num_sample_points != info["spike_channels"][channel]["samples_per_spike"]:
-                raise RuntimeError(f"Invalid number of samples per spike encountered for spike channel index {channel}:"
-                                   f" expected {info['spike_channels'][channel]['block_num_items']} but "
-                                   f"got {num_sample_points}")
-
-            num_items = _read(fp, "<Q")
-            if num_items != info["spike_channels"][channel]["block_num_items"][i]:
-                raise RuntimeError(f"Invalid number of items encountered for spike channel index {channel}: expected "
-                                   f"{info['spike_channels'][channel]['block_num_items']} but got {num_items}")
-
-            # read each of the items
-            start = sum(info["spike_channels"][channel]["block_num_items"][0:i])
-            stop = start + num_items
-            results["timestamps"][start:stop] = _read(fp, "<{:d}Q".format(num_items))
-            results["assignments"][start:stop] = _read(fp, "<{:d}H".format(num_items))
-            for j in range(start, stop):
-                results["spikes"][j, :] = _read(fp, "<{:d}h".format(results["num_points"]))
-
-        # Save our results in the info structure
-        info["spike_channels"][channel]["timestamps"] = results["timestamps"]
-        info["spike_channels"][channel]["assignments"] = results["assignments"]
-        info["spike_channels"][channel]["spikes"] = results["spikes"]
-
+    # Attempt to load the results
+    total_items = np.sum(info["spike_channels"][channel]["block_num_items"])
     results = dict()
-    results["timestamps"] = np.array(info["spike_channels"][channel]["timestamps"])
-    results["assignments"] = np.array(info["spike_channels"][channel]["assignments"])
-    results["spikes"] = np.array(info["spike_channels"][channel]["spikes"])
+    results["num_points"] = info["spike_channels"][channel]["samples_per_spike"]
+    results["timestamps"] = np.empty(total_items, dtype=np.uint64)
+    results["spikes"] = np.empty((total_items, results["num_points"]), dtype=np.int16)
+    results["assignments"] = np.empty(total_items, dtype=np.uint16)
+
+    for i in range(0, len(info["spike_channels"][channel]["block_offsets"])):
+        block_offset = info["spike_channels"][channel]["block_offsets"][i]
+        fp.seek(block_offset)
+        _read(fp, "<B")   # data_type not used
+        _read(fp, "<B")   # data_subtype not used
+
+        _read(fp, "<H")   # ??
+        _read(fp, "<H")   # Channel
+        num_sample_points = _read(fp, "<H")
+        if num_sample_points != info["spike_channels"][channel]["samples_per_spike"]:
+            raise RuntimeError(f"Invalid number of samples per spike encountered for spike channel index {channel}:"
+                               f" expected {info['spike_channels'][channel]['block_num_items']} but "
+                               f"got {num_sample_points}")
+
+        num_items = _read(fp, "<Q")
+        if num_items != info["spike_channels"][channel]["block_num_items"][i]:
+            raise RuntimeError(f"Invalid number of items encountered for spike channel index {channel}: expected "
+                               f"{info['spike_channels'][channel]['block_num_items']} but got {num_items}")
+
+        # read each of the items
+        start = sum(info["spike_channels"][channel]["block_num_items"][0:i])
+        stop = start + num_items
+        results["timestamps"][start:stop] = _read(fp, "<{:d}Q".format(num_items))
+        results["assignments"][start:stop] = _read(fp, "<{:d}H".format(num_items))
+        for j in range(start, stop):
+            results["spikes"][j, :] = _read(fp, "<{:d}h".format(results["num_points"]))
+
     if spike_number is not None:
         select = np.array(results["assignments"]) == spike_number
         results["timestamps"] = results["timestamps"][select]
@@ -402,97 +372,6 @@ def _read_header(fp: IO, data: Dict[str, Any]) -> None:
     data["reprocessor_comment"] = bytearray(_read(fp, "<256B")).decode('ascii').split('\0', 1)[0]
     data["reprocessor_software_name"] = bytearray(_read(fp, "<64B")).decode('ascii').split('\0', 1)[0]
     # data["reprocessor_date_time"] = _read_date_time(fp)
-
-
-def _parse_data_blocks(fp: IO, data: Dict[str, Any]) -> None:
-    """
-    Parses the data blocks in the PL2 file in sequence, appending items to the data dictionary as they are unpacked.
-    This function ensures that all of the data is read without relying on the data in the footer.
-
-    Args:
-        fp: The PL2 file object. Upon return, the file pointer should be positioned on the next 16-byte boundary after
-            the last data block.
-        data: The dictionary in which all data parsed from the file is stored. It must already contain, at a minimum,
-            the contents of the file header, since this information is needed to parse the data blocks.
-    """
-    # Seek to the first data block and begin _reading
-    fp.seek(data["internal_value_2"])
-
-    if data["internal_value_3"] == 0:
-        data["internal_value_3"] = data["internal_value_4"]  # File is not complete
-
-    while fp.tell() < data["internal_value_3"]:
-        # read type
-        data_type = _read(fp, "<B")
-        data_subtype = _read(fp, "<B")
-        offset = _get_channel_offset(data, data_subtype)
-
-        if data_type == PL2_DATA_BLOCK_ANALOG_CHANNEL:
-            num_items = _read(fp, "<H")
-            channel = _read(fp, "<H") + offset - 1
-            _read(fp, "<H")  # Unknown
-            _read(fp, "<Q")  # timestamp? not used
-
-            # read each of the items
-            values = _read(fp, "<{:d}h".format(num_items), True)
-
-            # Store in the output
-            if "values" not in data["analog_channels"][channel]:
-                data["analog_channels"][channel]["values"] = values
-            else:
-                data["analog_channels"][channel]["values"].extend(values)
-        elif data_type == PL2_DATA_BLOCK_SPIKE_CHANNEL:
-            _read(fp, "<H")
-            channel = _read(fp, "<H") + offset - 1
-            num_sample_points = _read(fp, "<H")
-            num_items = _read(fp, "<Q")
-
-            # _read each of the items (64 byte values)
-            timestamps = _read(fp, "<{:d}Q".format(num_items), True)
-            assignments = _read(fp, "<{:d}H".format(num_items), True)  # These are probably assignments
-            spikes = np.zeros((num_items, num_sample_points), dtype=np.int16)
-            for i in range(0, num_items):
-                spikes[i, :] = _read(fp, "<{:d}h".format(num_sample_points))  # _read actual sample points
-            if "timestamps" not in data["spike_channels"][channel]:
-                data["spike_channels"][channel]["timestamps"] = timestamps
-                data["spike_channels"][channel]["assignments"] = assignments
-                data["spike_channels"][channel]["spikes"] = spikes
-            else:
-                data["spike_channels"][channel]["timestamps"].extend(timestamps)
-                data["spike_channels"][channel]["assignments"].extend(assignments)
-                data["spike_channels"][channel]["spikes"] = np.append(data["spike_channels"][channel]["spikes"],
-                                                                      spikes, axis=0)
-        elif data_type == PL2_DATA_BLOCK_EVENT_CHANNEL:
-            _read(fp, "<H")
-            channel = _read(fp, "<H") + offset - 1
-            num_items = _read(fp, "<Q")
-            _read(fp, "<H")
-            timestamps = _read(fp, "<{:d}Q".format(num_items), True)
-            strobed = _read(fp, "<{:d}H".format(num_items), True)
-
-            if "timestamps" not in data["event_channels"][channel]:
-                data["event_channels"][channel]["timestamps"] = timestamps
-                data["event_channels"][channel]["strobed"] = strobed
-            else:
-                data["event_channels"][channel]["timestamps"].extend(timestamps)
-                data["event_channels"][channel]["strobed"].extend(strobed)
-        elif data_type == PL2_DATA_BLOCK_START_STOP_CHANNEL:
-            # Start-stop Channel
-            _read(fp, "<H")
-            _read(fp, "<H") - 1  # channel - not used
-            num_items = _read(fp, "<Q")
-            timestamps = list(_read(fp, "<{:d}Q".format(num_items)))
-            assignments = list(_read(fp, "<{:d}H".format(num_items)))
-            if "timestamps" not in data["start_stop_channels"]:
-                data["start_stop_channels"]["timestamps"] = timestamps
-                data["start_stop_channels"]["assignments"] = assignments
-            else:
-                data["start_stop_channels"]["timestamps"].extend(timestamps)
-                data["start_stop_channels"]["assignments"].extend(assignments)
-        else:
-            raise RuntimeError("Unknown data type at position ", fp.tell() - 2, "Got value: ", data_type)
-        # Align to next 16 byte boundary
-        fp.seek(int((fp.tell() + 15) / 16) * 16)
 
 
 def _read_date_time(fp: IO) -> Dict[str, int]:

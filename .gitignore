@@ -6,5 +6,4 @@ venv/**
 .DS_Store
 **/__pycache/**
 *.pyc
-/backend/src/database/test.zip
-/backend/src/test_maestro.py
+/backend/src/test_largezip.py

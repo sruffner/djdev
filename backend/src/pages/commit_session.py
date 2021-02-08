@@ -28,9 +28,69 @@ from dash.dependencies import Input, Output, State
 import plotly.express as px
 from app import app
 import json
+import uuid
 from database.session_builder import SessionBuilder, SessionBuilderError
 from database.table_views import SessionView
 from typing import Any, List, Dict
+
+
+def _create_dash_upload_component(
+        component_id='dash-uploader',
+        text='Drag and Drop Here to upload!',
+        text_completed='Uploaded: ',
+        cancel_button=True,
+        pause_button=False,
+        filetypes=None,
+        max_file_size=1024,
+        chunk_size=1,
+        default_style=None,
+        upload_id=None,
+        max_files=1,
+):
+    """
+    This is a revision of the Upload() function in dash-uploader to allow specification of the file upload chunk size
+    in MB. The default value of 1MB is just too small for giga-byte file uploads. In addition, knitting together all of
+    the chunks on the server will take too long when you have thousands of 1MB chunks. Use the 'chunk_size' parameter
+    to specify the chunk size in MB; it will be range-restricted to [1..100]
+    """
+    # limit allowed range for chunk_size
+    chunk_size = min(max(1, chunk_size), 100)
+
+    # Handle styling
+    default_style = du.upload.combine(default_style, du.upload.DEFAULT_STYLE)
+    upload_style = du.upload.combine({'lineHeight': '0px'}, default_style)
+
+    if upload_id is None:
+        upload_id = uuid.uuid1()
+
+    service = du.upload.update_upload_api(du.upload.settings.requests_pathname_prefix,
+                                          du.upload.settings.upload_api)
+
+    arguments = dict(
+        id=component_id,
+        # Have not tested if using many files
+        # is reliable -> Do not allow
+        maxFiles=max_files,
+        maxFileSize=max_file_size * 1024 * 1024,
+        chunkSize=chunk_size * 1024 * 1024,
+        textLabel=text,
+        service=service,
+        startButton=False,
+        # Not tested so default to one.
+        simultaneousUploads=1,
+        completedMessage=text_completed,
+        cancelButton=cancel_button,
+        pauseButton=pause_button,
+        defaultStyle=default_style,
+        uploadingStyle=upload_style,
+        completeStyle=default_style,
+        upload_id=str(upload_id),
+    )
+
+    if filetypes:
+        arguments['filetypes'] = filetypes
+
+    return du.Upload_ReactComponent(**arguments)
 
 
 class _SessionCommitter:
@@ -110,8 +170,9 @@ class _SessionCommitter:
         progress**.*
         
         ''')
-        uploader = du.Upload(id="session_archive_uploader", max_file_size=10000, max_files=1, cancel_button=False,
-                             filetypes=['zip'], upload_id=f"{state['experimenter']}-{state['uuid']}")
+        uploader = _create_dash_upload_component(
+            component_id="session_archive_uploader", max_file_size=10000, chunk_size=100, max_files=1,
+            cancel_button=False, filetypes=['zip'], upload_id=f"{state['experimenter']}-{state['uuid']}")
         upload_div = html.Div(uploader, id="uploader_container", className="mb-3")
         intv_check = dcc.Interval(id="stage2_check_progress", disabled=True, interval=1000)
         alert = dbc.Alert(id="stage2_alert", color="info", is_open=False)
