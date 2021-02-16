@@ -9,11 +9,18 @@ functionality of a session commit. This Dash web page implements the client-side
 
 The page layout essentially consists of a single Dash Bootstrap Card element in which the header, body and footer of the
 card are updated for each stage in the commit process. The _SessionCommitter class implements the per-stage card
-content. Because the commit process requires a multi-stage interaction between client and server, a Dash Store element
-in the page layout is used to preserve the current state of the procedure. The store uses 'local' browser memory, which
-means that the state is preserved even if the browser tab is closed or the browser itself shutdown. The state info in
-the store is included in server callbacks in order to synchronize client and server. See session_builder.py for a
-detailed explanation.
+content.
+
+Since committing an experiment session to the lab database requires a multi-stage interaction between client and server
+and will take an indeterminate amount of time to complete on the server side, the server assigns a unique "task
+identifier" when the commit task initiated. Once a task is initiated, the client must supply this task ID in each
+server request to check task progress, retrieve intermediate results, or supply additional information required for the
+commit. A Dash Store element in the page layout is used to preserve this task ID, along with current stage index, as a
+simple dictionary: {'stage': int, 'task_id': str}. In stage 1 the task ID is undefined and will be set to an empty
+string. In stages 2-4, the task ID is that assigned by the server after the session information is successfully
+submitted in stage 1. Since the Store element uses 'local' browser memory, the dictionary is preserved even if the
+browser tab is closed or the browser itself shutdown. That way, if the user returns to the session commit page later,
+the client can query the server for the current state of the commit task and refresh the page content accordingly.
 
 @author: sruffner
 """
@@ -29,9 +36,11 @@ import plotly.express as px
 from app import app
 import json
 import uuid
-from database.session_builder import SessionBuilder, SessionBuilderError
+
+from database import maestro
+from database.session_builder import SessionBuilder, OmniplexUnit
 from database.table_views import SessionView
-from typing import Any, List, Dict
+from typing import Any, List
 
 
 def _create_dash_upload_component(
@@ -154,7 +163,12 @@ class _SessionCommitter:
         return dbc.Form(form_groups)
 
     @staticmethod
-    def stage2_body(state: dict) -> Any:
+    def stage2_body(substage: int, task_id: str) -> Any:
+        # there are 3 substages in stage 2: 0 = waiting, 1 = uploading, 2 = preprocessing. If upload has already
+        # started or finished, we need to hide the uploader and show the alert and enable progress updates. NOTE that
+        # if the user closes the page in the middle of the upload, it will not resume...
+        upload_started = substage > 0
+
         markdown = dcc.Markdown('''
         **Instructions**:
 
@@ -162,61 +176,78 @@ class _SessionCommitter:
         subdirectories). Maximum supported file size is 2GB.
         * If the session includes behavioral data only, the archive should contain only the Maestro data files.
         * There is no support at this time for automatic spike sorting. If the experiment includes electrophysiological 
-        recordings, the experimenter must supply neural unit data (spike trains) in a separate MAT or Numpy file
-        named **neural-units.mat** or **neural-units.npy**, respectively.
+        recordings, the experimenter must supply neural unit data (spike trains) in a pickle file (.pkl or .pickle) in
+        a specific format. This must be the only pickle file in the archive.
         
         *Drag and drop the ZIP file onto the upload component below, or click on the component to browse the file
         system for the file. The upload should start automatically. **Do NOT close browser tab while upload is in
-        progress**.*
+        progress. Large (>1GB) will take a significant amount of time to upload, depending on network speed**.*
         
         ''')
         uploader = _create_dash_upload_component(
             component_id="session_archive_uploader", max_file_size=10000, chunk_size=100, max_files=1,
-            cancel_button=False, filetypes=['zip'], upload_id=f"{state['experimenter']}-{state['uuid']}")
-        upload_div = html.Div(uploader, id="uploader_container", className="mb-3")
-        intv_check = dcc.Interval(id="stage2_check_progress", disabled=True, interval=1000)
-        alert = dbc.Alert(id="stage2_alert", color="info", is_open=False)
+            cancel_button=False, filetypes=['zip'], upload_id=f"{task_id}")
+        upload_div = html.Div(uploader, id="uploader_container", className="mb-3",
+                              style={'display': 'none'} if upload_started else {})
+        intv_check = dcc.Interval(id="stage2_check_progress", disabled=not upload_started, interval=1000)
+        alert = dbc.Alert(id="stage2_alert", color="info", is_open=upload_started)
         return [markdown, upload_div, intv_check, alert]
 
     __STAGE_HEADERS = {
         1: 'Step 1: Enter session information',
-        2: 'Step 2: Upload session data archive',
-        3: 'Step 3: Review trial protocols',
-        4: 'Step 4: Review neural units'
+        2: 'Step 2: Upload session data archive and pre-process',
+        3: 'Step 3: Review and confirm',
+        4: 'Step 4: Commit session to database'
     }
 
     @staticmethod
-    def stage3_body(state: dict) -> Any:
-        # NOTE - At this point, summaries of the trial protocols culled in stage 2 have been transferred to the
-        # client and stored as part of the client state, in the field 'protocols', as a dictionary keyed by the
-        # protocols' md5 digests
-        markdown = dcc.Markdown('''
-        **After reviewing the trial protocols here, click "Continue" to proceed to the next step. If you detect an
-        issue, click "Cancel" to start over.**
-        ''')
-        proto_map: Dict[str, Dict[str, Any]] = state['protocols']
-        protocols_by_path = [proto_map[k] for k in sorted(proto_map.keys(), key=lambda x: proto_map[x]['path_name'])]
-        initial_selection = protocols_by_path[0]
+    def stage3_body(task_id: str) -> Any:
+        session_builder = SessionBuilder()
+        proto_map = session_builder.get_trial_protocol_paths(task_id)
+        first_key = next(iter(proto_map.keys()))
+        initial_protocol: maestro.Protocol = session_builder.get_trial_protocol(task_id, first_key)
         select_protocol = dbc.Select(
             id='stage3_proto_select',
-            options=[{'label': p['path_name'], 'value': p['digest']} for p in protocols_by_path],
-            value=initial_selection['path_name']
+            options=[{'label': v, 'value': k} for k, v in proto_map.items()],
+            value=first_key
         )
-        protocol_div = html.Div(_SessionCommitter.stage3_display_protocol(initial_selection), id="stage3_protocol_div")
-        return [markdown, select_protocol, protocol_div]
+        protocol_div = html.Div(_SessionCommitter.stage3_display_protocol(initial_protocol), id="stage3_protocol_div")
+        proto_tab_content = dbc.Card(dbc.CardBody([select_protocol, protocol_div]), className="mt-3")
+
+        num_units = session_builder.get_num_neural_units(task_id)
+        if num_units is None:
+            num_units = 0
+        first_unit = None if num_units == 0 else session_builder.get_neural_unit_metrics(task_id, 0)
+        select_unit = dbc.Select(
+            id='stage3_unit_select',
+            options=[{'label': f"Unit {i + 1}", 'value': str(i)} for i in range(num_units)],
+            value="0" if num_units > 0 else []
+        )
+        unit_div = html.Div([] if num_units == 0 else _SessionCommitter.stage3_display_unit(first_unit),
+                            id="stage3_unit_div")
+        unit_tab_content = dbc.Card(dbc.CardBody([select_unit, unit_div]), className="mt-3")
+
+        tabs = dbc.Tabs(
+            [
+                dbc.Tab(proto_tab_content, label="Trial Protocols"),
+                dbc.Tab(unit_tab_content, label="Neural Units", disabled=(num_units == 0))
+            ]
+        )
+        return tabs
 
     @staticmethod
-    def stage3_display_protocol(protocol: Dict[str, Any]) -> List[Any]:
-        segments = protocol['segments']
-        targets = protocol['targets']
+    def stage3_display_protocol(protocol: maestro.Protocol) -> List[Any]:
+        proto_summary = protocol.summary()
+        segments = proto_summary['segments']
+        targets = proto_summary['targets']
         target_names = [target_desc.split(':')[0] for target_desc in targets]  # THIS IS A HACK
-        perts = protocol['perts']
-        sections = protocol['sections']
-        diffs = protocol['diffs']
+        perts = proto_summary['perts']
+        sections = proto_summary['sections']
+        diffs = proto_summary['diffs']
 
         badges = [
-            dbc.Badge(f"Record Seg: {protocol['record_seg']}", color="primary", className="mr-3"),
-            dbc.Badge(f"Transform: {protocol['transform']}", color="primary", className="mr-3"),
+            dbc.Badge(f"Record Seg: {proto_summary['record_seg']}", color="primary", className="mr-3"),
+            dbc.Badge(f"Transform: {proto_summary['transform']}", color="primary", className="mr-3"),
             dbc.Badge(f"Targets: {len(target_names)}", id="stage3_targets", color="primary", className="mr-3"),
             dbc.Badge(f"Perturbations: {len(perts)}", id="stage3_perts", color="primary", className="mr-3"),
             dbc.Badge(f"Tagged Sections: {len(sections)}", id="stage3_sections", color="primary", className="mr-3"),
@@ -294,79 +325,47 @@ class _SessionCommitter:
         return [html.Div(badges, className='mt-3 mb-1'), segment_table]
 
     @staticmethod
-    def stage4_body(state: dict) -> Any:
-        # NOTE - At this point, summaries of the neural units culled in stage 2 have been transferred to the
-        # client and stored as part of the client state, in the field 'units', as a list of dictionaries...
-        markdown = dcc.Markdown('''
-        **After reviewing the neural units here, click "Continue" to proceed to the next step. If you detect an
-        issue, click "Cancel" to start over.**
-        ''')
-        unit_summaries: List[Dict[str, Any]] = state['units']
-        initial_selection = unit_summaries[0]
-        select_unit = dbc.Select(
-            id='stage4_unit_select',
-            options=[{'label': f"Unit {i+1}", 'value': str(i)} for i in range(len(unit_summaries))],
-            value="0"
-        )
-        unit_div = html.Div(_SessionCommitter.stage4_display_unit(initial_selection), id="stage4_unit_div")
-        return [markdown, select_unit, unit_div]
-
-    @staticmethod
-    def stage4_display_unit(unit_summary: Dict[str, Any]) -> List[Any]:
-        spike_times = unit_summary['spike_times']
-        template = unit_summary['template']
-        for i in range(len(template)):
-            template[i] = template[i] * 1000.0   # convert to micro-volts
-        peak_to_peak = max(template) - min(template)
-
+    def stage3_display_unit(unit: OmniplexUnit) -> List[Any]:
+        peak_to_peak = max(unit.template) - min(unit.template)
         badges = [
-            dbc.Badge(f"Omniplex Channel: {unit_summary['channel_id']}", color="primary", className="mr-3"),
-            dbc.Badge(f"Mean firing rate: {unit_summary['firing_rate']:.1f} Hz", color="primary", className="mr-3"),
-            dbc.Badge(f"#Spikes: {len(spike_times)}", color="primary", className="mr-3"),
-            dbc.Badge(f"SNR: {unit_summary['snr']:.2f}", color="primary", className="mr-3"),
+            dbc.Badge(f"Omniplex Channel: {unit.channel}", color="primary", className="mr-3"),
+            dbc.Badge(f"Mean firing rate: {unit.firing_rate:.1f} Hz", color="primary", className="mr-3"),
+            dbc.Badge(f"#Spikes: {len(unit.spike_times)}", color="primary", className="mr-3"),
+            dbc.Badge(f"SNR: {unit.snr:.2f}", color="primary", className="mr-3"),
             dbc.Badge(f"Peak-to-peak: {peak_to_peak:.1f} \u00B5V", color="primary", className="mr-3"),
         ]
 
         # simple graph of template waveform. Note I'm assuming 40KHz sampling rate here!
-        graph = dcc.Graph(figure=px.line(x=[i/40.0 for i in range(len(template))], y=template,
+        graph = dcc.Graph(figure=px.line(x=[i/40.0 for i in range(len(unit.template))], y=unit.template,
                                          labels={'x': 'time (ms)', 'y': '\u00B5V'},
                                          title='Average spike waveform (1-ms pre, 9-ms post)'))
 
         return [html.Div(badges, className='mt-3 mb-1'), graph]
 
     @staticmethod
-    def header(state: dict = None) -> str:
-        stage = state['stage'] if state else 1
+    def header(stage: int) -> str:
         return _SessionCommitter.__STAGE_HEADERS[stage]
 
     @staticmethod
-    def body(state: dict = None) -> Any:
-        if not state:
-            state = {'stage': 1, 'experimenter': '', 'uuid': ''}
-        if state['stage'] == 4:
-            return _SessionCommitter.stage4_body(state)
-        elif state['stage'] == 3:
-            return _SessionCommitter.stage3_body(state)
-        elif state['stage'] == 2:
-            return _SessionCommitter.stage2_body(state)
+    def body(stage: int, substage: int, task_id: str) -> Any:
+        if stage == 3:
+            return _SessionCommitter.stage3_body(task_id)
+        elif stage == 2:
+            return _SessionCommitter.stage2_body(substage, task_id)
         else:
             return _SessionCommitter.stage1_body()
 
     @staticmethod
-    def footer(state: dict = None) -> List[dbc.Button]:
-        if not state:
-            state = {'stage': 1, 'experimenter': '', 'uuid': ''}
-        if state['stage'] == 1:
-            out = [dbc.Button("Submit", id="stage1_submit_btn", color='primary')]
-        elif state['stage'] == 2:
+    def footer(stage: int) -> List[dbc.Button]:
+        if stage == 3:
+            out = [dbc.Button("Continue", id="stage3_continue_btn", color='primary', className='mr-3', disabled=True),
+                   dbc.Button("Cancel", id="stage3_cancel_btn", color='primary')]
+        elif stage == 2:
             out = [dbc.Button("Continue", id="stage2_continue_btn", color='primary', className='mr-3', disabled=True),
                    dbc.Button("Cancel", id="stage2_cancel_btn", color='primary')]
-        elif state['stage'] == 3:
-            out = [dbc.Button("Continue", id="stage3_continue_btn", color='primary', className='mr-3'),
-                   dbc.Button("Cancel", id="stage3_cancel_btn", color='primary')]
         else:
-            out = [dbc.Button("Continue", id="stage4_continue_btn", color='primary', className='mr-3', disabled=True),
-                   dbc.Button("Cancel", id="stage4_cancel_btn", color='primary')]
+            out = [dbc.Button("Submit", id="stage1_submit_btn", color='primary')]
+
         return out
 
     def _callbacks(self):
@@ -382,24 +381,29 @@ class _SessionCommitter:
             if next_btn is None:
                 raise dash.exceptions.PreventUpdate
 
-            # if stored client_state indicates we're in a later stage, sync with server and switch to the correct stage
-            # if confirmed.
-            client_state = args[0] if isinstance(args[0], dict) else {'stage': 1, 'experimenter': '', 'uuid': ''}
             session_builder = SessionBuilder()
-            corrected_state = session_builder.sync_client_state(client_state)
-            if corrected_state:
-                client_state = corrected_state
+
+            # check to see if a commit task ID is in the local store. If so, then we should not be in stage 1. Sync
+            # with server and switch to the correct stage.
+            client_state = args[0] if isinstance(args[0], dict) else {'stage': 1, 'task_id': ""}
             if client_state['stage'] > 1:
-                return json.dumps(client_state), dash.no_update, dash.no_update
+                stage, _ = session_builder.get_commit_task_stage(client_state['task_id'])
+                if stage > 1:
+                    client_state['stage'] = stage
+                    return json.dumps(client_state), dash.no_update, dash.no_update
+                else:
+                    client_state['stage'] = 1
+                    client_state['task_id'] = ""
 
             entry = dict()
             for i, attr in enumerate(SessionView().attributes()):
                 entry[attr.id] = str(args[i + 1])
-            try:
-                client_state = session_builder.stage1_enter_session_info(client_state, entry)
-            except SessionBuilderError as err:
-                return dash.no_update, True, str(err)
-            return json.dumps(client_state), dash.no_update, dash.no_update
+            ok, task_id_or_err = session_builder.initiate_session_commit(entry)
+            if ok:
+                client_state = {'stage': 2, 'task_id': task_id_or_err}
+                return json.dumps(client_state), dash.no_update, dash.no_update
+            else:
+                return dash.no_update, True, task_id_or_err
 
         @dash_app.callback(
             [Output('stage2_alert', 'children'), Output('stage2_alert', 'is_open'),
@@ -418,20 +422,22 @@ class _SessionCommitter:
             trigger = ctx.triggered[0]['prop_id'].split('.')[0]
             if (trigger.find('stage2_check_progress') > -1) and (n_intervals is not None):
                 session_builder = SessionBuilder()
-                try:
-                    result, messages, server_state = session_builder.stage2_progress_update(client_state)
-                except SessionBuilderError as err:
-                    result, messages, server_state = None, [str(err)], client_state
-
-                out[0] = messages[-1] if len(messages) > 0 else dash.no_update
-                out[2] = (result is not None)
-                out[3] = False
-                out[4] = not result
+                stage, message, result = session_builder.progress_update(client_state['task_id'])
+                if stage == 1:
+                    out[0] = "Client out of sync; please cancel and try again"
+                    out[2] = True
+                    out[3] = False
+                    out[4] = True
+                else:
+                    out[0] = message
+                    out[2] = (stage > 2) or (result is False)
+                    out[3] = False
+                    out[4] = (stage == 2)
             elif trigger.find('session_archive_uploader') > -1:
                 if (not is_completed) and (file_names is not None):
                     out[3] = True
                 elif is_completed:
-                    out[0] = f"Upload complete: {file_names[0]}"
+                    out[0] = "Checking progress..."  # this message will be replaced shortly by first progress update
                     out[1] = True
                     out[2] = False
                     out[3] = False
@@ -444,19 +450,33 @@ class _SessionCommitter:
         def on_stage2_transition(n_cancel, n_continue, client_state):
             session_builder = SessionBuilder()
             next_state = None
+            task_id = client_state['task_id']
             if n_cancel is not None:
-                session_builder.cancel(client_state)
-                next_state = {'stage': 1, 'experimenter': '', 'uuid': ''}
-            elif n_continue is not None:
-                next_state = session_builder.stage2_next(client_state)
-
+                session_builder.cancel(task_id)
+                next_state = {'stage': 1, 'task_id': ""}
+            elif n_continue is not None and (3 == session_builder.get_commit_task_stage(task_id)[0]):
+                next_state = {'stage': 3, 'task_id': task_id}
             return dash.no_update if (next_state is None) else json.dumps(next_state)
 
         @dash_app.callback(Output('stage3_protocol_div', 'children'), [Input('stage3_proto_select', 'value')],
                            [State('commit_state', 'data')])
-        def on_stage3_proto_select(proto_key, state):
-            if isinstance(proto_key, str) and ('protocols' in state) and (proto_key in state['protocols']):
-                return _SessionCommitter.stage3_display_protocol(state['protocols'][proto_key])
+        def on_stage3_proto_select(proto_key, client_state):
+            session_builder = SessionBuilder()
+            task_id = client_state['task_id']
+            protocol = session_builder.get_trial_protocol(task_id, proto_key)
+            if protocol:
+                return _SessionCommitter.stage3_display_protocol(protocol)
+            return dash.no_update
+
+        @dash_app.callback(Output('stage3_unit_div', 'children'), [Input('stage3_unit_select', 'value')],
+                           [State('commit_state', 'data')])
+        def on_stage3_unit_select(value, client_state):
+            unit_idx = int(value) if isinstance(value, str) else -1
+            session_builder = SessionBuilder()
+            task_id = client_state['task_id']
+            unit = session_builder.get_neural_unit_metrics(task_id, unit_idx)
+            if unit:
+                return _SessionCommitter.stage3_display_unit(unit)
             return dash.no_update
 
         @dash_app.callback(Output('stage3_next_state', 'children'),
@@ -465,30 +485,13 @@ class _SessionCommitter:
         def on_stage3_transition(n_cancel, n_continue, client_state):
             session_builder = SessionBuilder()
             next_state = None
+            task_id = client_state['task_id']
             if n_cancel is not None:
-                session_builder.cancel(client_state)
-                next_state = {'stage': 1, 'experimenter': '', 'uuid': ''}
+                session_builder.cancel(task_id)
+                next_state = {'stage': 1, 'task_id': ""}
             elif n_continue is not None:
-                next_state = SessionBuilder.stage3_next(client_state)
+                next_state = None  # TODO: Transition to stage 4 once it's implemented
             return dash.no_update if (next_state is None) else json.dumps(next_state)
-
-        @dash_app.callback(Output('stage4_unit_div', 'children'), [Input('stage4_unit_select', 'value')],
-                           [State('commit_state', 'data')])
-        def on_stage4_unit_select(value, state):
-            unit_idx = int(value) if isinstance(value, str) else -1
-            if ('units' in state) and (0 <= unit_idx < len(state['units'])):
-                return _SessionCommitter.stage4_display_unit(state['units'][unit_idx])
-            return dash.no_update
-
-        @dash_app.callback(Output('stage4_next_state', 'children'), [Input('stage4_cancel_btn', 'n_clicks')],
-                           [State('commit_state', 'data')])
-        def on_stage4_cancel(n_cancel, client_state):
-            next_state = dash.no_update
-            if n_cancel is not None:
-                session_builder = SessionBuilder()
-                session_builder.cancel(client_state)
-                next_state = json.dumps({'stage': 1, 'experimenter': '', 'uuid': ''})
-            return next_state
 
 
 __session_committer = _SessionCommitter(app)
@@ -498,22 +501,21 @@ layout = html.Div([
     html.Div("", id="stage1_next_state", style={"display": "none"}),
     html.Div("", id="stage2_next_state", style={"display": "none"}),
     html.Div("", id="stage3_next_state", style={"display": "none"}),
-    html.Div("", id="stage4_next_state", style={"display": "none"}),
     dbc.Container([
         dbc.Row([dbc.Col(html.H3("Commit experiment sessions to the laboratory database", className="text-center"),
                 className="mb-3 mt-3")]),
         dbc.Row([dbc.Col(html.H5(children='*** UNDER CONSTRUCTION ***'), className="mb-3")]),
         dbc.Card([
-            dbc.CardHeader(__session_committer.header(), id="stage_hdr"),
-            dbc.CardBody(__session_committer.body(), id="stage_body"),
-            dbc.CardFooter(__session_committer.footer(), id="stage_footer")
+            dbc.CardHeader(__session_committer.header(1), id="stage_hdr"),
+            dbc.CardBody(__session_committer.body(1, 0, ""), id="stage_body"),
+            dbc.CardFooter(__session_committer.footer(1), id="stage_footer")
         ])
     ])
 ])
 
 
 @app.callback(Output('commit_state', 'data'),
-              [Input(f"stage{i+1}_next_state", 'children') for i in range(4)])
+              [Input(f"stage{i+1}_next_state", 'children') for i in range(3)])
 def on_client_state_change(*args):
     ctx = dash.callback_context
     if not ctx.triggered:
@@ -526,8 +528,6 @@ def on_client_state_change(*args):
         client_state = json.loads(args[1])
     elif btn_id.find('stage3') > -1:
         client_state = json.loads(args[2])
-    elif btn_id.find('stage4') > -1:
-        client_state = json.loads(args[3])
     else:
         client_state = dash.no_update
     return client_state
@@ -537,14 +537,17 @@ def on_client_state_change(*args):
 # store at initial load. This is due to a limitation in Dash.
 @app.callback([Output('stage_hdr', 'children'), Output('stage_body', 'children'), Output('stage_footer', 'children')],
               [Input('commit_state', 'modified_timestamp')], [State('commit_state', 'data')])
-def update_layout_on_client_state_change(ts, state):
+def update_layout_on_client_state_change(ts, client_state):
     if ts is None:
         raise dash.exceptions.PreventUpdate
 
-    # the store will contain None initially -- so we initialize it if necessary
-    if not isinstance(state, dict):
-        state = {'stage': 1, 'experimenter': '', 'uuid': ''}
-    session_builder = SessionBuilder()
-    state = session_builder.sync_client_state(state)
-
-    return __session_committer.header(state), __session_committer.body(state), __session_committer.footer(state)
+    # if there is no state dictionary in the store, then we're in stage 1. Else, sync with the server
+    stage, substage, task_id = (1, 0, "")
+    if client_state:
+        stage, task_id = (client_state['stage'], client_state['task_id'])
+    if len(task_id) > 0:
+        stage, substage = SessionBuilder().get_commit_task_stage(client_state['task_id'])
+        if stage == 1:
+            task_id = ""
+    return __session_committer.header(stage), __session_committer.body(stage, substage, task_id), \
+        __session_committer.footer(stage)

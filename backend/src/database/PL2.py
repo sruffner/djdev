@@ -100,7 +100,7 @@ def load_file_information(fp: IO) -> Dict[str, Any]:
 
 
 def load_analog_channel(fp: IO, channel: int, info: Dict[str, Any] = None,
-                        scale: bool = False) -> Optional[np.ndarray]:
+                        scale: bool = False) -> np.ndarray:
     """
     Loads recorded data for a specified analog channel in a PL2 file.
 
@@ -114,7 +114,10 @@ def load_analog_channel(fp: IO, channel: int, info: Dict[str, Any] = None,
             unscaled ADC data is returned. Defaults to False.
 
     Returns:
-        A Numpy array of the analog channel data, optionally scaled to millivolts. Returns None if data not found.
+        A Numpy array of the analog channel data, optionally scaled to millivolts.
+
+    Raises:
+        A generic Exception if analog data not found for specified channel or file contains invalid data
     """
     if info is None:
         info = load_file_information(fp)
@@ -125,7 +128,7 @@ def load_analog_channel(fp: IO, channel: int, info: Dict[str, Any] = None,
 
     if ("block_offsets" not in info["analog_channels"][channel]) or \
             (len(info["analog_channels"][channel]["block_offsets"]) == 0):
-        return None
+        raise Exception(f"Missing block information for analog channel index: {channel}")
 
     # Attempt to load the results
     total_items = sum(info["analog_channels"][channel]["block_num_items"])
@@ -155,6 +158,49 @@ def load_analog_channel(fp: IO, channel: int, info: Dict[str, Any] = None,
         results = results.astype(np.float)
         results *= info["analog_channels"][channel]["coeff_to_convert_to_units"] * 1000  # to mV
     return results
+
+
+def load_analog_channel_block(fp: IO, channel: int, block: int, info: Dict[str, Any]) -> np.ndarray:
+    """
+    Loads one block of samples for a specified analog data channel in a PL2 file.
+
+    Args:
+        fp: The PL2 file object. The file must be open and is NOT closed on return.
+        channel: The analog channel index (zero-based).
+        block: The block index (zero-based).
+        info: Dictionary containing "table of contents" information needed to locate channel data -- as retrieved by
+            load_file_information().
+
+    Returns:
+        A Numpy array of the analog channel data samples for the block specified (raw ADC samples; int16).
+
+    Raises:
+        A generic Exception if analog data not found for specified channel or file contains invalid data
+    """
+    # Ensure that the appropriate analog channel exists and there is data there for the block index specified.
+    if channel >= len(info["analog_channels"]) or channel < 0:
+        raise Exception(f"Invalid analog channel index: {channel}")
+    if ("block_offsets" not in info["analog_channels"][channel]) or \
+            (len(info["analog_channels"][channel]["block_offsets"]) == 0):
+        raise Exception(f"Missing block information for analog channel index: {channel}")
+    if block >= len(info["analog_channels"][channel]["block_offsets"]) or block < 0:
+        raise Exception(f"Invalid block index ({block}) for analog channel index {channel}")
+
+    block_offset = info["analog_channels"][channel]["block_offsets"][block]
+    fp.seek(block_offset)
+    _read(fp, "<B")  # data_type not used
+    _read(fp, "<B")  # data_subtype not used
+
+    num_items = _read(fp, "<H")
+    if num_items != info["analog_channels"][channel]["block_num_items"][block]:
+        raise Exception(f"Invalid number of items encountered for analog channel index {channel}, block={block}.")
+    _read(fp, "<H")  # Channel
+    _read(fp, "<H")  # Unknown
+    timestamp = _read(fp, "<Q")  # Timestamp
+    if timestamp != info["analog_channels"][channel]["block_timestamps"][block]:
+        raise Exception(f"Invalid timestamp encountered for analog channel index {channel}, block={block}")
+
+    return np.array(_read(fp, "<{:d}h".format(num_items)), dtype=np.int16)
 
 
 def load_event_channel(fp: IO, channel: int, info: Dict[str, Any] = None,

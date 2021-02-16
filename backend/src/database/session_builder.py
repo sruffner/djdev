@@ -8,80 +8,75 @@ It is designed as a singleton that is shared among all web app instances, as it 
 that handle long-running tasks in the commit procedure: extracting files from the uploaded session data ZIP archive,
 processing the data files to collect the information that is stored in the database, and finally committing the trial
 behavioral and neural data to the database. As a shared resource, it maintains no state that is specific to a particular
-session commit in progress. Rather, per-build state information is maintained within a JSON file in the build's
-staging directory on the server.
+session commit in progress. Rather, per-commit state information is maintained by the worker thread handling the commit
+process.
 
-The build process will take an extended period of time, and the user could leave and return to the process for any
-number of reasons. On the server side, uncommitted session data will be eventually expunged by a daemon. Thus, it is
-imperative to synchronize the client and server state during the session commit process. To that end, a small dictionary
-is maintained in client local storage to track the build status on the client end. This dictionary contains three
-fields: (1) 'stage', an integer indicating the build stage (starting from 1); (2) 'experimenter' is the username of the
-researcher that conducted the experiment; and (3) 'uuid' is a random universally unique identifier assigned to the
-build, converted to a string in standard form. At the beginning of the commit process -- before any communication with
-the server -- the client-side state is either an empty dictionary or has 'stage' = 1 (the other fields are irrelevant in
-stage 1). To transition to stage 2, the client must provide valid information about the session, including the
-experimenter's username. The username and a server-generated UUID are combined to create a "staging" directory --
-$DJDEV_ROOT_REPO/staging/username-UUID -- to which the session data archive is uploaded and then processed.
-
-The build status on the server end is maintained in the file build_state.json within the staging directory (of course,
-that file won't exist until stage 2). This file will include the 3 abovementioned fields along with other information
-needed to manage the build process.
-
-    Stage 1: Session commit not started. Client must provide valid session information.
-    Stage 2: Upload session data archive and extract trial protocols. At this point the session staging directory
-        exists, and the client uploads all session data files compressed in a single ZIP archive. This "chunked" upload
-        is handled by the dash-uploader component, independent of SessionBuilder. SessionBuilder launches a worker
-        thread upon entering stage 2, and that thread monitors the staging directory for upload progress. On completion,
-        the worker processes all Maestro trial data files in the archive (in place -- the archive is not decompressed)
-        and generates a list of distinct trial protocols presented over the course of the experiment session. Progress
-        status is maintained in the build_state.json file. If an error occurs at any point during or after the upload,
-        the worker thread terminates, reporting the error in the build_state.json file. The main app thread performs any
-        necessary cleanup in the staging directory and awaits a new archive upload.
-            After upload, the client merely polls the server and updates the front end to indicate progress. If an error
-        occurs, the client reports the error and gives the user the opportunity to upload the archive again. If the
-        process completes successfully, client and server transition to stage 3.
-    Stage 3: Review trial protocols. In this stage, the builder serves all trial protocols culled from the session
-        archive to the client for user review. Client confirmation of the protocols transitions to stage 4 or 5.
-    Stage 4: Review neuron data and enter parametric information about the electrophysiology recording. If the session
-        included neural recordings, the client must supply some information that goes into the Session.EPhys part table,
-        then review the neural spike train data extracted from the session data files. This stage is skipped if the
-        experiment only included behavioral data. Client confirmation transitions the build to stage 5.
-    Stage 5: Commit session to database. At this point, the session builder has everything it needs to commit the
-        experiment session to the lab database and raw data repository. Upon receiving the command from the client,
-        the commit procedure is started, and its status is maintained in the build_state.json file. The client will
-        query the server at intervals to track progress. Upon completion (successful or otherwise), the session builder
-        proceeds to step 6.
-    Stage 6: Finish. At this point, either the session was successfully committed or the process has failed. Upon
-        receiving acknowledgement from the client, the staging directory is removed from the data repository, and the
-        client returns to stage 1.
-
-In any of the stages 2-5, the client may issue a "start over" command -- in which case the session builder deletes the
-staging directory from the data repository, and the client returns to stage 1.
+The commit process will take an extended period of time, and the user could leave and return to the process for any
+number of reasons. On the server side, uncommitted session data will be eventually expunged by a daemon. Thus, every
+client request to the server must include a "task ID" that identifies the particular commit process to which that
+request applies. The task ID is a string '<user>-<uuid>', where '<user>' is the username of the researcher that
+conducted the experiment and 'uuid' is a random universally unique identifier assigned to the commit task, converted to
+a string in standard form. To initiate a session commit, the client must provide valid information about the session,
+including the experimenter's username, session date, and so forth; in response, the server generates the task ID and
+creates a "staging" directory -- $DJDEV_ROOT_REPO/staging/username-UUID -- to which the session data archive is uploaded
+and then processed.
 
 To commit data from an experiment to the Lisberger lab database, the researcher must compress all of the session data
-files into a single ZIP archive. For those experiments that include electrophysiological recordings with the Plexon MAP
-or Omniplex system, the following data files must be present in the archive.
+files into a single ZIP archive. For those experiments that include electrophysiological recordings with the Omniplex
+system, the following data files must be present in the archive.
 
     1) All Maestro trial data files.
     2) A single pickle file (other formats may be supported in the future) containing the results of the researcher's
        own spike-sorting analysis.
     3) One or more Omniplex PL2 files containing the original Omniplex-recorded data from which the sorted spike trains
-       were derived.
+       were derived. (We hope to support the older Plexon MAP files in the future.)
 
 The pickle file is identified by the extension '.pickle' or '.pkl', and there must be only one such file in the archive.
 It must contain a single dictionary with 2 or 3 keys: 'channel' is a List[str] where the N-th element is the name of the
-Omniplex source channel on which a neural unit was detected, 'filename' is a List[str] where the N-the element in the
-name of the PL2 file in which the neural unit was recorded (this field must be present ONLY if the spike-sorted units
-were derived from multiple PL2 files, all of which must be in the archive), and 'spiketimes' is a List[] where the N-th
-element is a Numpy array containing the spike timestamps for that neural unit. The timestamps are single-precision
-floats in seconds since the start of the Omniplex recording.
+Omniplex analog source channel (wide-band "WB" or narrow-band "SPKC" only!) on which a neural unit was recorded,
+'filename' is a List[str] where the N-the element in the name of the PL2 file in which the neural unit was recorded
+(this field must be present ONLY if the spike-sorted units were derived from multiple PL2 files, all of which must be in
+the archive), and 'spiketimes' is a List[] where the N-th element is a Numpy array containing the spike timestamps for
+that neural unit. The timestamps are single-precision floats in seconds since the start of the Omniplex recording.
+
+Here is a summary of the commit process:
+
+    Stage 1: Session commit not started. Client must send a request with valid session information to start a commit.
+        In response, the server generates a task ID, creates the staging directory for the commit, and spawns a worker
+        thread dedicated to that commit task.
+    Stage 2: Upload and pre-processing of session data archive. The "chunked" file upload is handled by a dash-uploader
+        component, independent of SessionBuilder. The worker thread merely monitors the upload progress by checking the
+        contents of the staging directory. If the upload fails to start or stalls for more than 10 minutes, the worker
+        thread deletes the staging directory and terminates. Once the ZIP archive has been uploaded, the worker thread
+        begins pre-processing its contents. All Maestro trial data files are examined to find the set of trial protocols
+        presented during the experiment session. The pickle file containing information about identified neural units is
+        processed. Any and all PL2 files are processed to get the Omniplex start and stop timestamps for every trial
+        data file in the archive, and to calculate metrics (SNR, firing rate, 10ms average spike waveform template) for
+        each identified neural unit. The results are stored in a separate pickle file, 'preprocessing.pickle', in the
+        staging directory. During pre-processing, the client merely polls the server for progress updates and displays
+        new progress messages to the user.
+    Stage 3: Review. In this stage, the user reviews the results of the previous stage and provides some additional
+        information required to commit the session to the database (info for the Session.EPhys and Session.Neuron
+        part tables). Client requests retrieve information to be presented on the front end, such as trial protocols
+        and identified neural units. On the server side, the worker thread is essentially paused waiting for the user's
+        approval to complete the commit process.
+    Stage 4: Commit. In this stage, the worker completes the session commit: (1) the ZIP archive and other supporting
+        files are moved from the temporary staging directory to a permanent place within the raw data repository; (2) an
+        entry for the new session is added to the Session database table (along with appropriate entries in the part
+        tables Session.EPhys and Session.Neuron; (3) any new trial protocols are added to the TrialProtocol table; and
+        (4) all trials are added to the Trial table (per-trial behavioral and response traces). In this stage, the
+        client merely polls the server for progress updates and displays new progress messages to the user.
+
+In any of the stages 2-4, the client may issue a "start over" command -- in which case the session builder deletes the
+staging directory (or fixes the database and repository if cancelled in the middle of stage 4), and the client returns
+to stage 0.
+
 
 @author: sruffner
 """
 
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
-import gc
 import re
 import threading
 from queue import Queue
@@ -90,7 +85,6 @@ import os
 import time
 import shutil
 from pathlib import Path
-import json
 import pickle
 import uuid
 import zipfile
@@ -126,228 +120,244 @@ class SessionBuilder(object):
         """ Initialize the SessionBuilder """
         if not hasattr(self, 'running_tasks'):
             self.running_tasks: Dict[str, ProcessArchiveThread] = dict()
+            self.task_list_lock: threading.Lock = threading.Lock()
 
-    @staticmethod
-    def sync_client_state(client_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def initiate_session_commit(self, session_info: Dict[str, Any]) -> Tuple[bool, str]:
         """
-        Synchronize this session builder's state with the client's build state, if possible.
-
-        The build state is a dictionary ['stage': int, 'experimenter': str, 'uuid': str]. (It may contain other fields,
-        but only these fields matter in terms of synchronizing client and server. See the file header
-        comments for a description of the 6 stages of the commit process. In stage 1, the experimenter and UUID are
-        empty strings because the commit process has not begun. In all later stages, those fields must be specified,
-        and the temporary staging directory for the commit will be located in '$REPO/staging/experimenter-uuid', where
-        $REPO is the root directory for the raw data repository. Furthermore, the build state from the server's
-        perspective will be maintained in the file build_state.json within the staging directory.
+        Initiate a session commit task on the lab database server. The method validates the session information
+        supplied, creates the temporary staging directory for the task, spawns a background thread to perform the work,
+        and returns a unique ID assigned to the task. The client must supply this task ID in all future requests
+        involving the commit task.
 
         Args:
-            client_state (dict): This is the current state of a session build in progress, from client's perspective
-            perspective. If the client is in stage 1, then the SessionBuilder is also in stage 1, and the method merely
-            returns this argument. Otherwise, this method uses the information in the client state object to locate the
-            staging directory and the build state file on the server. If found, then the server has an active commit
-            session in progress with experimenter ID and session UUID as specified in the client state. In this case,
-            the client state is returned, with the 'stage' corrected if necessary to match the server. If not, then
-            the server and client must be in the initial stage 1.
+            session_info: This dictionary contains user-supplied information about the new experiment session. The
+                keys are attribute IDs for the Session database table, and the corresponding values must satisfy the
+                constraints for those session attributes. See SessionView in table_views.py.
 
         Returns:
-            The client state, corrected to match the server, as described.
+            A 2-element tuple. The first element is True only if a new commit task was successfully started on the
+                server. If so, the second element is the assigned task ID; if not, it is a brief user-facing error
+                description (too many commits in progress, invalid session attribute, etc).
         """
-        if not SessionBuilder._is_valid_build_state(client_state):
-            client_state = {'stage': 1, 'experimenter': "", 'uuid': ""}
-        if client_state['stage'] == 1:
-            return client_state
-        server_state = SessionBuilder._load_build_state(client_state)
-        if not server_state:
-            client_state = {'stage': 1, 'experimenter': "", 'uuid': ""}
-        else:
-            client_state['stage'] = server_state['stage']
-        return client_state
-
-    @staticmethod
-    def _load_build_state(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        res = None
-        try:
-            state_file_path = SessionBuilder._get_staging_directory_for(state) / "build_state.json"
-            with state_file_path.open(mode='rt') as f:
-                res = json.load(f)
-                if not SessionBuilder._is_valid_build_state(res):
-                    res = None
-        except Exception:
-            pass
-        return res
-
-    @staticmethod
-    def _write_build_state(state: Dict[str, Any]) -> Optional[str]:
-        err_msg = None
-        try:
-            state_file_path = SessionBuilder._get_staging_directory_for(state) / "build_state.json"
-            with state_file_path.open(mode='wt') as f:
-                json.dump(state, f)
-        except Exception as err:
-            err_msg = f"Failed to update build state on server: {str(err)}"
-        return err_msg
-
-    @staticmethod
-    def _is_valid_build_state(state: dict) -> bool:
-        ok = False
-        try:
-            ok = isinstance(state, dict) and isinstance(state['stage'], int) and (1 <= state['stage'] <= 6)
-            ok = ok and isinstance(state['experimenter'], str) and isinstance(state['uuid'], str)
-            if ok and state['stage'] > 1:
-                ok = (len(state['experimenter']) > 0) and (len(state['uuid']) > 0)
-        except Exception:
-            pass
-        return ok
-
-    @staticmethod
-    def _get_staging_directory_for(state: dict) -> Path:
-        return Path(os.environ['DJDEV_ROOT_REPO'], 'staging', f"{state['experimenter']}-{state['uuid']}")
-
-    def stage1_enter_session_info(self, client_state: Dict[str, Any], session_info: Dict[str, Any]) -> Dict[str, Any]:
-        if not SessionBuilder._is_valid_build_state(client_state):
-            raise SessionBuilderError("Invalid client build state")
-        if client_state['stage'] != 1:
-            raise SessionBuilderError("Incorrect stage on client (must be stage 1)")
-
-        err_msg = self._validate_session_info(session_info)
-        if err_msg:
-            raise SessionBuilderError(err_msg)
-
-        state = dict()
-        state['session_info'] = session_info
-        state['stage'] = 2
-        state['experimenter'] = session_info['experimenter']
-        state['uuid'] = str(uuid.uuid4())
-        staging_dir = SessionBuilder._get_staging_directory_for(state)
-        try:
-            staging_dir.mkdir(parents=True, exist_ok=False)
-        except Exception as err:
-            err_msg = f"Failed to create staging directory on server: {str(err)}"
-
-        if not err_msg:
-            err_msg = SessionBuilder._write_build_state(state)
-        if not err_msg:
-            err_msg = self._start_process_archive_task(staging_dir)
-        if err_msg:
-            self.delete_directory_tree(staging_dir)
-            raise SessionBuilderError(err_msg)
-        return state
-
-    @staticmethod
-    def _validate_session_info(session_info: Dict[str, Any]) -> Optional[str]:
         err_msg = tv.SessionView().check_row(session_info)
-        return err_msg
+        if err_msg:
+            return False, err_msg
 
-    def _start_process_archive_task(self, staging_dir: Path) -> Optional[str]:
-        if len(self.running_tasks) > SessionBuilder._MAX_WORKERS:
-            return "Server is too busy; try again later"
-        worker = ProcessArchiveThread(staging_dir)
-        self.running_tasks[staging_dir.name] = worker
-        worker.start()
-        return None
+        with self.task_list_lock:
+            if len(self.running_tasks) >= SessionBuilder._MAX_WORKERS:
+                return False, "Server is too busy; try again later"
 
-    def stage2_progress_update(self, client_state: Dict[str, Any]) -> Tuple[Optional[bool], List[str], Dict[str, Any]]:
-        if not SessionBuilder._is_valid_build_state(client_state):
-            raise SessionBuilderError("Invalid client build state")
-        if client_state['stage'] != 2:
-            raise SessionBuilderError("Incorrect stage on client (must be stage 2)")
-        server_state = SessionBuilder._load_build_state(client_state)
-        if not server_state:
-            raise SessionBuilderError("Staging directory not found; recommend starting over")
-        if server_state['stage'] != 2:
-            return None, ["Client out of sync with server"], server_state
-        if 'cancelled' in server_state:
-            return None, ["Session commit cancelled by user"], server_state
-        staging_dir = SessionBuilder._get_staging_directory_for(server_state)
-        session_worker = self.running_tasks[staging_dir.name]
-        latest_messages = list()
-        while session_worker.msg_q.qsize() > 0:
-            latest_messages.append(session_worker.msg_q.get_nowait())
-
-        if session_worker.is_alive():
-            if (len(latest_messages) > 0) and latest_messages[-1].startswith("Error"):
-                session_worker.join()
-            else:
-                return None, latest_messages, server_state
-
-        # worker has terminated
-        return session_worker.result, latest_messages, server_state
-
-    def stage2_next(self, client_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        # transition from stage 2 to stage 3 if stage 2 processing was completed successfully. Include the culled trial
-        # protocols in the state object. Return to stage 1 if an error occurs while preparing this information. Do
-        # nothing if stage 2 processing in progress or failed.
-        if not SessionBuilder._is_valid_build_state(client_state):
-            raise SessionBuilderError("Invalid client build state")
-        if client_state['stage'] != 2:
-            raise SessionBuilderError("Incorrect stage on client (must be stage 2)")
-        server_state = SessionBuilder._load_build_state(client_state)
-        if not server_state:
-            raise SessionBuilderError("Staging directory not found; recommend starting over")
-        if (server_state['stage'] != 2) or ('cancelled' in server_state):
-            return None
-        staging_dir = SessionBuilder._get_staging_directory_for(server_state)
-        session_worker = self.running_tasks[staging_dir.name]
-        if not session_worker.result:
-            return None
-
-        self.running_tasks.pop(staging_dir.name, None)
-        server_state['stage'] = 3
-        err_msg = SessionBuilder._write_build_state(server_state)
-        if not err_msg:
+            task_id = f"{session_info['experimenter']}-{str(uuid.uuid4())}"
+            staging_dir = SessionBuilder.get_staging_directory_for(task_id)
             try:
-                with open(Path(staging_dir, 'preprocessing.pickle'), 'rb') as file:
-                    results = pickle.load(file)
-                    server_state['protocols'] = \
-                        {protocol.md5_digest: protocol.summary() for protocol in results['protocols']}
+                staging_dir.mkdir(parents=True, exist_ok=False)
             except Exception as err:
-                err_msg = str(err)
-        return {'stage': 1, 'experimenter': '', 'uuid': ''} if err_msg else server_state
+                return False, f"Failed to create staging directory on server: {str(err)}"
+
+            worker = ProcessArchiveThread(task_id, session_info)
+            self.running_tasks[task_id] = worker
+            worker.start()
+            return True, task_id
 
     @staticmethod
-    def stage3_next(client_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        # transition from stage 3 to stage 4, passing neural unit summaries through the returned state object
-        if not SessionBuilder._is_valid_build_state(client_state):
-            raise SessionBuilderError("Invalid client build state")
-        if client_state['stage'] != 3:
-            raise SessionBuilderError("Incorrect stage on client (must be stage 3)")
-        server_state = SessionBuilder._load_build_state(client_state)
-        if not server_state:
-            raise SessionBuilderError("Staging directory not found; recommend starting over")
-        if (server_state['stage'] != 3) or ('cancelled' in server_state):
-            return None
-        staging_dir = SessionBuilder._get_staging_directory_for(server_state)
+    def get_staging_directory_for(task_id: str) -> Path:
+        """ Construct the file system path of the temporary staging directory for an in-progress session commit task
+        with the task ID specified. """
+        return Path(os.environ['DJDEV_ROOT_REPO'], 'staging', task_id)
 
-        server_state['stage'] = 4
-        err_msg = SessionBuilder._write_build_state(server_state)
-        if not err_msg:
-            try:
-                with open(Path(staging_dir, 'preprocessing.pickle'), 'rb') as file:
-                    results = pickle.load(file)
-                    server_state['units'] = [unit.summary() for unit in results['units']]
-            except Exception as err:
-                err_msg = str(err)
+    def get_commit_task_stage(self, task_id: str) -> Tuple[int, int]:
+        """
+        Get the current stage for a session commit task in progress on the server.
 
-        return {'stage': 1, 'experimenter': '', 'uuid': ''} if err_msg else server_state
+        Args:
+            task_id: The commit task identifier.
 
-    def cancel(self, client_state: Dict[str, Any]) -> None:
-        if not SessionBuilder._is_valid_build_state(client_state):
-            raise SessionBuilderError("Invalid client build state")
-        if client_state['stage'] == 1:
-            return
-        server_state = SessionBuilder._load_build_state(client_state)
-        if (not server_state) or ('cancelled' in server_state):
-            return
-        staging_dir = SessionBuilder._get_staging_directory_for(server_state)
-        if not staging_dir.exists():
-            return
-        session_worker = self.running_tasks.pop(staging_dir.name, None)
-        if session_worker and session_worker.is_alive():
-            session_worker.cancel()
-            server_state['cancelled'] = True
-            SessionBuilder._write_build_state(server_state)
-        else:
-            SessionBuilder.delete_directory_tree(staging_dir)
+        Returns:
+            A 2-tuple (stage, substage) listing the current task stage and substage. There are 4 stages: 1 = no commit
+                task exists for ID specified; 2 = uploading and pre-processing ZIP archive; 3 = paused waiting on user
+                confirmation of pre-processed results; 4 = committing session to database. The substage is applicable
+                only in stage 2 and may have the following values: 0 = waiting for ZIP upload to start; 1 = upload in
+                progress; 2 = pre-processing ZIP archive. In all other stages, substage is always 0.
+        """
+        stage: int = 1
+        substage: int = 0
+        with self.task_list_lock:
+            if task_id in self.running_tasks:
+                worker = self.running_tasks[task_id]
+                stage = worker.stage
+        if stage == 2:
+            staging_dir = SessionBuilder.get_staging_directory_for(task_id)
+            if staging_dir.is_dir():
+                for child in staging_dir.iterdir():
+                    if child.is_dir() and (len(child.name) > 3) and (child.name[-3:].lower() == 'zip'):
+                        substage = 1
+                        break
+                    if child.is_file() and (len(child.name) > 4) and (child.name[-4:].lower() == '.zip'):
+                        substage = 2
+                        break
+        return stage, substage
+
+    def progress_update(self, task_id: str) -> Tuple[int, str, Optional[bool]]:
+        """
+        Retrieve any new progress message for the specified session commit task. Progress messages are regularly
+        updated in stages 2 and 4 of a commit task. In stage 3, the background worker is paused while the user reviews
+        results on the client-side front-end, so this method is not applicable in that stage.
+
+        Args:
+            task_id: The commit task identifier.
+
+        Returns:
+            A 3-tuple listing the current stage for the specified commit task, the most recent progress message from
+                that task, and a result indicator: None if task still in progress, False if task terminated on an error,
+                and True if task completed successfully (end of stage 4). If task_id does not identify an in-progress
+                commit task, returns (1, "", None). If the commit task has failed, the last entry in the message list
+                will be an error description.
+        """
+        with self.task_list_lock:
+            if task_id in self.running_tasks:
+                worker = self.running_tasks[task_id]
+                while worker.msg_q.qsize() > 0:
+                    worker.latest_message = worker.msg_q.get_nowait()
+                if worker.is_alive() and worker.latest_message.startswith("Error"):
+                    worker.join()
+                return worker.stage, worker.latest_message, worker.result
+            else:
+                return 1, "", None
+
+    def get_trial_protocol_paths(self, task_id: str) -> Optional[Dict[str, str]]:
+        """
+        Get the path names and md5 digests for all trial protocols culled during pre-processing of the session data ZIP
+        archive. This information is available ONLY during stage 3 of the commit workflow -- after pre-processing and
+        before the final commit stage begins. The returned list is intended for display in a dropdown-style web
+        component so that the end-user can select a particular protocol for display.
+
+        Args:
+            task_id: The commit task identifier.
+
+        Returns:
+            A dictionary in which the keys are the md5 digests of the trial protocols and the values are the
+                corresponding protocol path names. Each path name is the concatenation of the trial set name (if
+                available), subset name (if available), and trial name for the protocol (using '/' as a path separator).
+                The dictionary items are sorted in ascending order by pathname. Returns None if the task_id does not
+                identify an in-progress commit task, or that task is not currently in stage 3.
+        """
+        out: Optional[Dict[str, str]] = None
+        with self.task_list_lock:
+            if task_id in self.running_tasks:
+                worker = self.running_tasks[task_id]
+                if worker.stage == 3:
+                    out = dict()
+                    for protocol in worker.protocols:
+                        out[protocol.md5_digest] = protocol.trial.path_name()
+
+        # sort alphabetically by protocol path name (the values of the dictionary
+        if out:
+            sorted_tuples = sorted(out.items(), key=lambda item: item[1])
+            out = {k: v for k, v in sorted_tuples}
+        return out
+
+    def get_trial_protocol(self, task_id: str, md5_digest: str) -> Optional[maestro.Protocol]:
+        """
+        Get the full definition of a trial protocol culled during pre-processing of the session data ZIP archive. This
+        information is available ONLY during stage 3 of the commit workflow -- after pre-processing and before the final
+        commit stage begins.
+
+        This method, in concert with get_trial_protocol_paths(), provides a mechanism by which the client front-end can
+        present a user interface for reviewing the trial protocols.
+
+        Args:
+            task_id: The commit task identifier.
+            md5_digest: The MD5 digest uniquely identifying the protocol requested.
+
+        Returns:
+            The requested trial protocol object. Returns None if the task_id does not identify an in-progress commit
+                task, if that task is not currently in stage 3, or if the md5_digest does not identify one of the trial
+                protocols found in the pre-processing step.
+        """
+        out: Optional[maestro.Protocol] = None
+        with self.task_list_lock:
+            if task_id in self.running_tasks:
+                worker = self.running_tasks[task_id]
+                if worker.stage == 3:
+                    for protocol in worker.protocols:
+                        if protocol.md5_digest == md5_digest:
+                            out = protocol
+                            break
+        return out
+
+    def get_num_neural_units(self, task_id: str) -> Optional[int]:
+        """
+        Get the number of neural units identified during pre-processing of the session data ZIP archive. This
+        information is available ONLY during stage 3 of the commit workflow -- after pre-processing and before the final
+        commit stage begins.
+
+        Args:
+            task_id: The commit task identifier.
+
+        Returns:
+            The number of neural units found in the session data archive. Returns None if the task_id does not identify
+            an in-progress commit task, or if that task is not currently in stage 3.
+        """
+        out: Optional[int] = None
+        with self.task_list_lock:
+            if task_id in self.running_tasks:
+                worker = self.running_tasks[task_id]
+                if worker.stage == 3:
+                    out = len(worker.units)
+        return out
+
+    def get_neural_unit_metrics(self, task_id: str, index: int) -> Optional[OmniplexUnit]:
+        """
+        Get the metrics for a neural unit identified during pre-processing of the session data ZIP archive. This
+        information is available ONLY during stage 3 of the commit workflow -- after pre-processing and before the final
+        commit stage begins.
+
+        This method, in concert with get_num_neural_units(), provides a mechanism by which the client front-end can
+        present a user interface for reviewing the neural units found during pre-processing.
+
+        Args:
+            task_id: The commit task identifier.
+            index: The zero-based index of the neural unit requested.
+
+        Returns:
+            The requested neural unit. Returns None if the task_id does not identify an in-progress commit
+                task, if that task is not currently in stage 3, or if the unit index is invalid
+        """
+        out: Optional[OmniplexUnit] = None
+        with self.task_list_lock:
+            if task_id in self.running_tasks:
+                worker = self.running_tasks[task_id]
+                if (worker.stage == 3) and (index >= 0) and (index < len(worker.units)):
+                    out = worker.units[index]
+        return out
+
+    def cancel(self, task_id: str) -> bool:
+        """
+        Cancel a session commit task in progress. The relevant background thread is cancelled gracefully and the
+        temporary staging directory for the commit task is removed.
+
+        NOTE: If the background thread is still running, this method issues the cancel request but does NOT wait for the
+        thread to terminate. If the worker thread should fail on an error before detecting the cancel signal, then the
+        staging directory will not be removed.
+
+        Args:
+            task_id: The commit task identifier.
+
+        Returns:
+            True if cancellation was successful, false if task_id does not identify an ongoing commit task.
+
+        """
+        with self.task_list_lock:
+            worker: Optional[ProcessArchiveThread] = self.running_tasks.pop(task_id, None)
+
+        if not worker:
+            return False
+
+        # when worker terminates on an error, it does not remove the staging directory.
+        if worker.is_alive():
+            worker.cancel()
+        elif not worker.result:
+            SessionBuilder.delete_directory_tree(SessionBuilder.get_staging_directory_for(task_id))
 
     @staticmethod
     def delete_directory_tree(staging_dir: Path) -> None:
@@ -361,7 +371,7 @@ class SessionBuilder(object):
 
 class ProcessArchiveThread(threading.Thread):
     """
-    This worker thread handles server-side processing during stage 2 of a session commit:
+    This worker thread handles server-side processing during stages 2-4 of a session commit task:
         1) Wait for upload of session archive ZIP to the staging directory, monitoring its progress once per second. If
         the upload does not start after 10 minutes of waiting, or the upload stalls for more than 10 minutes, report the
         error and terminate.
@@ -375,44 +385,78 @@ class ProcessArchiveThread(threading.Thread):
         trial timelines.
 
         4) Further process the archive for any neural unit data in the archive. The experimenter must provide their
-        own spike sorting results in a single pickle file in the archive. See spikes.load_neural_data() for a
-        description of the file contents. For now, we only support neural units recorded on the Omniplex system, and the
-        archive must include the relevant PL2 file(s) for each unit specified in the pickle.
+        own spike sorting results in a single pickle file in the archive. See the module header comments for a
+        description of this file. For now, we only support neural units recorded on the Omniplex system, and the archive
+        must include the relevant PL2 file(s) for each unit specified in the pickle.
 
         5) Store the results as a dictionary {'protocols': ..., 'timings': ..., 'units': ...} in the pickle file
         'preprocessing.pickle' within the staging directory.
 
-    To communicate progress to the main thread, the worker will post a message to the synchronous queue passed in the
-    constructor. A message is posted whenever there's a significant progress transition (eg., upload started, N parts of
-    archive uploaded, etc). It is incumbent on the thread that launched the worker to monitor this queue. If an error
-    occurs, the error description is the last message posted to the queue, and that message starts with the string
-    "Error".
+        6) After pre-processing is complete, the worker enters stage 3, during which the user on the client side reviews
+        the results and provides additional information. The worker is essentially paused in this stage, waiting for
+        the command to enter stage 4.
+
+        7) In stage 4, the worker commits the experiment session to the lab database and raw data repository. First the
+        ZIP archive and other supporting files are moved from the staging directory to their permanent place in the
+        data repository. Then the database is updated with the new Session object, a Session.EPhys entry and one or more
+        Session.Neuron entries if the session included neural response data, and a TrialProtocol entry for each trial
+        protocol not already in the database. Lastly, the Trial table in the database is populated with a new entry for
+        each Maestro trial presented during the session.
+
+    To communicate progress to the main thread, the worker will post a message to a synchronous queue. A message is
+    posted whenever there's a significant progress transition. It is incumbent on the thread that launched the worker to
+    monitor this queue. If an error occurs, the error description is the last message posted to the queue, and that
+    message starts with the string "Error".
 
     To cancel the session commit, call cancel(). This method sets a flag to inform the worker thread and returns
-    immediately. The worker thread will stop its work in progress and remove the staging directory in its entirety --
-    which could take a significant amount of time depending on the directory content at the time.
+    immediately. The worker thread will stop its work in progress and remove the staging directory in its entirety.
     """
-    def __init__(self, staging_dir: Path):
-        super(ProcessArchiveThread, self).__init__(name=f"ProcessArchive-{staging_dir.name}")
-        self.staging_dir = staging_dir
+    def __init__(self, task_id: str, info: Dict[str, Any]):
+        super(ProcessArchiveThread, self).__init__(name=f"ProcessArchive-{task_id}")
+        self.staging_dir: Path = SessionBuilder.get_staging_directory_for(task_id)
+        """ The temporary staging directory for the session commit task. ZIP archive gets uploaded here. """
         self.msg_q = Queue()
-        self.result: Optional[bool] = None   # set to True/False to indicate success upon termination
-        self.cancel_request = threading.Event()
+        """ A synchronous queue by which worker sends progress messages to main server thread. """
+        self.latest_message: str = ""
+        """ The most recent progress message received on the synchronous queue. Not touched by worker thread."""
+        self.result: Optional[bool] = None
+        """ Flag set to True/False to indicate success/failure upon termination. """
+        self._cancel_request = threading.Event()
+        """ Event object set by the server to cancel the session commit. Checked regularly by the worker thread. """
+        self._finish_request = threading.Event()
+        """ Event object set by the server to signal the worker to complete the session commit (stage 4). After 
+        pre-processing the session archive (stage 2), the worker waits on this event to be signaled, waking up once
+        per second to check whether the server has signaled a cancel request."""
+        self.stage: int = 2
+        """ The current processing stage in the session commit workflow. Set by worker; read-only to server. """
+        self.session_info: Dict[str, Any] = info
+        """ User-supplied information required to commit the experiment session to the database. """
+        self.protocols: Optional[List[maestro.Protocol]] = None
+        """ The list of trial protocols culled from the session data archive during stage 2 pre-processing. Set by
+        worker. Safe for server to access only while worker is paused in stage 3. """
+        self.trial_timings: Optional[Dict[str, TrialTiming]] = None
+        """ Dictionary maps the filename for each Maestro data file in the session archive to timing information for
+        the trial recorded in that file. In particular, this includes the Omniplex start and stop timestamps required
+        to align neural responses recorded on the Omniplex system with the behavioral responses recorded by Maestro.
+        Set by worker. Safe for server to access only while worker is paused in stage 3. """
+        self.units: Optional[List[OmniplexUnit]] = None
+        """ The list of neural units culled from the session data archive during stage 3 pre-processing. Set by worker.
+        Safe for server to access only while worker is paused in stage 3. """
 
     def run(self):
         cancelled = False
         self.msg_q.put_nowait("Awaiting upload...")
 
-        # Steps 1 & 2: Wait for upload to begin, then monitor progress until ZIP file is present in staging directory.
-        # Fail if upload does not start within 10 minutes or, once started, if it stalls for longer than 10 minutes.
-        # NOTE: If upload is fast enough, the ZIP file could be present before even detecting that the upload started!
+        # Wait for upload to begin, then monitor progress until ZIP file is present in staging directory. Fail if upload
+        # does not start within 10 minutes or, once started, if it stalls for longer than 10 minutes. NOTE: If upload is
+        # fast enough, the ZIP file could be present before even detecting that the upload started!
         t0 = time.time()
         upload_path: Optional[Path] = None
         zip_path: Optional[Path] = None
         n_parts_uploaded = 0
         while (not zip_path) and (not cancelled):
             time.sleep(1)
-            if self.cancel_requested():
+            if self._cancel_request.is_set():
                 cancelled = True
             elif not upload_path:
                 if time.time() - t0 > 600:
@@ -444,37 +488,54 @@ class ProcessArchiveThread(threading.Thread):
                     for child in self.staging_dir.iterdir():
                         if child.is_file() and child.name.endswith('.zip'):
                             zip_path = child
+                            self.msg_q.put_nowait(f"Upload completed: {child.name}")
                             break
                     if not zip_path:
                         self.msg_q.put_nowait(f"Error: Archive upload failed, ZIP file missing ({err})")
                         self.result = False
                         return
 
-        # Steps 3-5: Preprocessing archive contents...
-        cancelled = self.cancel_requested()
+        # Pre-process archive contents...
+        cancelled = self._cancel_request.is_set()
         if not cancelled:
-            error_msg = self.preprocess_session_archive(zip_path)
+            error_msg = self._preprocess_session_archive(zip_path)
             if error_msg:
                 self.msg_q.put_nowait(error_msg)
                 self.result = False
                 return
-            cancelled = self.cancel_requested()
+            else:
+                self.msg_q.put_nowait("Finished pre-processing session data archive.")
+            cancelled = self._cancel_request.is_set()
+
+        # Stage 3 - worker paused waiting for signal to begin final commit phase (stage 4)
+        finish = False
+        if not cancelled:
+            self.stage = 3
+            while not (cancelled or finish):
+                finish = self._finish_request.wait(1.0)
+                cancelled = self._cancel_request.is_set()
+
+        # Stage 4 - complete the session commit
+        if finish and not cancelled:
+            pass
 
         if cancelled:
             SessionBuilder.delete_directory_tree(self.staging_dir)
 
-        self.msg_q.put_nowait("Processing complete!" if not cancelled else "Staging directory removed after cancel")
+        self.msg_q.put_nowait("Success!" if not cancelled else "Staging directory removed after cancel")
         self.result = False if cancelled else True
 
-    def cancel_requested(self) -> bool:
-        if self.cancel_request.isSet():
-            return True
-        return False
-
     def cancel(self) -> None:
-        self.cancel_request.set()
+        """ Cancel the session commit task handled by this worker thread. """
+        self._cancel_request.set()
 
-    def preprocess_session_archive(self, zip_path: Path) -> Optional[str]:
+    def finish(self) -> None:
+        """ Wake up the worker thread to complete the session commit task. Has no effect if the worker is not
+        waiting in stage 3 of the task workflow. """
+        if self.stage == 3:
+            self._finish_request.set()
+
+    def _preprocess_session_archive(self, zip_path: Path) -> Optional[str]:
         """
         This method pre-processes the uploaded session data ZIP archive, scanning the archive contents and extracting
         information that will be needed when the session is actually committed to the lab database: (1) the unique trial
@@ -496,8 +557,8 @@ class ProcessArchiveThread(threading.Thread):
         """
         error_msg: Optional[str] = None
         try:
-            trial_timings: Dict[str, TrialTiming] = dict()
-            neural_units: List[OmniplexUnit] = list()
+            self.trial_timings = dict()
+            self.units = list()
             with zipfile.ZipFile(zip_path, 'r') as archive:
                 self.msg_q.put_nowait("Scanning archive contents...")
                 data_file_name_pattern = re.compile('.[0-9][0-9][0-9][0-9]+$')
@@ -512,7 +573,7 @@ class ProcessArchiveThread(threading.Thread):
                         file_index = int(info.filename[-4:])
                         header_timestamp = header.timestamp_ms if header.version >= 21 else None
                         duration = float(header.num_scans_saved - 1) / 1000.0  # Trial mode scan rate is fixed at 1KHz
-                        trial_timings[info.filename] = \
+                        self.trial_timings[info.filename] = \
                             TrialTiming._make([file_index, header_timestamp, duration, None, None])
                     elif ((len(info.filename) > 7) and (info.filename[-7:].lower() == '.pickle')) or \
                             ((len(info.filename) > 4) and (info.filename[-4:].lower() == '.pkl')):
@@ -522,14 +583,14 @@ class ProcessArchiveThread(threading.Thread):
                             raise Exception("Found more than one spikes data file in session data archive!")
                 if (units_zip_info is not None) and (len(pl2s_archived) == 0):
                     raise Exception("Missing Omniplex file(s) for spike-sorted unit data!")
-                if self.cancel_requested():
+                if self._cancel_request.is_set():
                     return None
 
                 self.msg_q.put_nowait("Processing archive for trial protocols...")
-                trial_protocols: List[maestro.Protocol] = maestro.Protocol.extract_protocols_from_session_data(archive)
-                if len(trial_protocols) == 0:
+                self.protocols = maestro.Protocol.extract_protocols_from_session_data(archive)
+                if len(self.protocols) == 0:
                     raise Exception("No trial protocols found in session archive!")
-                if self.cancel_requested():
+                if self._cancel_request.is_set():
                     return None
 
                 unit_data: Optional[Dict[str, List[Any]]] = None
@@ -542,29 +603,29 @@ class ProcessArchiveThread(threading.Thread):
                     # if 'filename' field missing, assume all units recorded in same Omniplex file
                     if 'filename' not in unit_data:
                         unit_data['filename'] = [pl2_filenames[0]] * len(unit_data['channel'])
-                    if self.cancel_requested():
+                    if self._cancel_request.is_set():
                         return None
 
                 if units_zip_info is not None:
                     for pl2_zip_info in pl2s_archived:
-                        self.msg_q.put_nowait(f"Extracting Omniplex file {pl2_zip_info.filename}... PLEASE WAIT")
-                        save_path = Path(archive.extract(pl2_zip_info, str(zip_path.parent)))
-                        self._process_omniplex_file(save_path, unit_data, trial_timings, neural_units)
-
+                        save_path = self._chunked_extract_from_archive(archive, pl2_zip_info, zip_path.parent)
+                        if save_path is None:
+                            return None
+                        self._process_omniplex_file(save_path, unit_data)
+                        if self._cancel_request.is_set():
+                            return None
                     # if there is unit data, we require metrics for each unit specified in the neural units data file,
                     # and there must be Omniplex timestamps for all trials
-                    if len(neural_units) < len(unit_data):
+                    if len(self.units) < len(unit_data['channel']):
                         raise Exception(
                             f"Missing analog data for at least one unit defined in {units_zip_info.filename}")
-                    for key in trial_timings.keys():
-                        if trial_timings[key].omniplex_start is None:
+                    for key in self.trial_timings.keys():
+                        if self.trial_timings[key].omniplex_start is None:
                             raise Exception(f"Missing Omniplex start/stop timestamps for {key}")
-                if self.cancel_requested():
-                    return None
 
                 self.msg_q.put_nowait(f"Saving pre-processed session data...")
                 save_path = Path(zip_path.parent, 'preprocessing.pickle')
-                results = {'protocols': trial_protocols, 'timings': trial_timings, 'units': neural_units}
+                results = {'protocols': self.protocols, 'timings': self.trial_timings, 'units': self.units}
                 with open(save_path, 'wb') as file:
                     pickle.dump(results, file)
         except Exception as err:
@@ -572,8 +633,46 @@ class ProcessArchiveThread(threading.Thread):
 
         return error_msg
 
-    def _process_omniplex_file(self, path: Path, unit_data: Dict[str, List[Any]], trial_timings: Dict[str, TrialTiming],
-                               units: List[OmniplexUnit]) -> None:
+    def _chunked_extract_from_archive(self, archive: zipfile.ZipFile, pl2_info: zipfile.ZipInfo,
+                                      destination: Path) -> Optional[Path]:
+        """
+        Extract a potentially very large file from a session data archive. If the uncompressed size of the file is under
+        300MB, it is extracted in one go using ZipFile.extract(). Otherwise, it is extracted in 100MB chunks so that
+        progress can be reported during the extraction and so that the operation can be cancelled prior to completion.
+
+        Args:
+            archive: The source ZIP archive.
+            pl2_info: The file to be extracted.
+            destination: The target directory to which the file is extracted.
+
+        Returns:
+            File system path for the extracted file, or None if the extraction was cancelled
+        """
+        chunk_size = 100 * 1024 * 1024
+        size_in_mb: float = pl2_info.file_size / (1024 * 1024)
+        if pl2_info.file_size < 300:
+            self.msg_q.put_nowait(f"Extracting Omniplex file {pl2_info.filename} (size={size_in_mb:.1f} MB)")
+            save_path = Path(archive.extract(pl2_info, str(destination)))
+            return None if self._cancel_request.is_set() else save_path
+
+        # Large file extract in chunks
+        save_path = Path(destination, pl2_info.filename)
+        self.msg_q.put_nowait(f"Extracting Omniplex file {pl2_info.filename}: 0 of {size_in_mb:.1f} MB ...")
+        bytes_written: int = 0
+        with archive.open(pl2_info, 'r') as source, open(save_path, 'wb') as target:
+            while True:
+                buffer = source.read(chunk_size)
+                if len(buffer) == 0:
+                    return save_path
+                target.write(buffer)
+                bytes_written += len(buffer)
+                written_mb: float = bytes_written / (1024 * 1024)
+                self.msg_q.put_nowait(f"Extracting Omniplex file {pl2_info.filename}: {written_mb:.1f} of "
+                                      f"{size_in_mb:.1f} MB ...")
+                if self._cancel_request.is_set():
+                    return None
+
+    def _process_omniplex_file(self, path: Path, unit_data: Dict[str, List[Any]]) -> None:
         """
         Process the Omniplex file for information needed when committing an electrophysiological recording session to
         the lab database.
@@ -584,9 +683,50 @@ class ProcessArchiveThread(threading.Thread):
         trial data file.
 
         Second, the method calculate selected metrics for each identified neural unit (mean firing rate, signal-to-noise
-        ratio, and the average spike template waveform) using the unit spike times (in "Omniplex time") and  the
-        original Omniplex analog data stream(s) from which those spike times were "sorted". These metrics are ultimately
-        stored in the lab database.
+        ratio, and the average spike template waveform) using the unit spike times (in "Omniplex time") and the original
+        Omniplex analog data stream(s) from which those spike times were "sorted". These metrics are ultimately stored
+        in the lab database. For details, see _prepare_neural_units()
+
+        Args:
+            path: The path to the Omniplex PL2 file to be processed.
+            unit_data: The identified neural unit data, including channel ID, PL2 source file, and the spike timestamps
+                in seconds since the Omniplex recording started. For a full description of this dictionary, see
+                _validate_neural_unit_data().
+
+        Raises:
+            Exception if an error occurs while loading and processing data in the Omniplex file.
+        """
+        with open(path, 'rb') as fp:
+            self.msg_q.put_nowait(f"Processing trial timing information in Omniplex file {path.name}...")
+            info = PL2.load_file_information(fp)
+            timings_dict = _get_trial_timing_from_pl2_file(fp, info)
+            for key in (timings_dict.keys() & self.trial_timings.keys()):
+                old = self.trial_timings[key]
+                start_ts, stop_ts = timings_dict[key]
+                self.trial_timings[key] = \
+                    TrialTiming._make([old.file_index, old.header_timestamp, old.duration, start_ts, stop_ts])
+            if self._cancel_request.is_set():
+                return
+
+            # which units are recorded in this PL2 file
+            units_in_file = [i for i, filename in enumerate(unit_data['filename']) if filename == path.name]
+
+            # multiple units may be recorded on the same analog channel, but we only want to load and process a given
+            # analog channel once because the recordings can be very long!
+            channel_ids = {unit_data['channel'][unit_idx] for unit_idx in units_in_file}
+            for channel_id in sorted(channel_ids):
+                spikes = [unit_data['spiketimes'][unit_idx] for unit_idx in units_in_file
+                          if unit_data['channel'][unit_idx] == channel_id]
+                units_found = self._prepare_neural_units(channel_id, spikes, path.name, fp, info)
+                if units_found is None:
+                    return
+                self.units.extend(units_found)
+
+    def _prepare_neural_units(self, channel_id: str, spikes: List[np.ndarray], filename: str,
+                              fp: IO, info: Dict[str, Any]) -> Optional[List[OmniplexUnit]]:
+        """
+        Helper method processes the Omniplex analog data channel on which identified neural units were recorded and
+        calculates selected metrics for those units: firing rate, SNR, average spike template waveform.
 
         On calculating the template waveform and SNR for each neural unit: The channel ID in the pickle file must start
         with "WB" (wide band data) or "SPKC" (narrow band data). Wide band data is preferred because the filtering
@@ -602,90 +742,122 @@ class ProcessArchiveThread(threading.Thread):
         because X = median(x) is approximately 0 since the trace x has been bandpass-filtered, removing any DC offset.
         Then: SNR = (max(template) - min(template)) / 1.96 * std_background_noise.
 
+        Since Omniplex recordings can be very long, and a wide-band analog trace must be bandpass-filtered once it is
+        loaded from the PL2 file, this method would consume a lot of memory if the entire trace is loaded at once.
+        Furthermore, loading a huge array can take many seconds, which prevents ProcessArchiveThread from making regular
+        progress updates or promptly detecting the "cancel" event. For these reasons, the method uses a "chunked"
+        approach to the calculations, reading and processing one block (65535 samples each, except the last block) at a
+        time.
+
+        It is possible for a single extracellular electrode to record activity from multiple neural units at the same
+        time. It would be wasteful to re-process the same analog channel for each neural unit "sorted" from that
+        channel, especially since the background noise calculation will be the same for all. Hence, the "spikes"
+        argument is a list containing a spike timestamps array for each distinct unit recorded on the channel
+
         Args:
-            path: The path to the Omniplex PL2 file to be processed.
-            unit_data: The identified neural unit data, including channel ID, PL2 source file, and the spike timestamps
-                in seconds since the Omniplex recording started. For a full description of this dictionary, see
-                _validate_neural_unit_data().
-            trial_timings: Dictionary holding timing information culled from the Maestro trial files in the session
-                archive, keyed by the trial data file name. On return, each TrialTiming tuple in the dictionary should
-                include the relevant Omniplex start and stop timestamps.
-            units: List of neural units. The method will append an OmniplexUnit tuple for each neural unit recorded in
-                the specified PL2 file.
+            channel_id: ID of the Omniplex analog data channel: wide-band "WBnn" or narrow-band "SPKCnn"
+            spikes: List of Numpy arrays; each array holds the spike timestamps (in seconds during Omniplex recording)
+                for a distinct neural unit recorded on the specified analog channel. It is assumed that each array
+                contains at least two spike times.
+            filename: The source PL2 filename.
+            fp: The PL2 file object. The file must be open and is NOT closed on return.
+            info: Dictionary containing "table of contents" for the PL2 file (see PL2.load_file_information).
+
+        Returns:
+            A list of neural unit objects containing the spike times array, firing rate, and other metrics calculated
+            from the original analog data. Returns None if the commit task was cancelled.
 
         Raises:
-            Exception if an error occurs while loading and processing data in the Omniplex file.
+            Exception if an error occurs while processing the analog data channel.
         """
-        units_in_file = [i for i, filename in enumerate(unit_data['filename']) if filename == path.name]
-        with open(path, 'rb') as fp:
-            self.msg_q.put_nowait(f"Processing trial timing information in Omniplex file {path.name}...")
-            info = PL2.load_file_information(fp)
-            timings_dict = _get_trial_timing_from_pl2_file(fp, info)
-            for key in (timings_dict.keys() & trial_timings.keys()):
-                old = trial_timings[key]
-                start_ts, stop_ts = timings_dict[key]
-                trial_timings[key] = \
-                    TrialTiming._make([old.file_index, old.header_timestamp, old.duration, start_ts, stop_ts])
-            if self.cancel_requested():
-                return
+        self.msg_q.put_nowait(f"Calculating firing rate and other metrics for {len(spikes)} neural unit(s) on "
+                              f"Omniplex channel {channel_id} ...")
+        # if narrow band channel SPKC<num> specified, use wide band channel WB<num> instead IF it is available
+        is_wide_band = (len(channel_id) > 2) and (channel_id[0:2].lower() == 'wb')
+        is_narrow_band = (len(channel_id) > 4) and (channel_id[0:4].lower() == 'spkc')
+        if not (is_wide_band or is_narrow_band):
+            raise Exception(f"Bad Omniplex channel ID: {channel_id}")
+        ch_index = -1
+        try:
+            if is_narrow_band:
+                ch_index = [ch['name'] for ch in info['analog_channels']].index(channel_id)
+                alt_id = "WB" + channel_id[-2:]
+                ch_index = [ch['name'] for ch in info['analog_channels']].index(alt_id)
+                is_wide_band = True
+            else:
+                ch_index = [ch['name'] for ch in info['analog_channels']].index(channel_id)
+        except ValueError:
+            pass
+        if ch_index == -1:
+            raise Exception(f"Did not find Omniplex analog channel data for channel ID: {channel_id}")
 
-            for unit_idx in units_in_file:
-                self.msg_q.put_nowait(f"Calculating firing rate and other metrics for neural unit {unit_idx}...")
+        num_blocks = len(info["analog_channels"][ch_index]["block_num_items"])
+        samples_per_sec: float = info['analog_channels'][ch_index]['samples_per_second']
+        to_volts: float = info['analog_channels'][ch_index]['coeff_to_convert_to_units']
+        samples_in_template = int(samples_per_sec * 0.01)
+        block_medians = np.zeros(num_blocks)
+        num_clips = [0] * len(spikes)
+        spike_idx = [0] * len(spikes)
+        template = [np.zeros(samples_in_template) for _ in spikes]
+        num_spikes = [len(spike_times) for spike_times in spikes]
+        sample_idx = 0
+        block_idx = 0
 
-                # if narrow band channel SPKC<num> specified, use wide band channel WB<num> instead IF it is available
-                channel_id = unit_data['channel'][unit_idx]
-                is_wide_band = (len(channel_id) > 2) and (channel_id[0:2].lower() == 'wb')
-                is_narrow_band = (len(channel_id) > 4) and (channel_id[0:4].lower() == 'spkc')
-                if not (is_wide_band or is_narrow_band):
-                    raise Exception(f"Bad Omniplex channel ID: {channel_id}")
-                ch_index = -1
-                try:
-                    if is_narrow_band:
-                        ch_index = [ch['name'] for ch in info['analog_channels']].index(channel_id)
-                        alt_id = "WB" + channel_id[-2:]
-                        ch_index = [ch['name'] for ch in info['analog_channels']].index(alt_id)
-                        is_wide_band = True
-                    else:
-                        ch_index = [ch['name'] for ch in info['analog_channels']].index(channel_id)
-                except ValueError:
-                    pass
-                if ch_index == -1:
-                    raise Exception(f"Did not find Omniplex analog channel data for channel ID: {channel_id}")
+        # prepare bandpass filter in case analog signal is wide-band. The filter delays are initialized with zero-vector
+        # initial condition and the delays are updated as each block is filtered...
+        [b, a] = scipy.signal.butter(2, [2 * 300 / samples_per_sec, 2 * 8000 / samples_per_sec], btype='bandpass')
+        filter_ic = scipy.signal.lfiltic(b, a, np.zeros(max(len(b), len(a))-1))
 
-                samples = PL2.load_analog_channel(fp, ch_index, info)  # samples NOT converted to mV
-                samples_per_sec: float = info['analog_channels'][ch_index]['samples_per_second']
-                to_volts: float = info['analog_channels'][ch_index]['coeff_to_convert_to_units']
-                if is_wide_band:
-                    samples = _bandpass_filter_wide_band_stream(samples, samples_per_sec)
-                samples_in_template = int(samples_per_sec * 0.01)
-                total_samples = len(samples)
-                template = np.zeros(samples_in_template)
-                snr = 0.0
-                firing_rate = 0.0
-                spike_times = unit_data['spiketimes'][unit_idx]
-                if len(spike_times) > 0:
-                    firing_rate = float(len(spike_times)) / (spike_times[-1] - spike_times[0])
-                    num_good_clips = 0
-                    for ts in spike_times:
-                        start = int((ts - 0.001) * samples_per_sec)
-                        end = start + samples_in_template
-                        if (start >= 0) and (end < total_samples):
-                            template = np.add(template, samples[start:end])
-                            num_good_clips += 1
-                    template /= num_good_clips
-                    signal = np.max(template) - np.min(template)
-                    # MAD estimate of std of background noise for bandpassed trace (median(x) ~ 0)
-                    noise = np.median(np.abs(samples)) * 1.4826
-                    snr = signal / (1.96 * noise)
-                    # convert template waveform from raw digitized units to micro-volts
-                    template *= to_volts * 1.0e6
-                units.append(OmniplexUnit._make([path.name, channel_id, spike_times, firing_rate, snr, template]))
+        prev_block: Optional[np.ndarray] = None
+        t0 = time.time()
+        while block_idx < num_blocks:
+            # read in next block of samples and bandpass-filter it if signal is wide-band
+            curr_block = PL2.load_analog_channel_block(fp, ch_index, block_idx, info)
+            if is_wide_band:
+                curr_block, filter_ic = scipy.signal.lfilter(b, a, curr_block, axis=-1, zi=filter_ic)
 
-                # trigger GC cycle because the analog data arrays could be HUGE
-                gc.collect()
+            # save block median for later SNR calculation
+            block_medians[block_idx] = np.median(np.abs(curr_block))
 
-                if self.cancel_requested():
-                    return
+            # for each distinct neural unit, accumulate all spike template clips that are fully contained in the current
+            # block OR straddle the previous and current block
+            num_samples_in_block = len(curr_block)
+            for i in range(len(spikes)):
+                while spike_idx[i] < num_spikes[i]:
+                    # clip start and end indices with respect to the current block
+                    start = int((spikes[i][spike_idx[i]] - 0.001) * samples_per_sec) - sample_idx
+                    end = start + samples_in_template
+                    if end >= num_samples_in_block:
+                        break  # no more spikes fully contained in current block
+                    elif start >= 0:
+                        template[i] = np.add(template[i], curr_block[start:end])
+                        num_clips[i] += 1
+                    elif isinstance(prev_block, np.ndarray):
+                        template[i] = np.add(template[i], np.concatenate((prev_block[start:], curr_block[0:end])))
+                        num_clips[i] += 1
+                    spike_idx[i] += 1
+
+            # get ready for next block; check for cancel signal and update progress roughly once per second
+            prev_block = curr_block
+            sample_idx += num_samples_in_block
+            block_idx += 1
+            if (time.time() - t0) > 1:
+                if self._cancel_request.is_set():
+                    return None
+                self.msg_q.put_nowait(f"Calculating firing rate and other metrics for {len(spikes)} neural unit(s) on "
+                                      f"Omniplex channel {channel_id} ...{100.0*block_idx/num_blocks:.1f}%")
+                t0 = time.time()
+
+        noise = np.median(block_medians) * 1.4826
+        out: List[OmniplexUnit] = list()
+        for i in range(len(spikes)):
+            if num_clips[i] > 0:
+                template[i] /= num_clips[i]
+            snr = (np.max(template[i]) - np.min(template[i])) / (1.96 * noise)
+            firing_rate = float(len(spikes[i])) / (spikes[i][-1] - spikes[i][0])
+            template[i] *= to_volts * 1.0e6
+            out.append(OmniplexUnit._make([filename, channel_id, spikes[i], firing_rate, snr, template[i]]))
+        return out
 
 
 def _validate_neural_unit_data(unit_data: Dict[str, List[Any]], pl2_filenames: List[str]) -> bool:
@@ -708,7 +880,6 @@ def _validate_neural_unit_data(unit_data: Dict[str, List[Any]], pl2_filenames: L
 
     Returns:
         True if unit_data is validly formatted as described above, false otherwise.
-
     """
     ok = isinstance(unit_data, dict) and ('channel' in unit_data) and ('spiketimes' in unit_data)
     if ok:
