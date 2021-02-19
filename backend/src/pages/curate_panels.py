@@ -29,9 +29,91 @@ import dash_bootstrap_components as dbc
 import dash_core_components as dcc
 import dash_table as dt
 from dash.dependencies import Input, Output, State
-from typing import List, Any, Optional
+from typing import List, Any, Optional, Dict
 
 import database.table_views as tv
+
+
+def entry_form(view: tv.BaseTableView, omit_attrs: Optional[List[tv.TableAttr]] = None,
+               initial_entry: Optional[Dict[str, Any]] = None, alert_id: Optional[str] = None) -> dbc.Form:
+    """
+    Generate a Dash Bootstrap form that may be used to gather information from the user to add a new entity (aka, row)
+    to the specified database table. Each attribute defining a table entity is represented by a form group consisting of
+    a label and an input widget appropriate to the attribute's data type:
+        1) 'enum': A Bootstrap Select widget populated with the fixed set of options for that attribute.
+        2) 'fkey' (foreign key): Similar to 'enum', except that the table view is queried for the available choices
+        for that foreign key.
+        3) 'text' (length > 100): A Bootstrap Textarea widget with 2 or 4 rows (depending on max text length).
+        4) Otherwise: A Bootstrap Input widget of type 'number', 'email', or 'text'.
+
+    Selected attributes may be omitted from the form (for tables with an auto-incrementing primary key, that key is
+    always omitted because it is not user-specified), and initial values may be specified for each attribute. The form
+    optionally includes a Bootstrap Alert component in which an error message can be displayed when the user enters
+    an invalid value in the form.
+
+    So that you can use the input widgets on the form in a Dash callback, the 'id' of each widget is set to
+    "<attr.id>-input", where <attr.id> is the ID of the table attribute displayed/edited in that widget.
+
+    Args:
+        view: A database table view.
+        omit_attrs: If not None, this is a list of table attributes that should NOT be exposed in the form.
+        initial_entry: If not None, this dictionary contains initial values for the attributes, keyed by attribute ID.
+            If present, it must contain a key-value pair for each table attribute that is not in omit_attrs.
+        alert_id: If not None, this is the ID assigned to the Alert component included along the bottom of the form;
+            otherwise, no Alert component is generated.
+
+    Returns:
+        A Dash Bootstrap Form component, as described.
+    """
+    form_groups = []
+    for attr in view.attributes():
+        if omit_attrs and (attr in omit_attrs):
+            continue
+        if attr.type == 'enum':
+            entry_widget = dbc.Select(
+                id=f"{attr.id}_input",
+                options=[{"label": opt, "value": opt} for opt in attr.options],
+                value=initial_entry[attr.id] if initial_entry else attr.options[0]
+            )
+        elif attr.type == 'fkey':
+            entry_widget = dbc.Select(
+                id=f"{attr.id}_input",
+                options=[{"label": opt[0], "value": opt[1]} for opt in view.foreign_key_choices(attr)],
+                value=initial_entry[attr.id] if initial_entry else ""
+            )
+        elif attr.textrange[1] > 100:
+            entry_widget = dbc.Textarea(
+                id=f"{attr.id}_input",
+                minLength=attr.textrange[0], maxLength=attr.textrange[1],
+                rows=2 if attr.textrange[1] < 400 else 4,
+                value=initial_entry[attr.id] if initial_entry else "",
+                placeholder=attr.placeholder
+            )
+        else:
+            input_type = 'number' if (attr.type == 'float') else ('email' if 'email' in attr.id else 'text')
+            entry_widget = dbc.Input(
+                id=f"{attr.id}_input",
+                type=input_type,
+                minLength=attr.textrange[0], maxLength=attr.textrange[1],
+                value=initial_entry[attr.id] if initial_entry else "",
+                placeholder=attr.placeholder
+            )
+
+        form_groups.append(dbc.FormGroup(
+            [
+                dbc.Label(attr.label, width=2),
+                dbc.Col(entry_widget, width=10)
+            ],
+            row=True,
+        ))
+
+    # alert raised when an add operation fails - displays a brief error message. Otherwise hidden.
+    if alert_id:
+        form_groups.append(dbc.FormGroup(
+            dbc.Alert("", id=f"{alert_id}", dismissable=True, duration=10000, fade=True, is_open=False)
+        ))
+
+    return dbc.Form(form_groups)
 
 
 # noinspection PyUnusedLocal,PyShadowingNames
@@ -275,53 +357,7 @@ class _BasePanel:
         Returns:
             A Dash Bootstrap Form component, as described.
         """
-        form_groups = []
-        for attr in self._table_view.attributes():
-            entry_widget = None
-            if attr.type == 'enum':
-                entry_widget = dbc.Select(
-                    id=f"{attr.id}_input",
-                    options=[{"label": opt, "value": opt} for opt in attr.options],
-                    value=attr.options[0]
-                )
-            elif attr.type == 'fkey':
-                entry_widget = dbc.Select(
-                    id=f"{attr.id}_input",
-                    options=[{"label": opt[0], "value": opt[1]} for opt in self._table_view.foreign_key_choices(attr)],
-                    value=""
-                )
-            elif attr.textrange[1] > 100:
-                entry_widget = dbc.Textarea(
-                    id=f"{attr.id}_input",
-                    minLength=attr.textrange[0], maxLength=attr.textrange[1],
-                    rows=2 if attr.textrange[1] < 400 else 4,
-                    value="",
-                    placeholder=attr.placeholder
-                )
-            else:
-                input_type = 'number' if (attr.type == 'float') else ('email' if 'email' in attr.id else 'text')
-                entry_widget = dbc.Input(
-                    id=f"{attr.id}_input",
-                    type=input_type,
-                    minLength=attr.textrange[0], maxLength=attr.textrange[1],
-                    value="",
-                    placeholder=attr.placeholder
-                )
-
-            form_groups.append(dbc.FormGroup(
-                [
-                    dbc.Label(attr.label, width=2),
-                    dbc.Col(entry_widget, width=10)
-                ],
-                row=True,
-            ))
-
-        # alert raised when an add operation fails - displays a brief error message. Otherwise hidden.
-        form_groups.append(dbc.FormGroup(
-            dbc.Alert("", id=f"{self._prefix}_entry_alert", dismissable=True, duration=10000, fade=True, is_open=False)
-        ))
-
-        return dbc.Form(form_groups)
+        return entry_form(self._table_view, None, None, f"{self._prefix}_entry_alert")
 
     def _callbacks(self, app: dash.Dash):
         """

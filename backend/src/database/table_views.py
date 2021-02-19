@@ -32,7 +32,7 @@ Created on Thu Aug 6 09:36:00 2020
 
 import re
 from datetime import date
-from typing import List, Dict, Any, Tuple, Set, Optional, Type
+from typing import List, Dict, Any, Tuple, Set, Optional, Type, Union
 from collections import namedtuple
 from json import JSONDecoder
 from functools import partial
@@ -686,6 +686,25 @@ class BaseTableView:
             raise ValueError("Incomplete primary key")
         return exists
 
+    def check_row(self, row: Dict[str, Any]) -> Optional[str]:
+        """
+        Check whether or not the proposed row entry is valid and does not yet exist in the underlying table.
+
+        Args:
+            row (Dict[str, Any]): The proposed entry. It must contain a valid attribute value for each table attribute
+                specified by attributes() -- except for an auto-incrementing primary key, and it must not yet exist in
+                the database.
+        Returns:
+            str: None if operation succeeds, else a user-facing description of the error (missing attribute, invalid
+            attribute value, entry already exists, database error).
+        """
+        err_msg = None
+        try:
+            self._validate_row(row)
+        except (Exception, ValueError) as err:
+            err_msg = f"Invalid entry: {str(err)}"
+        return err_msg
+
     def _validate_row(self, row: Dict[str, Any]) -> None:
         """Validate a proposed new entry in the underlying table.
 
@@ -754,14 +773,16 @@ class BaseTableView:
                 raise ValueError(f"'{attr.label}': Date is invalid, earlier than 1900-01-01, or in the future.")
         elif attr.type == 'float':
             try:
-                float(attr_value)
+                num_value = float(attr_value)
             except(TypeError, ValueError):
                 raise ValueError(f"'{attr.label}' = '{attr_value}' cannot be parsed as a floating-point value")
+            self.check_numeric_attribute_value(attr, num_value)
         elif attr.type == 'int':
             try:
-                int(attr_value)
+                num_value = int(attr_value)
             except(TypeError, ValueError):
                 raise ValueError(f"'{attr.label}' = '{attr_value}' cannot be parsed as an integer")
+            self.check_numeric_attribute_value(attr, num_value)
         else:
             if attr.textrange:
                 min_len, max_len = attr.textrange
@@ -770,6 +791,24 @@ class BaseTableView:
             if attr.regex:
                 if re.fullmatch(attr.regex, attr_value) is None:
                     raise ValueError(f"Invalid value for {attr.label}: {attr.regex_hint}")
+
+    def check_numeric_attribute_value(self, attr: TableAttr, value: Union[int, float]) -> None:
+        """
+        Validate a table attribute that has an integer or floating-point value (excluding auto-incrementing primary
+        keys). The base implementation does nothing, but it is invoked by the base class when validating a proposed
+        entry to the underlying table.
+
+        A subclass can override this method to restrict the domain of valid values for any numeric attribute. By
+        convention, it must raise a ValueError (with a user-facing descriptive error) if the attribute value is invalid.
+
+        Args:
+            attr: The attribute
+            value: The proposed numeric value (integer or floating-point) for the attribute.
+
+        Raises:
+            ValueError: If the attribute value is out of range or otherwise rejected.
+        """
+        pass
 
 
 class MappingView:
@@ -1334,8 +1373,7 @@ class StudyToPublicationView(MappingView):
 class SessionView(BaseTableView):
     """
     View implementing read/write to the Sessions table that persists all experiment sessions in the Lisberger lab
-    research database. Currently, it does not support reading or writing the part tables Session.Ephys and
-    Session.Neuron.
+    research database.
     """
 
     def __init__(self):
@@ -1378,24 +1416,75 @@ class SessionView(BaseTableView):
         else:
             return super().foreign_key_choices(attr)
 
-    def check_row(self, row: Dict[str, Any]) -> Optional[str]:
-        """
-        Check whether or not the proposed row entry represents a valid experiment session that does not yet exist in
-        the underlying sessions table.
+    def check_numeric_attribute_value(self, attr: TableAttr, value: Union[int, float]) -> None:
+        """ Override restricts the 'session_sfx' attribute to the integer range [0..9]. """
+        if attr.id == 'session_sfx' and ((value < 0) or (value > 9)):
+            raise ValueError("Invalid value for session suffix (must lie in 0..9)")
 
-        Args:
-            row (Dict[str, Any]): The proposed entry. It must contain a valid attribute value for each table attribute
-                specified by attributes(), and it must not yet exist in the database.
-        Returns:
-            str: None if operation succeeds, else a user-facing description of the error (missing attribute, invalid
-            attribute value, entry already exists, database error).
-        """
-        err_msg = None
-        try:
-            super()._validate_row(row)
-            sfx = int(row['session_sfx'])
-            if not (0 <= sfx <= 9):
-                raise ValueError("Invalid value for session suffix (must lie in 0..9)")
-        except (Exception, ValueError) as err:
-            err_msg = f"Invalid session info: {str(err)}"
-        return err_msg
+
+class SessionEPhysView(BaseTableView):
+    """
+    View implementing read/write to the Session.EPhys part table that persists electrophysiological recording parameters
+    for any experiment session in which neuronal responses were recorded. Behavior-only sessions will not have a
+    corresponding entry in this part table.
+    """
+
+    def __init__(self):
+        attrs = [
+            TableAttr('experimenter', 'Experimenter', 'fkey', True, None, None, None, None, None, None),
+            TableAttr('subj_id', 'Subject ID', 'fkey', True, None, None, None, None, None, None),
+            TableAttr('session_date', 'Session Date', 'fkey', True, None, None, None, None, None, None),
+            TableAttr('session_sfx', 'Suffix', 'fkey', True, None, None, None, None, None, None),
+            TableAttr('ephys_src', 'Recording Source', 'enum', False,
+                      ['Omniplex', 'Omniplex clips', 'Plexon MAP', 'Maestro Waveform', 'Maestro Spike Ch'],
+                      None, None, None, None, '100px'),
+            TableAttr('probe_type', 'Probe Type', 'enum', False, ['single', '32-channel', 'other'], None, None, None,
+                      None, '100px'),
+            TableAttr('sampling_rate', 'Sample Rate (Hz)', 'float', False, None, [2, 10], None, None,
+                      'Enter the electrode sampling rate in Hz', '100px'),
+            TableAttr('probe_x', 'Probe X', 'float', False, None, [2, 10], None, None,
+                      'Enter the X-coordinate of probe within recording cylinder implant (units?)', '100px'),
+            TableAttr('probe_y', 'Probe Y', 'float', False, None, [2, 10], None, None,
+                      'Enter the Y-coordinate of probe within recording cylinder implant (units?)', '100px'),
+            TableAttr('probe_depth', 'Probe Depth', 'float', False, None, [2, 10], None, None,
+                      'Enter insertion depth of probe (units?)', '100px'),
+            TableAttr('ba_id', 'Target Region', 'fkey', False, None, None, None, None, None, None)
+        ]
+        super().__init__(sgl.Session.EPhys(), "EPhys recording", "ephys", attrs)
+
+    __fkey_info = {'experimenter': (sgl.User, 'username'), 'subj_id': (sgl.Subject, 'subj_id'),
+                   'rig_id': (sgl.Rig, 'rig_id'), 'study_id': (sgl.Study, 'study_id'),
+                   'session_date': (sgl.Session, 'session_date'), 'session_sfx': (sgl.Session, 'session_sfx'),
+                   'ba_id': (sgl.BrainArea, 'ba_id')}
+
+    def attributes_in_master(self) -> List[TableAttr]:
+        """ Get the attributes in this part table that comprise the master table's primary key. """
+        master_pk = ['experimenter', 'subj_id', 'session_date', 'session_sfx']
+        return [attr for attr in self.attributes() if (attr.id in master_pk)]
+
+    def _foreign_key_descriptor(self, fkey_attr: TableAttr) -> Tuple[Type[dj.Table], str]:
+        """ Overridden to supply the necessary information for all foreign keys in the SessionEPhys table. """
+        if fkey_attr and (fkey_attr.id in SessionEPhysView.__fkey_info):
+            return SessionEPhysView.__fkey_info[fkey_attr.id]
+        else:
+            raise ValueError("Not a recognized foreign key on this table")
+
+    def foreign_key_choices(self, attr: TableAttr) -> List[Tuple[str, Any]]:
+        """ Overridden to supply a user-facing label for each brain region in the foreign table sgl.BrainArea. The
+        actual foreign key value is an integer ID. Otherwise, defers to base class. """
+        if attr and (attr.id == 'ba_id'):
+            res = []
+            try:
+                regions = sorted(sgl.BrainArea().proj('ba_id', 'ba_name').fetch(as_dict=True),
+                                 key=lambda region: region['ba_name'])
+                res = [(region['ba_name'], region['ba_id']) for region in regions]
+            except (DataJointError, Exception):
+                pass
+            return res
+        else:
+            return super().foreign_key_choices(attr)
+
+    def check_numeric_attribute_value(self, attr: TableAttr, value: Union[int, float]) -> None:
+        """ Override restricts the 'session_sfx' attribute to the integer range [0..9]. """
+        if attr.id == 'session_sfx' and ((value < 0) or (value > 9)):
+            raise ValueError("Invalid value for session suffix (must lie in 0..9)")

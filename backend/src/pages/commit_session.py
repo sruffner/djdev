@@ -39,7 +39,8 @@ import uuid
 
 from database import maestro
 from database.session_builder import SessionBuilder, OmniplexUnit
-from database.table_views import SessionView
+from database.table_views import SessionView, SessionEPhysView, NeuronTypeView
+from pages.curate_panels import entry_form
 from typing import Any, List
 
 
@@ -109,58 +110,24 @@ class _SessionCommitter:
 
     @staticmethod
     def stage1_body() -> Any:
-        # TODO: NOTE that this is essentially a repeat of _BasePanel._entry_form() in curate_panels.py
-        form_groups = []
-        session_view = SessionView()
-        for attr in session_view.attributes():
-            if attr.type == 'enum':
-                entry_widget = dbc.Select(
-                    id=f"{attr.id}_input",
-                    options=[{"label": opt, "value": opt} for opt in attr.options],
-                    value=attr.options[0]
-                )
-            elif attr.type == 'fkey':
-                fkey_choices = session_view.foreign_key_choices(attr)
-                entry_widget = dbc.Select(
-                    id=f"{attr.id}_input",
-                    options=[{"label": opt[0], "value": opt[1]} for opt in fkey_choices],
-                    value=fkey_choices[0][1]
-                )
-            elif attr.textrange[1] > 100:
-                entry_widget = dbc.Textarea(
-                    id=f"{attr.id}_input",
-                    minLength=attr.textrange[0], maxLength=attr.textrange[1],
-                    rows=2 if attr.textrange[1] < 400 else 4,
-                    value="",
-                    placeholder=attr.placeholder
-                )
-            else:
-                if (attr.type == 'float') or (attr.type == 'int'):
-                    input_type = 'number'
-                else:
-                    input_type = 'email' if 'email' in attr.id else 'text'
-                entry_widget = dbc.Input(
-                    id=f"{attr.id}_input",
-                    type=input_type,
-                    minLength=attr.textrange[0], maxLength=attr.textrange[1],
-                    value="",
-                    placeholder=attr.placeholder
-                )
-
-            form_groups.append(dbc.FormGroup(
-                [
-                    dbc.Label(attr.label, width=2),
-                    dbc.Col(entry_widget, width=10)
-                ],
-                row=True,
-            ))
-
-        # alert raised if attempt to create new session fails - displays a brief error message. Otherwise hidden.
-        form_groups.append(dbc.FormGroup(
-            dbc.Alert("", id=f"stage1_alert", dismissable=True, duration=10000, fade=True, is_open=False)
-        ))
-
-        return dbc.Form(form_groups)
+        markdown = dcc.Markdown('''
+        * Before you begin, all session data files (Maestro and Omniplex) must be compressed into a single, flat ZIP
+        archive (no subdirectories). Maximum supported file size is 10GB.
+        * If the session includes behavioral data only, the archive should contain only the Maestro data files.
+        * There is no support at this time for automatic spike sorting. If the experiment includes electrophysiological 
+        recordings, the experimenter must supply neural unit data (spike trains) in a pickle file (.pkl or .pickle). 
+        This must be the only pickle file in the archive.
+        * The pickle file must contain a single dictionary: {'filename': [...], 'channel': [...], 'spiketimes': [...]},
+        where each value is a list of length N, where N is the number of neural units. These contain the Omniplex PL2
+        filenames, the source channel IDs ('WBnn' or 'SPKCnn'), and the spike timestamps (in seconds since the Omniplex
+        recording started) for each neural unit. The 'filename' field may be omitted if all units were recorded in a
+        single Omniplex file.
+        * You will upload the ZIP archive in the next step, after which the archive is pre-processed on the server. You
+        will then review the results and edit the session metadata before committing the session to the database.
+        * The upload, pre-processing and final commit stages may take a considerable amount of time. Regular progress
+        messages are displayed, and you will have the option to "Cancel" the commit entirely.
+        ''')
+        return [markdown]
 
     @staticmethod
     def stage2_body(substage: int, task_id: str) -> Any:
@@ -170,14 +137,6 @@ class _SessionCommitter:
         upload_started = substage > 0
 
         markdown = dcc.Markdown('''
-        **Instructions**:
-
-        * All session data files (Maestro and Plexon) must be compressed into a single, flat ZIP archive (containing no
-        subdirectories). Maximum supported file size is 2GB.
-        * If the session includes behavioral data only, the archive should contain only the Maestro data files.
-        * There is no support at this time for automatic spike sorting. If the experiment includes electrophysiological 
-        recordings, the experimenter must supply neural unit data (spike trains) in a pickle file (.pkl or .pickle) in
-        a specific format. This must be the only pickle file in the archive.
         
         *Drag and drop the ZIP file onto the upload component below, or click on the component to browse the file
         system for the file. The upload should start automatically. **Do NOT close browser tab while upload is in
@@ -193,16 +152,14 @@ class _SessionCommitter:
         alert = dbc.Alert(id="stage2_alert", color="info", is_open=upload_started)
         return [markdown, upload_div, intv_check, alert]
 
-    __STAGE_HEADERS = {
-        1: 'Step 1: Enter session information',
-        2: 'Step 2: Upload session data archive and pre-process',
-        3: 'Step 3: Review and confirm',
-        4: 'Step 4: Commit session to database'
-    }
-
     @staticmethod
     def stage3_body(task_id: str) -> Any:
         session_builder = SessionBuilder()
+        session_info = session_builder.get_session_info(task_id)
+        session_info_tab_content = dbc.Card(
+            dbc.CardBody(entry_form(SessionView(), None, session_info, None)), className="mt-3"
+        )
+
         proto_map = session_builder.get_trial_protocol_paths(task_id)
         first_key = next(iter(proto_map.keys()))
         initial_protocol: maestro.Protocol = session_builder.get_trial_protocol(task_id, first_key)
@@ -213,6 +170,16 @@ class _SessionCommitter:
         )
         protocol_div = html.Div(_SessionCommitter.stage3_display_protocol(initial_protocol), id="stage3_protocol_div")
         proto_tab_content = dbc.Card(dbc.CardBody([select_protocol, protocol_div]), className="mt-3")
+
+        ephys_info = session_builder.get_ephys_info(task_id)
+        if ephys_info:
+            ephys_view = SessionEPhysView()
+            omit_attrs = ephys_view.attributes_in_master()
+            ephys_info_tab_content = dbc.Card(
+                dbc.CardBody(entry_form(ephys_view, omit_attrs, ephys_info, None)), className="mt-3"
+            )
+        else:
+            ephys_info_tab_content = dbc.Card([], className="mt-3")
 
         num_units = session_builder.get_num_neural_units(task_id)
         if num_units is None:
@@ -229,7 +196,9 @@ class _SessionCommitter:
 
         tabs = dbc.Tabs(
             [
+                dbc.Tab(session_info_tab_content, label="Session Information"),
                 dbc.Tab(proto_tab_content, label="Trial Protocols"),
+                dbc.Tab(ephys_info_tab_content, label="EPhys Recording", disabled=(ephys_info is None)),
                 dbc.Tab(unit_tab_content, label="Neural Units", disabled=(num_units == 0))
             ]
         )
@@ -326,21 +295,42 @@ class _SessionCommitter:
 
     @staticmethod
     def stage3_display_unit(unit: OmniplexUnit) -> List[Any]:
+        # dropdown lets user assign neuron type to the unit
+        neuron_types = NeuronTypeView().rows()
+        initial_selection = str(unit.neuron_type) if unit.neuron_type in [nt['nt_id'] for nt in neuron_types] else None
+        select_type = dbc.InputGroup(
+            [
+                dbc.InputGroupAddon("Neuron Type", addon_type="prepend"),
+                dbc.Select(
+                    id='stage3_neuron_type_select',
+                    options=[{'label': nt['nt_name'], 'value': str(nt['nt_id'])} for nt in neuron_types],
+                    value=initial_selection
+                )
+            ], className='mb-3')
+        header_kids = [html.Hr(), select_type]
+
         peak_to_peak = max(unit.template) - min(unit.template)
-        badges = [
+        header_kids.extend([
             dbc.Badge(f"Omniplex Channel: {unit.channel}", color="primary", className="mr-3"),
             dbc.Badge(f"Mean firing rate: {unit.firing_rate:.1f} Hz", color="primary", className="mr-3"),
             dbc.Badge(f"#Spikes: {len(unit.spike_times)}", color="primary", className="mr-3"),
             dbc.Badge(f"SNR: {unit.snr:.2f}", color="primary", className="mr-3"),
             dbc.Badge(f"Peak-to-peak: {peak_to_peak:.1f} \u00B5V", color="primary", className="mr-3"),
-        ]
+        ])
 
         # simple graph of template waveform. Note I'm assuming 40KHz sampling rate here!
         graph = dcc.Graph(figure=px.line(x=[i/40.0 for i in range(len(unit.template))], y=unit.template,
                                          labels={'x': 'time (ms)', 'y': '\u00B5V'},
                                          title='Average spike waveform (1-ms pre, 9-ms post)'))
 
-        return [html.Div(badges, className='mt-3 mb-1'), graph]
+        return [html.Div(header_kids, className='mt-3 mb-1'), graph]
+
+    __STAGE_HEADERS = {
+        1: 'Step 1: Prepare session data archive',
+        2: 'Step 2: Upload session data archive and pre-process',
+        3: 'Step 3: Review and confirm',
+        4: 'Step 4: Commit session to database'
+    }
 
     @staticmethod
     def header(stage: int) -> str:
@@ -364,28 +354,24 @@ class _SessionCommitter:
             out = [dbc.Button("Continue", id="stage2_continue_btn", color='primary', className='mr-3', disabled=True),
                    dbc.Button("Cancel", id="stage2_cancel_btn", color='primary')]
         else:
-            out = [dbc.Button("Submit", id="stage1_submit_btn", color='primary')]
+            out = [dbc.Button("Start", id="stage1_continue_btn", color='primary')]
 
         return out
 
     def _callbacks(self):
         dash_app = self._app
 
-        state_vector = [State('commit_state', 'data')]
-        state_vector.extend([State(f"{attr.id}_input", "value") for attr in SessionView().attributes()])
-
-        @dash_app.callback([Output('stage1_next_state', 'children'), Output('stage1_alert', 'is_open'),
-                            Output('stage1_alert', 'children')],
-                           [Input('stage1_submit_btn', 'n_clicks')], state_vector)
-        def on_stage1_submit(next_btn, *args):
-            if next_btn is None:
+        @dash_app.callback(Output('stage1_next_state', 'children'),
+                           [Input('stage1_continue_btn', 'n_clicks')], [State('commit_state', 'data')])
+        def on_stage1_submit(start_btn, state):
+            if start_btn is None:
                 raise dash.exceptions.PreventUpdate
 
             session_builder = SessionBuilder()
 
             # check to see if a commit task ID is in the local store. If so, then we should not be in stage 1. Sync
             # with server and switch to the correct stage.
-            client_state = args[0] if isinstance(args[0], dict) else {'stage': 1, 'task_id': ""}
+            client_state = state if isinstance(state, dict) else {'stage': 1, 'task_id': ""}
             if client_state['stage'] > 1:
                 stage, _ = session_builder.get_commit_task_stage(client_state['task_id'])
                 if stage > 1:
@@ -395,15 +381,12 @@ class _SessionCommitter:
                     client_state['stage'] = 1
                     client_state['task_id'] = ""
 
-            entry = dict()
-            for i, attr in enumerate(SessionView().attributes()):
-                entry[attr.id] = str(args[i + 1])
-            ok, task_id_or_err = session_builder.initiate_session_commit(entry)
+            ok, task_id_or_err = session_builder.initiate_session_commit()
             if ok:
                 client_state = {'stage': 2, 'task_id': task_id_or_err}
-                return json.dumps(client_state), dash.no_update, dash.no_update
+                return json.dumps(client_state)
             else:
-                return dash.no_update, True, task_id_or_err
+                return dash.no_update
 
         @dash_app.callback(
             [Output('stage2_alert', 'children'), Output('stage2_alert', 'is_open'),
@@ -479,6 +462,16 @@ class _SessionCommitter:
                 return _SessionCommitter.stage3_display_unit(unit)
             return dash.no_update
 
+        # note that we never update the output here, but the current unit's neuron type is updated on server side
+        @dash_app.callback(Output('stage3_unit_select', 'options'), [Input('stage3_neuron_type_select', 'value')],
+                           [State('stage3_unit_select', 'value'), State('commit_state', 'data')])
+        def on_stage3_neuron_type_select(type_str, unit_idx_str, client_state):
+            unit_idx = int(unit_idx_str) if isinstance(unit_idx_str, str) else -1
+            session_builder = SessionBuilder()
+            task_id = client_state['task_id']
+            session_builder.set_neural_unit_type(task_id, unit_idx, int(type_str))
+            return dash.no_update
+
         @dash_app.callback(Output('stage3_next_state', 'children'),
                            [Input('stage3_cancel_btn', 'n_clicks'), Input('stage3_continue_btn', 'n_clicks')],
                            [State('commit_state', 'data')])
@@ -546,7 +539,7 @@ def update_layout_on_client_state_change(ts, client_state):
     if client_state:
         stage, task_id = (client_state['stage'], client_state['task_id'])
     if len(task_id) > 0:
-        stage, substage = SessionBuilder().get_commit_task_stage(client_state['task_id'])
+        stage, substage = SessionBuilder().get_commit_task_stage(task_id)
         if stage == 1:
             task_id = ""
     return __session_committer.header(stage), __session_committer.body(stage, substage, task_id), \

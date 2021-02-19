@@ -14,12 +14,10 @@ process.
 The commit process will take an extended period of time, and the user could leave and return to the process for any
 number of reasons. On the server side, uncommitted session data will be eventually expunged by a daemon. Thus, every
 client request to the server must include a "task ID" that identifies the particular commit process to which that
-request applies. The task ID is a string '<user>-<uuid>', where '<user>' is the username of the researcher that
-conducted the experiment and 'uuid' is a random universally unique identifier assigned to the commit task, converted to
-a string in standard form. To initiate a session commit, the client must provide valid information about the session,
-including the experimenter's username, session date, and so forth; in response, the server generates the task ID and
-creates a "staging" directory -- $DJDEV_ROOT_REPO/staging/username-UUID -- to which the session data archive is uploaded
-and then processed.
+request applies. The task ID is a string 'session-<uuid>', '<uuid>' is a random universally unique identifier assigned
+to the commit task, converted to a string in standard form. When the client initiates a new commit task, the server
+generates the task ID and creates a "staging" directory -- $DJDEV_ROOT_REPO/staging/<task_id> -- to which the session
+data archive is uploaded and then processed.
 
 To commit data from an experiment to the Lisberger lab database, the researcher must compress all of the session data
 files into a single ZIP archive. For those experiments that include electrophysiological recordings with the Omniplex
@@ -34,16 +32,15 @@ system, the following data files must be present in the archive.
 The pickle file is identified by the extension '.pickle' or '.pkl', and there must be only one such file in the archive.
 It must contain a single dictionary with 2 or 3 keys: 'channel' is a List[str] where the N-th element is the name of the
 Omniplex analog source channel (wide-band "WB" or narrow-band "SPKC" only!) on which a neural unit was recorded,
-'filename' is a List[str] where the N-the element in the name of the PL2 file in which the neural unit was recorded
+'filename' is a List[str] where the N-the element is the name of the PL2 file in which the neural unit was recorded
 (this field must be present ONLY if the spike-sorted units were derived from multiple PL2 files, all of which must be in
 the archive), and 'spiketimes' is a List[] where the N-th element is a Numpy array containing the spike timestamps for
-that neural unit. The timestamps are single-precision floats in seconds since the start of the Omniplex recording.
+that neural unit. The float-valued timestamps are in seconds since the start of the Omniplex recording.
 
 Here is a summary of the commit process:
 
-    Stage 1: Session commit not started. Client must send a request with valid session information to start a commit.
-        In response, the server generates a task ID, creates the staging directory for the commit, and spawns a worker
-        thread dedicated to that commit task.
+    Stage 1: Session commit not started. Client must send a request to start a commit. In response, the server generates
+        a task ID, creates the staging directory for the commit, and spawns a worker thread dedicated to it.
     Stage 2: Upload and pre-processing of session data archive. The "chunked" file upload is handled by a dash-uploader
         component, independent of SessionBuilder. The worker thread merely monitors the upload progress by checking the
         contents of the staging directory. If the upload fails to start or stalls for more than 10 minutes, the worker
@@ -53,23 +50,25 @@ Here is a summary of the commit process:
         processed. Any and all PL2 files are processed to get the Omniplex start and stop timestamps for every trial
         data file in the archive, and to calculate metrics (SNR, firing rate, 10ms average spike waveform template) for
         each identified neural unit. The results are stored in a separate pickle file, 'preprocessing.pickle', in the
-        staging directory. During pre-processing, the client merely polls the server for progress updates and displays
+        staging directory. General session information such as session date, subject, etc may be "guessed" by analyzing
+        the session data. During pre-processing, the client merely polls the server for progress updates and displays
         new progress messages to the user.
-    Stage 3: Review. In this stage, the user reviews the results of the previous stage and provides some additional
-        information required to commit the session to the database (info for the Session.EPhys and Session.Neuron
-        part tables). Client requests retrieve information to be presented on the front end, such as trial protocols
-        and identified neural units. On the server side, the worker thread is essentially paused waiting for the user's
-        approval to complete the commit process.
+    Stage 3: Review and edit. In this stage, the user reviews the results of the previous stage and provides some
+        additional information required to commit the session to the database (info for the Session table and its
+        Session.EPhys and Session.Neuron part tables). Client requests retrieve information to be presented on the front
+        end, such as trial protocols and identified neural units. On the server side, the worker thread is essentially
+        paused waiting for the user's approval to complete the commit process. To proceed to the final stage, any
+        missing session metadata must be supplied by the user.
     Stage 4: Commit. In this stage, the worker completes the session commit: (1) the ZIP archive and other supporting
         files are moved from the temporary staging directory to a permanent place within the raw data repository; (2) an
         entry for the new session is added to the Session database table (along with appropriate entries in the part
-        tables Session.EPhys and Session.Neuron; (3) any new trial protocols are added to the TrialProtocol table; and
+        tables Session.EPhys and Session.Neuron); (3) any new trial protocols are added to the TrialProtocol table; and
         (4) all trials are added to the Trial table (per-trial behavioral and response traces). In this stage, the
         client merely polls the server for progress updates and displays new progress messages to the user.
 
-In any of the stages 2-4, the client may issue a "start over" command -- in which case the session builder deletes the
-staging directory (or fixes the database and repository if cancelled in the middle of stage 4), and the client returns
-to stage 0.
+In any of the stages 2-4, the client may issue a "cancel" command -- in which case the session builder deletes the
+staging directory (or fixes the database and repository if cancelled in the middle of stage 4), and both server and
+client return to stage 1.
 
 
 @author: sruffner
@@ -79,10 +78,12 @@ from __future__ import annotations  # Needed in Python 3.7y to type-hint a metho
 
 import re
 import threading
+from copy import deepcopy
 from queue import Queue
-from typing import Optional, Dict, Any, Tuple, List, NamedTuple, IO
+from typing import Optional, Dict, Any, Tuple, List, IO
 import os
 import time
+from datetime import date
 import shutil
 from pathlib import Path
 import pickle
@@ -90,6 +91,7 @@ import uuid
 import zipfile
 import numpy as np
 import scipy.signal
+from dataclasses import dataclass
 import database.table_views as tv
 import database.maestro as maestro
 import database.PL2 as PL2
@@ -122,39 +124,29 @@ class SessionBuilder(object):
             self.running_tasks: Dict[str, ProcessArchiveThread] = dict()
             self.task_list_lock: threading.Lock = threading.Lock()
 
-    def initiate_session_commit(self, session_info: Dict[str, Any]) -> Tuple[bool, str]:
+    def initiate_session_commit(self) -> Tuple[bool, str]:
         """
-        Initiate a session commit task on the lab database server. The method validates the session information
-        supplied, creates the temporary staging directory for the task, spawns a background thread to perform the work,
-        and returns a unique ID assigned to the task. The client must supply this task ID in all future requests
-        involving the commit task.
-
-        Args:
-            session_info: This dictionary contains user-supplied information about the new experiment session. The
-                keys are attribute IDs for the Session database table, and the corresponding values must satisfy the
-                constraints for those session attributes. See SessionView in table_views.py.
+        Initiate a session commit task on the lab database server. The method creates the temporary staging directory
+        for the task, spawns a background thread to perform the work, and returns a unique ID assigned to the task. The
+        client must supply this task ID in all future requests involving the commit task.
 
         Returns:
             A 2-element tuple. The first element is True only if a new commit task was successfully started on the
                 server. If so, the second element is the assigned task ID; if not, it is a brief user-facing error
-                description (too many commits in progress, invalid session attribute, etc).
+                description (too many commits in progress, unable to create staging directory, etc).
         """
-        err_msg = tv.SessionView().check_row(session_info)
-        if err_msg:
-            return False, err_msg
-
         with self.task_list_lock:
             if len(self.running_tasks) >= SessionBuilder._MAX_WORKERS:
                 return False, "Server is too busy; try again later"
 
-            task_id = f"{session_info['experimenter']}-{str(uuid.uuid4())}"
+            task_id = f"session-{str(uuid.uuid4())}"
             staging_dir = SessionBuilder.get_staging_directory_for(task_id)
             try:
                 staging_dir.mkdir(parents=True, exist_ok=False)
             except Exception as err:
                 return False, f"Failed to create staging directory on server: {str(err)}"
 
-            worker = ProcessArchiveThread(task_id, session_info)
+            worker = ProcessArchiveThread(task_id)
             self.running_tasks[task_id] = worker
             worker.start()
             return True, task_id
@@ -223,6 +215,55 @@ class SessionBuilder(object):
                 return worker.stage, worker.latest_message, worker.result
             else:
                 return 1, "", None
+
+    def get_session_info(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get the session information that will be saved in the Session table when the experiment session is eventually
+        committed to the lab database. This information is available ONLY during stage 3 of the commit workflow -- after
+        pre-processing and before the final commit stage begins. The session information is initialized with reasonable
+        attribute values during pre-processing. On the client side, the user is expected to review and correct it in
+        stage 3.
+
+        Args:
+            task_id: The commit task identifier.
+
+        Returns:
+            A dictionary containing the attribute values for a proposed Session table entry representing the experiment
+                session to be committed, keyed by the Session attribute IDs. Returns None if the task_id does not
+                identify an in-progress commit task, or that task is not currently in stage 3.
+        """
+        out: Optional[Dict[str, Any]] = None
+        with self.task_list_lock:
+            if task_id in self.running_tasks:
+                worker = self.running_tasks[task_id]
+                if worker.stage == 3:
+                    out = deepcopy(worker.session_info)
+        return out
+
+    def get_ephys_info(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get the information about the experiment's electrophysiological recording that is saved in the Session.EPhys
+        part table when the experiment session is eventually committed to the lab database. The information is available
+        ONLY during stage 3 of the commit workflow -- after pre-processing and before the final commit stage begins. The
+        information is initialized with reasonable attribute values during pre-processing. On the client side, the user
+        is expected to review and correct it in stage 3.
+
+        Args:
+            task_id: The commit task identifier.
+
+        Returns:
+            A dictionary containing the attribute values for a proposed Session.EPhys table entry for the experiment
+                session to be committed, keyed by the Session.EPhys attribute IDs. Returns None if the task_id does not
+                identify an in-progress commit task, if that task is not currently in stage 3, or if the experiment
+                did not include electrophysiological recordings.
+        """
+        out: Optional[Dict[str, Any]] = None
+        with self.task_list_lock:
+            if task_id in self.running_tasks:
+                worker = self.running_tasks[task_id]
+                if (worker.stage == 3) and (worker.ephys_info is not None):
+                    out = deepcopy(worker.ephys_info)
+        return out
 
     def get_trial_protocol_paths(self, task_id: str) -> Optional[Dict[str, str]]:
         """
@@ -321,7 +362,7 @@ class SessionBuilder(object):
 
         Returns:
             The requested neural unit. Returns None if the task_id does not identify an in-progress commit
-                task, if that task is not currently in stage 3, or if the unit index is invalid
+                task, if that task is not currently in stage 3, or if the unit index is invalid.
         """
         out: Optional[OmniplexUnit] = None
         with self.task_list_lock:
@@ -330,6 +371,31 @@ class SessionBuilder(object):
                 if (worker.stage == 3) and (index >= 0) and (index < len(worker.units)):
                     out = worker.units[index]
         return out
+
+    def set_neural_unit_type(self, task_id: str, index: int, neuron_type: int) -> bool:
+        """
+        Update the neuron type ID assigned to a neural unit identified during pre-processing of the session data
+        archive. During stage 3 of the session commit workflow, the user (via the client front-end) has the opportunity
+        to specify the neuron type for each identified unit. The method has no effect in any other stage.
+
+        Args:
+            task_id: The commit task identifier.
+            index: The zero-based index of the neural unit requested.
+            neuron_type: The neuron type ID. This should identify an existing entry in the database's NeuronType table,
+                but it is not checked until the session is actually committed to the database in stage 4
+
+        Returns:
+            True if successful; False if the task_id does not identify an in-progress commit task, if that task is not
+                currently in stage 3, or if the unit index is invalid.
+        """
+        ok = False
+        with self.task_list_lock:
+            if task_id in self.running_tasks:
+                worker = self.running_tasks[task_id]
+                if (worker.stage == 3) and (index >= 0) and (index < len(worker.units)):
+                    worker.units[index].neuron_type = neuron_type
+                    ok = True
+        return ok
 
     def cancel(self, task_id: str) -> bool:
         """
@@ -389,15 +455,19 @@ class ProcessArchiveThread(threading.Thread):
         description of this file. For now, we only support neural units recorded on the Omniplex system, and the archive
         must include the relevant PL2 file(s) for each unit specified in the pickle.
 
-        5) Store the results as a dictionary {'protocols': ..., 'timings': ..., 'units': ...} in the pickle file
+        5) Using the processing results and information already stored in the lab database, choose values for metadata
+        attributes that will be stored in the Session table and its part tables, Session.Ephys and Session.Neuron.
+
+        6) Store the results as a dictionary {'protocols': ..., 'timings': ..., 'units': ...} in the pickle file
         'preprocessing.pickle' within the staging directory.
 
-        6) After pre-processing is complete, the worker enters stage 3, during which the user on the client side reviews
-        the results and provides additional information. The worker is essentially paused in this stage, waiting for
-        the command to enter stage 4.
+        7) After pre-processing is complete, the worker enters stage 3, during which the user on the client side reviews
+        the results and may make changes to the session metadata. The worker is essentially paused in this stage,
+        waiting for the command to enter stage 4. Any changes to the session metadata are validated before the worker
+        can transition to stage 4.
 
-        7) In stage 4, the worker commits the experiment session to the lab database and raw data repository. First the
-        ZIP archive and other supporting files are moved from the staging directory to their permanent place in the
+        8) In stage 4, the worker commits the experiment session to the lab database and raw data repository. First the
+        ZIP archive and any other supporting files are moved from the staging directory to their permanent place in the
         data repository. Then the database is updated with the new Session object, a Session.EPhys entry and one or more
         Session.Neuron entries if the session included neural response data, and a TrialProtocol entry for each trial
         protocol not already in the database. Lastly, the Trial table in the database is populated with a new entry for
@@ -411,7 +481,7 @@ class ProcessArchiveThread(threading.Thread):
     To cancel the session commit, call cancel(). This method sets a flag to inform the worker thread and returns
     immediately. The worker thread will stop its work in progress and remove the staging directory in its entirety.
     """
-    def __init__(self, task_id: str, info: Dict[str, Any]):
+    def __init__(self, task_id: str):
         super(ProcessArchiveThread, self).__init__(name=f"ProcessArchive-{task_id}")
         self.staging_dir: Path = SessionBuilder.get_staging_directory_for(task_id)
         """ The temporary staging directory for the session commit task. ZIP archive gets uploaded here. """
@@ -429,8 +499,6 @@ class ProcessArchiveThread(threading.Thread):
         per second to check whether the server has signaled a cancel request."""
         self.stage: int = 2
         """ The current processing stage in the session commit workflow. Set by worker; read-only to server. """
-        self.session_info: Dict[str, Any] = info
-        """ User-supplied information required to commit the experiment session to the database. """
         self.protocols: Optional[List[maestro.Protocol]] = None
         """ The list of trial protocols culled from the session data archive during stage 2 pre-processing. Set by
         worker. Safe for server to access only while worker is paused in stage 3. """
@@ -440,8 +508,19 @@ class ProcessArchiveThread(threading.Thread):
         to align neural responses recorded on the Omniplex system with the behavioral responses recorded by Maestro.
         Set by worker. Safe for server to access only while worker is paused in stage 3. """
         self.units: Optional[List[OmniplexUnit]] = None
-        """ The list of neural units culled from the session data archive during stage 3 pre-processing. Set by worker.
-        Safe for server to access only while worker is paused in stage 3. """
+        """ The list of neural units culled from the session data archive during stage 2 pre-processing. Includes the
+        information required to prepare an entry in the Session.Neuron part table for each neural unit. Prepared by
+        worker during stage 2 pre-processing. Safe for server to access only while worker is paused in stage 3; during
+        that stage, the user will need to assign a neuron type to each neural unit. """
+        self.session_info: Optional[Dict[str, Any]] = None
+        """ User-supplied information required to add an entry in the Session table in the database, keyed by the 
+        Session table attribute IDs. During pre-processing, the worker thread will initialize this information. Server
+        can modify this safely (in response to corrections sent by client) while worker is paused in stage 3. """
+        self.ephys_info: Optional[Dict[str, Any]] = None
+        """ When a session includes neural unit recordings, this field will contain user-supplied information required
+        to add an entry in the Session.EPhys part table in the database, keyed by the attribute IDs in that table.
+        During stage 2 pre-processing, the worker thread will initialize this information. Server can modify this safely
+        (in response to corrections sent by client) while worker is paused in stage 3. """
 
     def run(self):
         cancelled = False
@@ -541,7 +620,8 @@ class ProcessArchiveThread(threading.Thread):
         information that will be needed when the session is actually committed to the lab database: (1) the unique trial
         protocols presented during the session; (2) timing information for all trial reps, in particular, the start and
         stop timestamps for the trial in the Omniplex timeline (for electrophysiological experiments using the Omniplex
-        system); and (3) metrics for all neural units recorded in the session.
+        system); and (3) metrics for all neural units recorded in the session. It also initializes metadata that will
+        be added to the database (Session and Session.EPhys tables) when the session is committed.
 
         The pre-processing results are stored in a pickle file, 'preprocessing.pickle', in the same directory as the ZIP
         archive.
@@ -565,16 +645,22 @@ class ProcessArchiveThread(threading.Thread):
                 archive_list = archive.infolist()
                 pl2s_archived: List[zipfile.ZipInfo] = list()
                 units_zip_info: Optional[zipfile.ZipInfo] = None
+                session_date: Optional[date] = None
+                sample_maestro_file_name: str = ""
                 for info in archive_list:
                     if (len(info.filename) > 3) and (info.filename[-3:].lower() == 'pl2'):
                         pl2s_archived.append(info)
                     elif data_file_name_pattern.search(info.filename) is not None:
+                        sample_maestro_file_name = info.filename
                         header = maestro.DataFileHeader.parse_header(archive.read(info))
                         file_index = int(info.filename[-4:])
                         header_timestamp = header.timestamp_ms if header.version >= 21 else None
+                        if session_date is None:
+                            session_date = header.date_recorded
+                        elif session_date != header.date_recorded:
+                            raise Exception("Recorded date must be the same for all trial files in archive!")
                         duration = float(header.num_scans_saved - 1) / 1000.0  # Trial mode scan rate is fixed at 1KHz
-                        self.trial_timings[info.filename] = \
-                            TrialTiming._make([file_index, header_timestamp, duration, None, None])
+                        self.trial_timings[info.filename] = TrialTiming(file_index, header_timestamp, duration)
                     elif ((len(info.filename) > 7) and (info.filename[-7:].lower() == '.pickle')) or \
                             ((len(info.filename) > 4) and (info.filename[-4:].lower() == '.pkl')):
                         if units_zip_info is None:
@@ -622,6 +708,43 @@ class ProcessArchiveThread(threading.Thread):
                     for key in self.trial_timings.keys():
                         if self.trial_timings[key].omniplex_start is None:
                             raise Exception(f"Missing Omniplex start/stop timestamps for {key}")
+
+                # initialize session metadata. We get the session date from the Maestro trials, and we may get the
+                # subject ID from the ZIP archive file name or a Maestro data file name
+                session_view = tv.SessionView()
+                attrs = session_view.attributes()
+                self.session_info = dict()
+                for attr in attrs:
+                    if attr.type == 'fkey':
+                        if attr.id == 'subj_id':
+                            subject_choices = session_view.foreign_key_choices(attr)
+                            for choice in subject_choices:
+                                if (choice[0].lower() in zip_path.name.lower()) or (
+                                        choice[0].lower() in sample_maestro_file_name.lower()):
+                                    self.session_info['subj_id'] = choice[1]
+                                    break
+                            if 'subj_id' not in self.session_info:
+                                self.session_info['subj_id'] = subject_choices[0][1]
+                        else:
+                            self.session_info[attr.id] = session_view.foreign_key_choices(attr)[0][1]
+                self.session_info['session_date'] = session_date
+                self.session_info['session_sfx'] = 1
+                self.session_info['session_notes'] = ""
+
+                # if neural units were recorded, initialize metadata about session's electrophysiological recording.
+                # User edits this metadata in stage 3. We only support Omniplex system right now, and we infer sampling
+                # rate from the length of a unit's spike template waveform, which spans 10ms.
+                if len(self.units) > 0:
+                    channel_ids = {unit.channel for unit in self.units}
+                    self.ephys_info = dict()
+                    self.ephys_info['ephys_src'] = 'Omniplex'
+                    self.ephys_info['probe_type'] = 'single' if len(channel_ids) == 1 else '32-channel'
+                    self.ephys_info['sampling_rate'] = len(self.units[0].template) / 0.01
+                    self.ephys_info['probe_x'] = 0
+                    self.ephys_info['probe_y'] = 0
+                    self.ephys_info['probe_depth'] = 0
+                    brain_areas = tv.BrainRegionView().rows()
+                    self.ephys_info['ba_id'] = brain_areas[0]['ba_id']
 
                 self.msg_q.put_nowait(f"Saving pre-processed session data...")
                 save_path = Path(zip_path.parent, 'preprocessing.pickle')
@@ -694,17 +817,15 @@ class ProcessArchiveThread(threading.Thread):
                 _validate_neural_unit_data().
 
         Raises:
-            Exception if an error occurs while loading and processing data in the Omniplex file.
+            Exception: If an error occurs while loading and processing data in the Omniplex file.
         """
         with open(path, 'rb') as fp:
             self.msg_q.put_nowait(f"Processing trial timing information in Omniplex file {path.name}...")
             info = PL2.load_file_information(fp)
             timings_dict = _get_trial_timing_from_pl2_file(fp, info)
             for key in (timings_dict.keys() & self.trial_timings.keys()):
-                old = self.trial_timings[key]
-                start_ts, stop_ts = timings_dict[key]
-                self.trial_timings[key] = \
-                    TrialTiming._make([old.file_index, old.header_timestamp, old.duration, start_ts, stop_ts])
+                trial_timing = self.trial_timings[key]
+                trial_timing.omniplex_start, trial_timing.omniplex_stop = timings_dict[key]
             if self._cancel_request.is_set():
                 return
 
@@ -768,7 +889,7 @@ class ProcessArchiveThread(threading.Thread):
             from the original analog data. Returns None if the commit task was cancelled.
 
         Raises:
-            Exception if an error occurs while processing the analog data channel.
+            Exception: If an error occurs while processing the analog data channel.
         """
         self.msg_q.put_nowait(f"Calculating firing rate and other metrics for {len(spikes)} neural unit(s) on "
                               f"Omniplex channel {channel_id} ...")
@@ -848,6 +969,14 @@ class ProcessArchiveThread(threading.Thread):
                                       f"Omniplex channel {channel_id} ...{100.0*block_idx/num_blocks:.1f}%")
                 t0 = time.time()
 
+        # prepare neural unit objects. Assign a default neuron type to each -- preferably the "unknown" type if it is
+        # defined in database
+        neuron_types = tv.NeuronTypeView().rows()
+        initial_nt_id = neuron_types[0]['nt_id']
+        for nt in neuron_types:
+            if nt['nt_name'].lower() == 'unknown':
+                initial_nt_id = nt['nt_id']
+                break
         noise = np.median(block_medians) * 1.4826
         out: List[OmniplexUnit] = list()
         for i in range(len(spikes)):
@@ -856,7 +985,7 @@ class ProcessArchiveThread(threading.Thread):
             snr = (np.max(template[i]) - np.min(template[i])) / (1.96 * noise)
             firing_rate = float(len(spikes[i])) / (spikes[i][-1] - spikes[i][0])
             template[i] *= to_volts * 1.0e6
-            out.append(OmniplexUnit._make([filename, channel_id, spikes[i], firing_rate, snr, template[i]]))
+            out.append(OmniplexUnit(filename, channel_id, spikes[i], firing_rate, snr, template[i], initial_nt_id))
         return out
 
 
@@ -982,99 +1111,94 @@ def _get_trial_timing_from_pl2_file(fp: IO, info: Optional[Dict[str, Any]] = Non
     return result
 
 
-def _bandpass_filter_wide_band_stream(data: np.ndarray, sample_rate_hz: float) -> np.ndarray:
+@dataclass
+class TrialTiming:
     """
-    Bandpass filter an Omniplex "wide-band" analog data stream with a 2nd-order Butterworth bandpass digital filter
-    between 300 and 8000Hz.
+    Timing information used to determine the order in which trials were presented during an experiment and to align
+    spike times of neural units recorded on the Omniplex system with respect to the timeline of the Maestro trials in
+    which behavioral response data is recorded.
 
-    NOTE: Memory concerns -- The input Numpy array will typically be int16 (2 bytes per element), as the analog samples
-    are 16-bit in the Omniplex file. The output array will be float32 or float64 (4 or 8 bytes per element). If the
-    input array is huge, the output will be even larger and could strain memory resources.
-
-    Args:
-        data: The wide-band input stream.
-        sample_rate_hz: The sample rate for the input stream in Hz.
-
-    Returns:
-        The filtered stream. Note that the Numpy array returned will be floating-point.
-    """
-    [b, a] = scipy.signal.butter(2, [2 * 300 / sample_rate_hz, 2 * 8000 / sample_rate_hz], btype='bandpass')
-    return scipy.signal.lfilter(b, a, data)
-
-
-class TrialTiming(NamedTuple):
-    """
-    Tuple of timing information used to determine the order in which trials were presented during an experiment and to
-    align spike times of neural units recorded on the Omniplex system with respect to the timeline of the Maestro trials
-    in which behavioral response data is recorded. The named tuple has the following attributes:
-
-        file_index (int) - The trial data file's 4-digit numeric string extension converted to an integer.
-
-        header_timestamp (int) - The internal timestamp found in the data file header, in ms since Maestro started. Will
-        be available for all data files with version >= 21.
-
-        duration (float) - The trial duration in seconds, as culled from the data file header.
-
-        omniplex_start (float) - The Omniplex timestamp for the XS2 pulse delivered at the start of the trial, in
-        seconds since the Omniplex recording began.
-
-        omniplex_stop (float) - The Omniplex timestamp for the XS2 pulse delivered at the end of the trial, in seconds
-        since the Omniplex recording began.
-
-    For behavior-only sessions, the last two attributes will be None, since there is no Omniplex data. For these
-    sessions, we rely only on the internal timestamps to determine the trial order. If those timestamps are unavailable,
-    then we rely on the file indices. When the Omniplex data is available, then it is the start/stop times as recorded
-    on the Omniplex that determine both the trial presentation order and the conversion of neural unit spike times to
-    the individual Maestro trial timelines.
+    Behavior-only experiments have no Omniplex data. For these sessions, we rely only on the internal timestamps to
+    determine the trial order. If those timestamps are unavailable, then we rely on the file indices. When the Omniplex
+    data is available, it is the start/stop times as recorded on the Omniplex that determine both the trial presentation
+    order and the conversion of neural unit spike times to the individual Maestro trial timelines.
     """
     file_index: int
+    """ The trial data file's 4-digit numeric string extension converted to an integer."""
     header_timestamp: Optional[int]
+    """ The internal timestamp found in the data file header, in ms since Maestro started. Will be None for data files
+    prior to version 21. """
     duration: float
-    omniplex_start: Optional[float]
-    omniplex_stop: Optional[float]
+    """ The trial duration in seconds, as culled from the data file header."""
+    omniplex_start: Optional[float] = None
+    """ The Omniplex timestamp for the XS2 pulse delivered at the start of the trial, in seconds since the Omniplex 
+    recording began. Will be None for behavior-only experiment sessions."""
+    omniplex_stop: Optional[float] = None
+    """ The Omniplex timestamp for the XS2 pulse delivered at the end of the trial, in seconds since the Omniplex
+    recording began. Will be None for behavior-only experiment sessions. """
 
 
-class OmniplexUnit(NamedTuple):
+@dataclass
+class OmniplexUnit:
     """
-    Tuple containing information that will be stored in the lab database for each identified neural unit in an Omniplex
-    recording session. The Omniplex source filename, channel ID, and spike timestamps for each unit are extracted from
-    the spike-sort results file that must be included in the session data ZIP archive when committing an experiment
-    session to the Lisberger lab database. Other metrics are computed from the original Omniplex analog data stream
-    from which the unit spike times were "sorted". The named tuple has the following attributes:
-
-        source_file (str) - The name of the Omniplex PL2 file containing the analog data for the neural unit.
-
-        channel (str) - The relevant source channel. The channel name starts with a short string identifier followed by
-        a 2-digit number, e.g., 'WB01' (wide band channel 1).
-
-        spike_times (np.ndarray) - A Numpy array holding the "sorted" spike times in seconds since the start of the
-        Omniplex recording.
-
-        firing_rate (float) - Mean firing rate in Hz (computed from spike times array).
-
-        snr (float) - Signal-to-noise ratio (computed from spike times array and original analog data stream).
-
-        template (np.ndarray) - Average spike template waveform (computed by averaging 10-ms "clips" of filtered
-        analog channel stream starting 1ms before each spike timestamp in the spike times array). Units = micro-volts.
+    Data object containing information that will be stored in the Session.Neuron part table in the lab database for each
+    identified neural unit in an Omniplex recording session. The Omniplex source filename, channel ID, and spike
+    timestamps for each unit are extracted from the spike-sort results file that must be included in the session data
+    archive when committing an experiment session to the database. Other metrics are computed from the original Omniplex
+    analog data stream from which the unit spike times were "sorted".
     """
     source_file: str
+    """ The name of the Omniplex PL2 file containing the analog data for the neural unit. """
     channel: str
+    """ The Omniplex source channel name, which consists of the tag 'WB' (wide-band channel) or 'SPKC' (narrow-band
+    channel) followed by a 2-digit number."""
     spike_times: np.ndarray
+    """ 1D Numpy array holding the sorted spike times in seconds since the start of the Omniplex recording."""
     firing_rate: float
+    """ Mean firing rate in Hz (computed from spike times array). """
     snr: float
+    """ Signal-to-noise ratio (computed from spike times array and original analog data stream. """
     template: np.ndarray
+    """ Average spike template waveform (computed by averaging 10-ms clips of filtered analog channel stream starting
+    1ms before each timestamp in the spike times array). Units = micro-volts. """
+    neuron_type: Optional[int] = None
+    """ ID of the neuron type associated with this unit (value of primary key in NeuronType table). """
 
-    def summary(self) -> Dict[str, Any]:
-        """
-        Generate a summary of this Omniplex-recorded neural unit for display purposes only. Returns a dictionary with
-        the following fields: 'channel_id' is the ID of the Omniplex analog data channel on which the unit was
-        recorded (str); 'spike_times' is the list of spike timestamps for the unit, in seconds since start of the
-        Omniplex recording (List[float]); 'firing_rate' is the unit's mean firing rate in Hz (float); 'snr' is the
-        unit's estimated signal-to-noise ratio (float); and 'template' is a 10-ms clip of the average spike waveform
-        in microV (List[float]).
-        """
-        return {'channel_id': self.channel,
-                'spike_times': self.spike_times.tolist(),
-                'firing_rate': self.firing_rate,
-                'snr': self.snr,
-                'template': self.template.tolist()}
+
+@dataclass
+class SessionInfo:
+    """
+    TODO: Not using this -- discard?
+    Data object contains all of the information about an experiment session that will be stored in the Session table
+    and its Session.EPhys part table when the session is committed to the lab database. It does not include the
+    information about any neural units recorded, which are stored in the Session.Neuron part table -- see OmniplexUnit.
+    Note that the field names exactly match the corresponding attribute IDs in the Session and Session.EPhys tables.
+    """
+    experimenter: str
+    """ The username of the experimenter (primary foreign key, User table). """
+    subj_id: str
+    """ The name of the experiment subject (primary foreign key, Subject table). """
+    session_date: str
+    """ The session date, in ISO format YYYY-MM-DD (primary key). """
+    session_sfx: int
+    """ Session suffix to distinguish multiple sessions on the same date. Restricted to 0..9 (primary key). """
+    rig_id: str
+    """ Experiment rig ID (foreign key, Rig table). """
+    study_id: int
+    """ Relevant study ID (foreign key, Study table). """
+    session_notes: str = ""
+    """ Experimenter's notes about the session."""
+    ephys_src: Optional[str] = None
+    """ Electrophysiology recording source = None for behavior-only session. """
+    probe_type: Optional[str] = None
+    """ The electrode probe type = None for behavior-only session. """
+    sampling_rate: Optional[float] = None
+    """ The electrode signal sampling rate in Hz = None for behavior-only sessions """
+    probe_x: Optional[float] = None
+    """ X-coordinate of probe location within recording cylinder implant (units?) = None for behavior-only session. """
+    probe_y: Optional[float] = None
+    """ Y-coordinate of probe location within recording cylinder implant (units?) = None for behavior-only session. """
+    probe_depth: Optional[float] = None
+    """ Insertion depth of probe (units?) = None for behavior-only session. """
+    ba_id: Optional[int] = None
+    """ Target brain region ID (foreign key, BrainArea table) = None for behavior-only session. """

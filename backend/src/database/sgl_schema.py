@@ -287,7 +287,7 @@ class Session(dj.Manual):
         -> master
         unit_id : smallint                  # Unique ID assigned to unit
         ---
-        unit_channel : smallint             # Number of source channel on which unit was recorded
+        unit_channel : varchar(10)          # ID/label for source channel on which unit was recorded
         (unit_type) -> NeuronType           # Identified neuron type
         unit_firing_rate : float            # Mean firing rate of neural unit while held (in Hz)
         unit_snr : float                    # Signal-to-noise ratio (indication of quality of recording?)
