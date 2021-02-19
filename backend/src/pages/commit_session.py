@@ -534,9 +534,10 @@ def update_layout_on_client_state_change(ts, client_state):
     if ts is None:
         raise dash.exceptions.PreventUpdate
 
-    # if there is no state dictionary in the store, then we're in stage 1. Else, sync with the server
+    # if there is no state dictionary in the store, then we're in stage 1. Else, sync with the server. Also need to
+    # be careful that the stored client state has the two keys 'stage' and 'task_id'
     stage, substage, task_id = (1, 0, "")
-    if client_state:
+    if client_state and ('stage' in client_state) and ('task_id' in client_state):
         stage, task_id = (client_state['stage'], client_state['task_id'])
     if len(task_id) > 0:
         stage, substage = SessionBuilder().get_commit_task_stage(task_id)
