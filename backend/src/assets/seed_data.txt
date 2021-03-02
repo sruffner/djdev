@@ -12,6 +12,7 @@
 { "table": "Subject", "entry": {"subj_id": "jojobe", "species": "Macaca mulatta", "dob": "2017-12-08", "sex": "M"}}
 { "table": "Subject", "entry": {"subj_id": "rondo", "species": "Macaca mulatta", "dob": "2015-05-06", "sex": "M"}}
 { "table": "Subject", "entry": {"subj_id": "yolanda", "species": "Macaca mulatta", "dob": "2019-04-18", "sex": "F"}}
+{ "table": "Subject", "entry": {"subj_id": "yoda", "species": "Macaca mulatta", "dob": "2016-05-22", "sex": "M"}}
 
 
 { "table": "SubjectImplant", "entry": {"subj_id": "jojobe", "implant_date": "2018-07-22", "st_ap": "4", "st_ml": "3", "st_dv": "5", "ap_angle": "10", "ml_angle": "0"}}

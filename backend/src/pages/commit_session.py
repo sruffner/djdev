@@ -171,15 +171,13 @@ class _SessionCommitter:
         protocol_div = html.Div(_SessionCommitter.stage3_display_protocol(initial_protocol), id="stage3_protocol_div")
         proto_tab_content = dbc.Card(dbc.CardBody([select_protocol, protocol_div]), className="mt-3")
 
+        # note: this tab will be disabled if session does not include neural units recordings
         ephys_info = session_builder.get_ephys_info(task_id)
-        if ephys_info:
-            ephys_view = SessionEPhysView()
-            omit_attrs = ephys_view.attributes_in_master()
-            ephys_info_tab_content = dbc.Card(
-                dbc.CardBody(entry_form(ephys_view, omit_attrs, ephys_info, None)), className="mt-3"
-            )
-        else:
-            ephys_info_tab_content = dbc.Card([], className="mt-3")
+        ephys_view = SessionEPhysView()
+        omit_attrs = ephys_view.attributes_in_master()
+        ephys_info_tab_content = dbc.Card(
+            dbc.CardBody(entry_form(ephys_view, omit_attrs, ephys_info, None)), className="mt-3"
+        )
 
         num_units = session_builder.get_num_neural_units(task_id)
         if num_units is None:
@@ -202,7 +200,10 @@ class _SessionCommitter:
                 dbc.Tab(unit_tab_content, label="Neural Units", disabled=(num_units == 0))
             ]
         )
-        return tabs
+
+        # displays error message if user-entered session or ephys metadata is invalid
+        alert = dbc.Alert(id="stage3_alert", color="info", is_open=False, className="mt-3")
+        return [tabs, alert]
 
     @staticmethod
     def stage3_display_protocol(protocol: maestro.Protocol) -> List[Any]:
@@ -325,11 +326,23 @@ class _SessionCommitter:
 
         return [html.Div(header_kids, className='mt-3 mb-1'), graph]
 
+    @staticmethod
+    def stage4_body() -> Any:
+        markdown = dcc.Markdown('''
+
+        *PLEASE WAIT while session data is inserted into the laboratory database. Depending on the size of the data
+        archive and server traffic, this could take many minutes...*
+
+        ''')
+        alert = dbc.Alert("Checking progress on server...", id="stage4_alert", color="info", is_open=True)
+        intv_check = dcc.Interval(id="stage4_check_progress", disabled=False, interval=1000)
+        return [markdown, alert, intv_check]
+
     __STAGE_HEADERS = {
         1: 'Step 1: Prepare session data archive',
         2: 'Step 2: Upload session data archive and pre-process',
         3: 'Step 3: Review and confirm',
-        4: 'Step 4: Commit session to database'
+        4: 'Step 4: Committing session to database'
     }
 
     @staticmethod
@@ -338,6 +351,8 @@ class _SessionCommitter:
 
     @staticmethod
     def body(stage: int, substage: int, task_id: str) -> Any:
+        if stage == 4:
+            return _SessionCommitter.stage4_body()
         if stage == 3:
             return _SessionCommitter.stage3_body(task_id)
         elif stage == 2:
@@ -347,11 +362,13 @@ class _SessionCommitter:
 
     @staticmethod
     def footer(stage: int) -> List[dbc.Button]:
-        if stage == 3:
-            out = [dbc.Button("Continue", id="stage3_continue_btn", color='primary', className='mr-3', disabled=True),
+        if stage == 4:
+            out = [dbc.Button("Cancel", id="stage4_cancel_btn", color='primary')]
+        elif stage == 3:
+            out = [dbc.Button("Finish", id="stage3_continue_btn", color='primary', className='mr-3'),
                    dbc.Button("Cancel", id="stage3_cancel_btn", color='primary')]
         elif stage == 2:
-            out = [dbc.Button("Continue", id="stage2_continue_btn", color='primary', className='mr-3', disabled=True),
+            out = [dbc.Button("Next", id="stage2_continue_btn", color='primary', className='mr-3', disabled=True),
                    dbc.Button("Cancel", id="stage2_cancel_btn", color='primary')]
         else:
             out = [dbc.Button("Start", id="stage1_continue_btn", color='primary')]
@@ -472,19 +489,67 @@ class _SessionCommitter:
             session_builder.set_neural_unit_type(task_id, unit_idx, int(type_str))
             return dash.no_update
 
-        @dash_app.callback(Output('stage3_next_state', 'children'),
+        state_vector = [State(f"{attr.id}_input", "value") for attr in SessionView().attributes()]
+        state_vector.extend([State(f"{attr.id}_input", "value")
+                             for attr in SessionEPhysView().attributes_not_in_master()])
+        state_vector.append(State('commit_state', 'data'))
+
+        @dash_app.callback([Output('stage3_next_state', 'children'), Output('stage3_alert', 'children'),
+                            Output('stage3_alert', 'is_open')],
                            [Input('stage3_cancel_btn', 'n_clicks'), Input('stage3_continue_btn', 'n_clicks')],
-                           [State('commit_state', 'data')])
-        def on_stage3_transition(n_cancel, n_continue, client_state):
+                           state_vector)
+        def on_stage3_transition(n_cancel, n_continue, *args):
+            ctx = dash.callback_context
+            if not ctx.triggered:
+                raise dash.exceptions.PreventUpdate
+
             session_builder = SessionBuilder()
-            next_state = None
+            client_state = args[-1]
             task_id = client_state['task_id']
             if n_cancel is not None:
                 session_builder.cancel(task_id)
-                next_state = {'stage': 1, 'task_id': ""}
+                return json.dumps({'stage': 1, 'task_id': ""}), dash.no_update, dash.no_update
             elif n_continue is not None:
-                next_state = None  # TODO: Transition to stage 4 once it's implemented
-            return dash.no_update if (next_state is None) else json.dumps(next_state)
+                session_info = dict()
+                ephys_info = None
+                for i, attr in enumerate(SessionView().attributes()):
+                    session_info[attr.id] = args[i]
+                if session_builder.get_ephys_info(task_id) is not None:
+                    ofs = len(session_info.keys())
+                    ephys_info = dict()
+                    for i, attr in enumerate(SessionEPhysView().attributes_not_in_master()):
+                        ephys_info[attr.id] = args[ofs+i]
+                error_msg = session_builder.start_commit(task_id, session_info, ephys_info)
+                if not error_msg:
+                    return json.dumps({'stage': 4, 'task_id': task_id}), dash.no_update, dash.no_update
+                else:
+                    return dash.no_update, error_msg, True
+            else:
+                return dash.no_update, dash.no_update, dash.no_update
+
+        @dash_app.callback([Output('stage4_next_state', 'children'), Output('stage4_alert', 'children'),
+                            Output('stage4_cancel_btn', 'children')],
+                           [Input('stage4_cancel_btn', 'n_clicks'), Input('stage4_check_progress', 'n_intervals')],
+                           [State('commit_state', 'data')])
+        def on_stage4_update(n_cancel, n_intervals, client_state):
+            ctx = dash.callback_context
+            if not ctx.triggered:
+                raise dash.exceptions.PreventUpdate
+
+            session_builder = SessionBuilder()
+            task_id = client_state['task_id']
+            trigger = ctx.triggered[0]['prop_id'].split('.')[0]
+            if n_cancel is not None:
+                session_builder.cancel(task_id)
+                return json.dumps({'stage': 1, 'task_id': ""}), dash.no_update, dash.no_update
+            elif (trigger.find('stage4_check_progress') > -1) and (n_intervals is not None):
+                stage, message, result = session_builder.progress_update(task_id)
+                if stage == 4:
+                    return dash.no_update, message, "Done" if result is True else dash.no_update
+                else:
+                    return json.dumps({'stage': 1, 'task_id': ""}), dash.no_update, dash.no_update
+            else:
+                return dash.no_update, dash.no_update, dash.no_update
 
 
 __session_committer = _SessionCommitter(app)
@@ -494,6 +559,7 @@ layout = html.Div([
     html.Div("", id="stage1_next_state", style={"display": "none"}),
     html.Div("", id="stage2_next_state", style={"display": "none"}),
     html.Div("", id="stage3_next_state", style={"display": "none"}),
+    html.Div("", id="stage4_next_state", style={"display": "none"}),
     dbc.Container([
         dbc.Row([dbc.Col(html.H3("Commit experiment sessions to the laboratory database", className="text-center"),
                 className="mb-3 mt-3")]),
@@ -508,7 +574,7 @@ layout = html.Div([
 
 
 @app.callback(Output('commit_state', 'data'),
-              [Input(f"stage{i+1}_next_state", 'children') for i in range(3)])
+              [Input(f"stage{i+1}_next_state", 'children') for i in range(4)])
 def on_client_state_change(*args):
     ctx = dash.callback_context
     if not ctx.triggered:
@@ -521,6 +587,8 @@ def on_client_state_change(*args):
         client_state = json.loads(args[1])
     elif btn_id.find('stage3') > -1:
         client_state = json.loads(args[2])
+    elif btn_id.find('stage4') > -1:
+        client_state = json.loads(args[3])
     else:
         client_state = dash.no_update
     return client_state

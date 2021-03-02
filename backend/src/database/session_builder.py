@@ -77,6 +77,7 @@ client return to stage 1.
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
 import re
+import sys
 import threading
 from copy import deepcopy
 from queue import Queue
@@ -95,6 +96,7 @@ from dataclasses import dataclass
 import database.table_views as tv
 import database.maestro as maestro
 import database.PL2 as PL2
+import database.sgl_schema as sgl
 
 
 class SessionBuilderError(Exception):
@@ -156,6 +158,12 @@ class SessionBuilder(object):
         """ Construct the file system path of the temporary staging directory for an in-progress session commit task
         with the task ID specified. """
         return Path(os.environ['DJDEV_ROOT_REPO'], 'staging', task_id)
+
+    @staticmethod
+    def get_repo_directory_for(username: str) -> Path:
+        """ Construct the file system path of the directory in the lab repository in which session data committed by the
+        specified user are stored. """
+        return Path(os.environ['DJDEV_ROOT_REPO'], username)
 
     def get_commit_task_stage(self, task_id: str) -> Tuple[int, int]:
         """
@@ -252,7 +260,7 @@ class SessionBuilder(object):
             task_id: The commit task identifier.
 
         Returns:
-            A dictionary containing the attribute values for a proposed Session.EPhys table entry for the experiment
+             A dictionary containing the attribute values for a proposed Session.EPhys table entry for the experiment
                 session to be committed, keyed by the Session.EPhys attribute IDs. Returns None if the task_id does not
                 identify an in-progress commit task, if that task is not currently in stage 3, or if the experiment
                 did not include electrophysiological recordings.
@@ -397,10 +405,58 @@ class SessionBuilder(object):
                     ok = True
         return ok
 
+    def start_commit(self, task_id: str, session_info: Dict[str, Any],
+                     ephys_info: Optional[Dict[str, Any]]) -> Optional[str]:
+        """
+        Start the final stage in the session commit workflow, actually committing the session data to the lab database.
+        This method should only be called in stage 3, while the worker is paused waiting for the user to review the
+        results of the pre-processing stage and make corrections/additions to the session metadata.
+
+        If the supplied session metadata is valid, the background worker is signaled to complete the commit.
+
+        Args:
+            task_id: The commit task identifier.
+            session_info: A dictionary containing the attribute values for a proposed Session table entry representing
+                the experiment session to be committed, keyed by the Session attribute IDs.
+            ephys_info: A dictionary containing the attribute values for a proposed Session.EPhys table entry for the
+                experiment session to be committed, keyed by the Session.EPhys attribute IDs. None if the experiment
+                session is behavioral-only (no electrophysiology).
+
+        Returns:
+            None if successful, else a human-facing error description: Bad task ID, invalid session or ephys info.
+        """
+        with self.task_list_lock:
+            if task_id in self.running_tasks:
+                worker = self.running_tasks[task_id]
+                if worker.stage == 3:
+                    # validate session and, if applicable, electrophysiology metadata
+                    error_msg = tv.SessionView().check_row(session_info)
+                    if not error_msg:
+                        if worker.ephys_info:
+                            if not ephys_info:
+                                error_msg = "Missing electrophysiology metadata for session."
+                            else:
+                                error_msg = tv.SessionEPhysView().check_row(ephys_info, True)
+                    if not error_msg:
+                        for k in worker.session_info.keys():
+                            worker.session_info[k] = session_info[k]
+                        if worker.ephys_info:
+                            for k in worker.ephys_info.keys():
+                                worker.ephys_info[k] = ephys_info[k]
+                        worker.finish()
+                else:
+                    error_msg = f"Commit is in progress or is not ready for final stage."
+            else:
+                error_msg = f"In-progress commit task {task_id} not found on server. Start over."
+        return error_msg
+
     def cancel(self, task_id: str) -> bool:
         """
-        Cancel a session commit task in progress. The relevant background thread is cancelled gracefully and the
-        temporary staging directory for the commit task is removed.
+        Cancel a session commit task in progress or remove a completed task. If the relevant background task is still
+        running, it is cancelled gracefully and the temporary staging directory for the commit task is removed. If the
+        task has already finished -- successfully or not --, the server keeps the task object until the client confirms
+        the task should be removed (so the client can, for example, display an error message in the event the task
+        failed).
 
         NOTE: If the background thread is still running, this method issues the cancel request but does NOT wait for the
         thread to terminate. If the worker thread should fail on an error before detecting the cancel signal, then the
@@ -410,7 +466,8 @@ class SessionBuilder(object):
             task_id: The commit task identifier.
 
         Returns:
-            True if cancellation was successful, false if task_id does not identify an ongoing commit task.
+            True if the identified commit task was removed from the server, false if task_id does not identify an
+            existing commit task.
 
         """
         with self.task_list_lock:
@@ -435,7 +492,7 @@ class SessionBuilder(object):
             pass
 
 
-class ProcessArchiveThread(threading.Thread):
+class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
     """
     This worker thread handles server-side processing during stages 2-4 of a session commit task:
         1) Wait for upload of session archive ZIP to the staging directory, monitoring its progress once per second. If
@@ -485,6 +542,8 @@ class ProcessArchiveThread(threading.Thread):
         super(ProcessArchiveThread, self).__init__(name=f"ProcessArchive-{task_id}")
         self.staging_dir: Path = SessionBuilder.get_staging_directory_for(task_id)
         """ The temporary staging directory for the session commit task. ZIP archive gets uploaded here. """
+        self.zip_path: Optional[Path] = None
+        """ Once session ZIP archive is uploaded, this is its file system location in the staging directory. """
         self.msg_q = Queue()
         """ A synchronous queue by which worker sends progress messages to main server thread. """
         self.latest_message: str = ""
@@ -502,11 +561,11 @@ class ProcessArchiveThread(threading.Thread):
         self.protocols: Optional[List[maestro.Protocol]] = None
         """ The list of trial protocols culled from the session data archive during stage 2 pre-processing. Set by
         worker. Safe for server to access only while worker is paused in stage 3. """
-        self.trial_timings: Optional[Dict[str, TrialTiming]] = None
-        """ Dictionary maps the filename for each Maestro data file in the session archive to timing information for
-        the trial recorded in that file. In particular, this includes the Omniplex start and stop timestamps required
-        to align neural responses recorded on the Omniplex system with the behavioral responses recorded by Maestro.
-        Set by worker. Safe for server to access only while worker is paused in stage 3. """
+        self.trial_info: Optional[Dict[str, _TrialInfo]] = None
+        """ Dictionary maps the filename for each Maestro data file in the session archive to timing and trial protocol
+        information for the particular trial instance recorded in that file. In particular, this includes the Omniplex
+        start and stop timestamps required to align neural responses recorded on the Omniplex system with the behavioral
+        responses recorded by Maestro. Set by worker. Safe for server to access only while worker is in stage 3. """
         self.units: Optional[List[OmniplexUnit]] = None
         """ The list of neural units culled from the session data archive during stage 2 pre-processing. Includes the
         information required to prepare an entry in the Session.Neuron part table for each neural unit. Prepared by
@@ -514,13 +573,14 @@ class ProcessArchiveThread(threading.Thread):
         that stage, the user will need to assign a neuron type to each neural unit. """
         self.session_info: Optional[Dict[str, Any]] = None
         """ User-supplied information required to add an entry in the Session table in the database, keyed by the 
-        Session table attribute IDs. During pre-processing, the worker thread will initialize this information. Server
-        can modify this safely (in response to corrections sent by client) while worker is paused in stage 3. """
+        Session table attribute IDs. During pre-processing, the worker thread will initialize this information. The
+        client will provide the user-edited version of the dictionary upon initiating the final commit (stage 4). """
         self.ephys_info: Optional[Dict[str, Any]] = None
         """ When a session includes neural unit recordings, this field will contain user-supplied information required
-        to add an entry in the Session.EPhys part table in the database, keyed by the attribute IDs in that table.
-        During stage 2 pre-processing, the worker thread will initialize this information. Server can modify this safely
-        (in response to corrections sent by client) while worker is paused in stage 3. """
+        to add an entry in the Session.EPhys part table in the database, keyed by the attribute IDs in that table. It
+        does not include the primary keys that identify the session itself, as these are in self.session_info. During
+        stage 2 pre-processing, the worker thread will initialize this information. The client will provide the user-
+        edited version of the dictionary upon initiating the final commit (stage 4). """
 
     def run(self):
         cancelled = False
@@ -531,9 +591,8 @@ class ProcessArchiveThread(threading.Thread):
         # fast enough, the ZIP file could be present before even detecting that the upload started!
         t0 = time.time()
         upload_path: Optional[Path] = None
-        zip_path: Optional[Path] = None
         n_parts_uploaded = 0
-        while (not zip_path) and (not cancelled):
+        while (not self.zip_path) and (not cancelled):
             time.sleep(1)
             if self._cancel_request.is_set():
                 cancelled = True
@@ -548,7 +607,7 @@ class ProcessArchiveThread(threading.Thread):
                         t0 = time.time()
                         self.msg_q.put_nowait("Upload started...")
                     elif child.is_file() and child.name.endswith('.zip'):
-                        zip_path = child
+                        self.zip_path = child
             else:
                 try:
                     n_chunks = len([f for f in upload_path.iterdir() if f.is_file()])
@@ -566,10 +625,10 @@ class ProcessArchiveThread(threading.Thread):
                     # replaced by a ZIP file (causing exception in code above)
                     for child in self.staging_dir.iterdir():
                         if child.is_file() and child.name.endswith('.zip'):
-                            zip_path = child
+                            self.zip_path = child
                             self.msg_q.put_nowait(f"Upload completed: {child.name}")
                             break
-                    if not zip_path:
+                    if not self.zip_path:
                         self.msg_q.put_nowait(f"Error: Archive upload failed, ZIP file missing ({err})")
                         self.result = False
                         return
@@ -577,7 +636,7 @@ class ProcessArchiveThread(threading.Thread):
         # Pre-process archive contents...
         cancelled = self._cancel_request.is_set()
         if not cancelled:
-            error_msg = self._preprocess_session_archive(zip_path)
+            error_msg = self._preprocess_session_archive()
             if error_msg:
                 self.msg_q.put_nowait(error_msg)
                 self.result = False
@@ -594,15 +653,18 @@ class ProcessArchiveThread(threading.Thread):
                 finish = self._finish_request.wait(1.0)
                 cancelled = self._cancel_request.is_set()
 
-        # Stage 4 - complete the session commit
+        # Stage 4 - complete the session commit. If cancelled in this stage, any partially commited data is unwound.
         if finish and not cancelled:
-            pass
+            self.stage = 4
+            error_msg = self._finish_commit()
+            if error_msg:
+                self.msg_q.put_nowait(error_msg)
+                self.result = False
+                return
 
-        if cancelled:
-            SessionBuilder.delete_directory_tree(self.staging_dir)
-
-        self.msg_q.put_nowait("Success!" if not cancelled else "Staging directory removed after cancel")
         self.result = False if cancelled else True
+        SessionBuilder.delete_directory_tree(self.staging_dir)
+        self.msg_q.put_nowait("Success!" if not cancelled else "User has cancelled session commit")
 
     def cancel(self) -> None:
         """ Cancel the session commit task handled by this worker thread. """
@@ -614,7 +676,7 @@ class ProcessArchiveThread(threading.Thread):
         if self.stage == 3:
             self._finish_request.set()
 
-    def _preprocess_session_archive(self, zip_path: Path) -> Optional[str]:
+    def _preprocess_session_archive(self) -> Optional[str]:
         """
         This method pre-processes the uploaded session data ZIP archive, scanning the archive contents and extracting
         information that will be needed when the session is actually committed to the lab database: (1) the unique trial
@@ -623,23 +685,17 @@ class ProcessArchiveThread(threading.Thread):
         system); and (3) metrics for all neural units recorded in the session. It also initializes metadata that will
         be added to the database (Session and Session.EPhys tables) when the session is committed.
 
-        The pre-processing results are stored in a pickle file, 'preprocessing.pickle', in the same directory as the ZIP
-        archive.
-
         Pre-processing a large (>1GB) session can take many minutes, so progress messages are delivered over the
         thread's synchronous message queue. The method also checks regularly for a cancel request.
-
-        Args:
-            zip_path: File system path for the session data ZIP archive.
 
         Returns:
             None if successful; otherwise an error description. Returns None if the session commit is cancelled.
         """
         error_msg: Optional[str] = None
         try:
-            self.trial_timings = dict()
+            self.trial_info = dict()
             self.units = list()
-            with zipfile.ZipFile(zip_path, 'r') as archive:
+            with zipfile.ZipFile(self.zip_path, 'r') as archive:
                 self.msg_q.put_nowait("Scanning archive contents...")
                 data_file_name_pattern = re.compile('.[0-9][0-9][0-9][0-9]+$')
                 archive_list = archive.infolist()
@@ -660,7 +716,7 @@ class ProcessArchiveThread(threading.Thread):
                         elif session_date != header.date_recorded:
                             raise Exception("Recorded date must be the same for all trial files in archive!")
                         duration = float(header.num_scans_saved - 1) / 1000.0  # Trial mode scan rate is fixed at 1KHz
-                        self.trial_timings[info.filename] = TrialTiming(file_index, header_timestamp, duration)
+                        self.trial_info[info.filename] = _TrialInfo(file_index, duration, header_timestamp)
                     elif ((len(info.filename) > 7) and (info.filename[-7:].lower() == '.pickle')) or \
                             ((len(info.filename) > 4) and (info.filename[-4:].lower() == '.pkl')):
                         if units_zip_info is None:
@@ -673,9 +729,11 @@ class ProcessArchiveThread(threading.Thread):
                     return None
 
                 self.msg_q.put_nowait("Processing archive for trial protocols...")
-                self.protocols = maestro.Protocol.extract_protocols_from_session_data(archive)
+                self.protocols, file_to_proto_hash = maestro.Protocol.extract_protocols_from_session_data(archive)
                 if len(self.protocols) == 0:
                     raise Exception("No trial protocols found in session archive!")
+                for filename, proto_hash in file_to_proto_hash.items():
+                    self.trial_info[filename].proto_hash = proto_hash
                 if self._cancel_request.is_set():
                     return None
 
@@ -694,7 +752,7 @@ class ProcessArchiveThread(threading.Thread):
 
                 if units_zip_info is not None:
                     for pl2_zip_info in pl2s_archived:
-                        save_path = self._chunked_extract_from_archive(archive, pl2_zip_info, zip_path.parent)
+                        save_path = self._chunked_extract_from_archive(archive, pl2_zip_info, self.zip_path.parent)
                         if save_path is None:
                             return None
                         self._process_omniplex_file(save_path, unit_data)
@@ -705,12 +763,14 @@ class ProcessArchiveThread(threading.Thread):
                     if len(self.units) < len(unit_data['channel']):
                         raise Exception(
                             f"Missing analog data for at least one unit defined in {units_zip_info.filename}")
-                    for key in self.trial_timings.keys():
-                        if self.trial_timings[key].omniplex_start is None:
+                    for key in self.trial_info.keys():
+                        if self.trial_info[key].omniplex_start is None:
                             raise Exception(f"Missing Omniplex start/stop timestamps for {key}")
 
                 # initialize session metadata. We get the session date from the Maestro trials, and we may get the
-                # subject ID from the ZIP archive file name or a Maestro data file name
+                # subject ID from the ZIP archive file name or a Maestro data file name. If there already exists a
+                # session or session on the same date for the same subject and experimenter, adjust the session suffix
+                # accordinglye
                 session_view = tv.SessionView()
                 attrs = session_view.attributes()
                 self.session_info = dict()
@@ -719,7 +779,7 @@ class ProcessArchiveThread(threading.Thread):
                         if attr.id == 'subj_id':
                             subject_choices = session_view.foreign_key_choices(attr)
                             for choice in subject_choices:
-                                if (choice[0].lower() in zip_path.name.lower()) or (
+                                if (choice[0].lower() in self.zip_path.name.lower()) or (
                                         choice[0].lower() in sample_maestro_file_name.lower()):
                                     self.session_info['subj_id'] = choice[1]
                                     break
@@ -728,7 +788,12 @@ class ProcessArchiveThread(threading.Thread):
                         else:
                             self.session_info[attr.id] = session_view.foreign_key_choices(attr)[0][1]
                 self.session_info['session_date'] = session_date
-                self.session_info['session_sfx'] = 1
+                restriction = {k: self.session_info[k] for k in ['experimenter', 'subj_id', 'session_date']}
+                session_suffix = len(session_view.rows(restriction)) + 1
+                if session_suffix > 9:
+                    raise Exception(f"Found too many sessions on {str(session_date)} for "
+                                    f"{self.session_info['subj_id']}")
+                self.session_info['session_sfx'] = session_suffix
                 self.session_info['session_notes'] = ""
 
                 # if neural units were recorded, initialize metadata about session's electrophysiological recording.
@@ -746,15 +811,272 @@ class ProcessArchiveThread(threading.Thread):
                     brain_areas = tv.BrainRegionView().rows()
                     self.ephys_info['ba_id'] = brain_areas[0]['ba_id']
 
-                self.msg_q.put_nowait(f"Saving pre-processed session data...")
-                save_path = Path(zip_path.parent, 'preprocessing.pickle')
-                results = {'protocols': self.protocols, 'timings': self.trial_timings, 'units': self.units}
-                with open(save_path, 'wb') as file:
-                    pickle.dump(results, file)
         except Exception as err:
             error_msg = f"Error: {str(err)}"
 
         return error_msg
+
+    def _finish_commit(self) -> Optional[str]:
+        """
+        This method implements the final stage of the session commit workflow:
+
+            1) Entries are inserted into the Session, Session.EPhys, and Session.Neuron tables as appropriate, and all
+            trial protocols not already in the database are inserted into the TrialProtocol table.
+
+            2) The Trial table and its part tables are populated with data from all the trials presented during the
+            session. This is done in 50-trial chunks to regularly check for user cancel and update progress.
+
+            3) The ZIP archive is moved to a permanent folder in the lab data repository, and the results from
+            pre-processing the session archive, along with session and electrophysiology metadata entered manually by
+            the user during the review stage, are saved in a pickle file in the same folder. That folder is
+            %REPO_HOME/<username>, where <username> is the experimenter's username in the database. The base filename
+            for the .zip and .pickle files is "<subj_id>_<session_date>_<session_sfx>", where <session_date> is in
+            ISO format 'YYYY-MM-DD'.
+
+        If an error occurs at any point during the commit, any changes to the database and the file repository are
+        unwound before returning.
+
+        Returns:
+            None if successful, in which case the session is fully committed to the database; otherwise an error
+            description.
+        """
+        error_msg: Optional[str] = None
+        session_repo_path = SessionBuilder.get_repo_directory_for(self.session_info['experimenter'])
+        base_filename = f"{self.session_info['subj_id']}_{str(self.session_info['session_date'])}_" \
+                        f"{self.session_info['session_sfx']}"
+        zip_path_in_repo = Path(session_repo_path, f"{base_filename}.zip")
+        pickle_path_in_repo = Path(session_repo_path, f"{base_filename}.pickle")
+        session_inserted = False
+        protocols_added = False
+        protocols_to_add: List[Dict[str, Any]] = list()
+        protocol_table = sgl.TrialProtocol()
+        try:
+            self.msg_q.put_nowait(f"Inserting session entry and any new trial protocols into database...")
+            session_table = sgl.Session()
+            with session_table.connection.transaction:
+                tv.SessionView().add_row(self.session_info)
+                session_inserted = True
+                if self.ephys_info is not None:
+                    # need primary key of parent table for insertion into part table
+                    session_ephys_view = tv.SessionEPhysView()
+                    for attr in session_ephys_view.attributes_in_master():
+                        self.ephys_info[attr.id] = self.session_info[attr.id]
+                    tv.SessionEPhysView().add_row(self.ephys_info)
+
+                    neurons: List[Dict[str, Any]] = list()
+                    for i, unit in enumerate(self.units):
+                        neuron = dict()
+                        for attr in session_ephys_view.attributes_in_master():
+                            neuron[attr.id] = self.session_info[attr.id]
+                        neuron['unit_id'] = i + 1
+                        neuron['unit_channel'] = unit.channel
+                        neuron['unit_type'] = unit.neuron_type
+                        neuron['unit_rate'] = unit.firing_rate
+                        neuron['unit_snr'] = unit.snr
+                        neuron['unit_template'] = unit.template
+                        neurons.append(neuron)
+                    sgl.Session.Neuron().insert(neurons)
+
+            if self._cancel_request.is_set():
+                raise Exception("Operation cancelled.")
+
+            existing_proto_keys = [pk['proto_hash'] for pk in protocol_table.fetch('KEY')]
+            for protocol in self.protocols:
+                if protocol.md5_digest not in existing_proto_keys:
+                    protocol_entry: Dict[str, Any] = dict()
+                    protocol_entry['proto_hash'] = protocol.md5_digest
+                    protocol_entry['proto_name'] = protocol.trial.name
+                    protocol_entry['proto_set'] = "" if (protocol.trial.set_name is None) else protocol.trial.set_name
+                    protocol_entry['proto_subset'] = \
+                        "" if (protocol.trial.subset_name is None) else protocol.trial.subset_name
+                    protocol_entry['proto_def'] = pickle.dumps(protocol)
+                    protocols_to_add.append(protocol_entry)
+            if len(protocols_to_add) > 0:
+                protocol_table.insert(protocols_to_add)
+                protocols_added = True
+
+            if self._cancel_request.is_set():
+                raise Exception("Operation cancelled.")
+
+            # in order to monitor progress and check for user cancel while populating trials, the Trial table class
+            # relies on a TrialProducer delegate to handle the task from within its make() call. The actual insertions
+            # happen in insert_trials_for_session(). NOTE: Since the auto-populate cycle is wrapped in a transaction,
+            # any trial insertions will be unwound if an exception occurs while populating.
+            trial_table = sgl.Trial()
+            trial_table.set_trial_producer(self)
+            trial_table.populate()
+            trial_table.set_trial_producer(None)
+
+            if self._cancel_request.is_set():
+                raise Exception("Operation cancelled.")
+
+            self.msg_q.put_nowait(f"Saving session archive and pre-processing results to data repository...")
+            if not session_repo_path.is_dir():
+                session_repo_path.mkdir(parents=True)
+            self.zip_path.replace(zip_path_in_repo)
+            results = {'protocols': self.protocols, 'trials': self.trial_info, 'units': self.units,
+                       'session': self.session_info, 'ephys': self.ephys_info}
+            with open(pickle_path_in_repo, 'wb') as file:
+                pickle.dump(results, file)
+
+            if self._cancel_request.is_set():
+                raise Exception("Operation cancelled.")
+        except Exception as err:
+            error_msg = f"Failed to commit session:\n  {str(err)}"
+        finally:
+            # unwind all changes if the commit failed! Note that trials are automatically removed when session is.
+            if error_msg:
+                if session_inserted:
+                    tv.SessionView().remove_row(self.session_info)
+                if protocols_added:
+                    for protocol in protocols_to_add:
+                        protocol_table.delete(protocol)
+                zip_path_in_repo.unlink(missing_ok=True)
+                pickle_path_in_repo.unlink(missing_ok=True)
+
+        return error_msg
+
+    def insert_trials_for_session(self, session_key: Dict[str, Any]) -> None:
+        # sanity check: the session PK provided must point to an existing session and must match the session that
+        # we're committing
+        try:
+            ok = tv.SessionView().row_exists(session_key)
+        except ValueError:
+            ok = False
+        if not ok:
+            raise Exception(f"Session primary key is unexpected or does not exist in database: {session_key}")
+
+        # generate list of trial file names in presentation order. We CANNOT rely on file creation time! If Omniplex
+        # system used and all trials were timestamped within the same PL2 file, then order by Omniplex start time. Else,
+        # if the file header includes the internal Maestro timestamp (we assume all trials will if the first one does!),
+        # use that. Otherwise, order by ascending numeric file suffix (.0001,...).
+        sort_strategy = None
+        sorted_filenames = None
+        if isinstance(self.units, list) and (len(self.units) > 0):
+            pl2_file_set = {unit.source_file for unit in self.units}
+            if len(pl2_file_set) == 1:
+                sort_strategy = 'omniplex'
+                sorted_filenames = sorted(self.trial_info, key=lambda k: self.trial_info[k].omniplex_start)
+        if not sort_strategy:
+            if self.trial_info[next(iter(self.trial_info))].header_timestamp:
+                sort_strategy = 'timestamp'
+                sorted_filenames = sorted(self.trial_info, key=lambda k: self.trial_info[k].header_timestamp)
+            else:
+                sort_strategy = 'index'
+                sorted_filenames = sorted(self.trial_info, key=lambda k: self.trial_info[k].file_index)
+
+        num_trials = len(sorted_filenames)
+        num_inserted = 0
+        self.msg_q.put_nowait(f"Inserting trials into database... {num_inserted} of {num_trials}")
+        t0 = time.time()
+        trial1_start_sec: float = 0
+        with zipfile.ZipFile(self.zip_path, 'r') as archive:
+            for trial_filename in sorted_filenames:
+                data_file = maestro.DataFile.load(archive.read(trial_filename), trial_filename)
+                t_info = self.trial_info[trial_filename]
+
+                # compute scale factor to convert Omniplex spike times to Maestro timeline. However, if Maestro trial
+                # length according to Omniplex is more than 2ms off, fail.
+                maestro_omniplex_time_scaling = 1.0
+                if t_info.omniplex_start is not None:
+                    trial_length = (data_file.trial.record_start() + data_file.header.num_scans_saved - 1) / 1000.0
+                    omniplex_length = t_info.omniplex_stop - t_info.omniplex_start
+                    if abs(trial_length - omniplex_length) > 0.002:
+                        raise Exception(f"Trial duration on Omniplex does not match Maestro trial "
+                                        f"duration: {trial_filename}")
+                    maestro_omniplex_time_scaling = trial_length / omniplex_length
+
+                trial_entry: Dict[str, Any] = dict(
+                    session_key,
+                    trial_idx=(num_inserted + 1),
+                    trial_header=pickle.dumps(data_file.header),
+                    trial_filename=trial_filename,
+                    trial_dur=data_file.header.num_scans_saved - 1,
+                    trial_record_start=data_file.trial.record_start(),
+                    trial_success=((data_file.header.flags & maestro.FLAG_REWARD_EARNED) != 0),
+                    trial_rewarded=((data_file.header.flags & maestro.FLAG_REWARD_GIVEN) != 0),
+                    trial_rew1=data_file.header.reward_len1_ms,
+                    trial_rew2=data_file.header.reward_len2_ms,
+                    proto_hash=t_info.proto_hash
+                    )
+
+                # compute trial start time relative to start of first trial in session -- if possible
+                if sort_strategy == 'index':
+                    trial_entry['trial_ts'] = -1
+                else:
+                    t_sec = t_info.omniplex_start if (sort_strategy == 'omniplex') else t_info.header_timestamp/1000.0
+                    if num_inserted == 0:
+                        trial_entry['trial_ts'] = 0
+                        trial1_start_sec = t_sec
+                    else:
+                        trial_entry['trial_ts'] = t_sec - trial1_start_sec
+
+                # for this trial, get the values of the protocol's random variables
+                protocol = next((x for x in self.protocols if x.md5_digest == t_info.proto_hash), None)
+                if not protocol:
+                    raise Exception(f"Internal inconsistency: No trial protocol defined for trial in {trial_filename}")
+                rv_values: List[Any] = list()
+                for param in protocol.diffs:
+                    rv_value = data_file.trial.retrieve_segment_table_parameter_value(param)
+                    if not rv_value:
+                        raise Exception(f"Internal inconsistency: Invalid RV ({param}) for trial in {trial_filename}")
+                    rv_values.append(rv_value)
+                trial_entry['trial_rvs'] = pickle.dumps(rv_values)
+
+                sgl.Trial().insert1(trial_entry)
+
+                # insert recorded behavioral responses into part table Trial.BehavioralResponse
+                for response_id in maestro.BEHAVIOR_TO_CHANNEL.keys():
+                    ai_channel = maestro.BEHAVIOR_TO_CHANNEL[response_id]
+                    if ai_channel in data_file.ai_data:
+                        scale = maestro.ADC_TO_DEG if (response_id.find('POS') > -1) else maestro.ADC_TO_DPS
+                        response = np.array(data_file.ai_data[ai_channel]) * scale
+                        response_entry = dict(
+                            session_key,
+                            trial_idx=(num_inserted + 1),
+                            response_id=response_id,
+                            response_trace=response
+                        )
+                        sgl.Trial.BehavioralResponse().insert1(response_entry)
+
+                # insert neural unit responses, if any, into Trial.NeuronalResponse. A neural unit may not fire any
+                # spikes during a trial, but that could be a valid response. Only exclude a unit if the last spike time
+                # is before trial start or the first spike time is after trial end!
+                if self.units is not None:
+                    for i, unit in enumerate(self.units):
+                        spikes = unit.spike_times
+                        if (spikes[-1] < t_info.omniplex_start) or (spikes[0] > t_info.omniplex_stop):
+                            continue
+
+                        spikes_in_trial = spikes[(spikes >= t_info.omniplex_start) & (spikes <= t_info.omniplex_stop)]
+                        spikes_in_trial = (spikes_in_trial - t_info.omniplex_start) * maestro_omniplex_time_scaling
+                        response_entry = dict(
+                            session_key,
+                            trial_idx=(num_inserted + 1),
+                            unit_id=(i + 1),
+                            spike_times=spikes_in_trial
+                        )
+                        sgl.Trial.NeuronalResponse().insert1(response_entry)
+
+                # insert any recorded marker pulse events into Trial.Event (recorded in Maestro file, not by Omniplex).
+                if data_file.events is not None:
+                    for di_channel in data_file.events:
+                        # convert event times from ms to sec and offset if event recording started after trial began
+                        event_times = np.array(data_file.events[di_channel]) * 0.001 + data_file.trial.record_start()
+                        event_entry = dict(
+                            session_key,
+                            trial_idx=(num_inserted + 1),
+                            event_ch=di_channel,
+                            event_times=event_times
+                        )
+                        sgl.Trial.Event().insert1(event_entry)
+
+                num_inserted += 1
+                if (time.time() - t0) > 1:
+                    self.msg_q.put_nowait(f"Inserting trials into database... {num_inserted} of {num_trials}")
+                    if self._cancel_request.is_set():
+                        raise Exception("Operation cancelled.")
+                    t0 = time.time()
 
     def _chunked_extract_from_archive(self, archive: zipfile.ZipFile, pl2_info: zipfile.ZipInfo,
                                       destination: Path) -> Optional[Path]:
@@ -823,9 +1145,9 @@ class ProcessArchiveThread(threading.Thread):
             self.msg_q.put_nowait(f"Processing trial timing information in Omniplex file {path.name}...")
             info = PL2.load_file_information(fp)
             timings_dict = _get_trial_timing_from_pl2_file(fp, info)
-            for key in (timings_dict.keys() & self.trial_timings.keys()):
-                trial_timing = self.trial_timings[key]
-                trial_timing.omniplex_start, trial_timing.omniplex_stop = timings_dict[key]
+            for key in (timings_dict.keys() & self.trial_info.keys()):
+                t_info = self.trial_info[key]
+                t_info.omniplex_start, t_info.omniplex_stop = timings_dict[key]
             if self._cancel_request.is_set():
                 return
 
@@ -1112,11 +1434,13 @@ def _get_trial_timing_from_pl2_file(fp: IO, info: Optional[Dict[str, Any]] = Non
 
 
 @dataclass
-class TrialTiming:
+class _TrialInfo:
     """
-    Timing information used to determine the order in which trials were presented during an experiment and to align
-    spike times of neural units recorded on the Omniplex system with respect to the timeline of the Maestro trials in
-    which behavioral response data is recorded.
+    A data container to accumulate information about each trial presented during an experiment session during the
+    pre-processing phase of the session commit workflow: (1) the MD5 hash digest that uniquely identifies the trial
+    protocol presented (see maestro.Protocol), and (2) timing information used to determine the order in which trials
+    were presented during the experiment and to align spike times of neural units recorded on the Omniplex system with
+    respect to the timeline of the Maestro trials in which behavioral response data is recorded.
 
     Behavior-only experiments have no Omniplex data. For these sessions, we rely only on the internal timestamps to
     determine the trial order. If those timestamps are unavailable, then we rely on the file indices. When the Omniplex
@@ -1125,17 +1449,19 @@ class TrialTiming:
     """
     file_index: int
     """ The trial data file's 4-digit numeric string extension converted to an integer."""
+    duration: float
+    """ The trial duration in seconds, as culled from the data file header."""
     header_timestamp: Optional[int]
     """ The internal timestamp found in the data file header, in ms since Maestro started. Will be None for data files
     prior to version 21. """
-    duration: float
-    """ The trial duration in seconds, as culled from the data file header."""
     omniplex_start: Optional[float] = None
     """ The Omniplex timestamp for the XS2 pulse delivered at the start of the trial, in seconds since the Omniplex 
     recording began. Will be None for behavior-only experiment sessions."""
     omniplex_stop: Optional[float] = None
     """ The Omniplex timestamp for the XS2 pulse delivered at the end of the trial, in seconds since the Omniplex
     recording began. Will be None for behavior-only experiment sessions. """
+    proto_hash: Optional[str] = None
+    """ The MD5 hash digest identifying the trial protocol presented."""
 
 
 @dataclass
@@ -1163,42 +1489,3 @@ class OmniplexUnit:
     1ms before each timestamp in the spike times array). Units = micro-volts. """
     neuron_type: Optional[int] = None
     """ ID of the neuron type associated with this unit (value of primary key in NeuronType table). """
-
-
-@dataclass
-class SessionInfo:
-    """
-    TODO: Not using this -- discard?
-    Data object contains all of the information about an experiment session that will be stored in the Session table
-    and its Session.EPhys part table when the session is committed to the lab database. It does not include the
-    information about any neural units recorded, which are stored in the Session.Neuron part table -- see OmniplexUnit.
-    Note that the field names exactly match the corresponding attribute IDs in the Session and Session.EPhys tables.
-    """
-    experimenter: str
-    """ The username of the experimenter (primary foreign key, User table). """
-    subj_id: str
-    """ The name of the experiment subject (primary foreign key, Subject table). """
-    session_date: str
-    """ The session date, in ISO format YYYY-MM-DD (primary key). """
-    session_sfx: int
-    """ Session suffix to distinguish multiple sessions on the same date. Restricted to 0..9 (primary key). """
-    rig_id: str
-    """ Experiment rig ID (foreign key, Rig table). """
-    study_id: int
-    """ Relevant study ID (foreign key, Study table). """
-    session_notes: str = ""
-    """ Experimenter's notes about the session."""
-    ephys_src: Optional[str] = None
-    """ Electrophysiology recording source = None for behavior-only session. """
-    probe_type: Optional[str] = None
-    """ The electrode probe type = None for behavior-only session. """
-    sampling_rate: Optional[float] = None
-    """ The electrode signal sampling rate in Hz = None for behavior-only sessions """
-    probe_x: Optional[float] = None
-    """ X-coordinate of probe location within recording cylinder implant (units?) = None for behavior-only session. """
-    probe_y: Optional[float] = None
-    """ Y-coordinate of probe location within recording cylinder implant (units?) = None for behavior-only session. """
-    probe_depth: Optional[float] = None
-    """ Insertion depth of probe (units?) = None for behavior-only session. """
-    ba_id: Optional[int] = None
-    """ Target brain region ID (foreign key, BrainArea table) = None for behavior-only session. """

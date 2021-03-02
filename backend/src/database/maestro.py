@@ -17,7 +17,7 @@ from __future__ import annotations  # Needed in Python 3.7y to type-hint a metho
 
 import sys
 import traceback
-from typing import NamedTuple, List, Optional, Dict, Any, Set
+from typing import NamedTuple, List, Optional, Dict, Any, Tuple, Union
 from datetime import date
 import struct
 import re
@@ -95,6 +95,14 @@ ACTION_ADD_SPIKE = 114
 ACTION_DEFINE_TAG = 115
 ACTION_TAG_MAX_LEN = 16  # max number of visible ASCII characters in the label for a general purpose tag
 ACTION_DISCARD = 116
+
+ADC_TO_DEG = 0.025
+""" Multiplicative scale factor converts Maestro's 12-bit raw ADC sample to degrees (for position signals) """
+ADC_TO_DPS = 0.09189
+""" Multiplicative scale factor converts Maestro's 12-bit raw ADC sample to degrees per sec (for velocity signals) """
+
+BEHAVIOR_TO_CHANNEL = {'HEPOS': 0, 'VEPOS': 1, 'HEVEL': 2, 'VEVEL': 3, 'HDVEL': 4}
+""" Dictionary mapping selected Maestro behavioral responses to the ADC channel number on which they are recorded. """
 
 
 class DataFile(NamedTuple):
@@ -1549,6 +1557,48 @@ class Trial(NamedTuple):
         def num_targets(self) -> int:
             return len(self.tgt_on)
 
+        def value_of(self, param_type: SegParamType, tgt: int) -> Union[int, float, bool, None]:
+            # NOTE: Avoided dispatch table implementation here b/c I need to be able to pickle Trial object
+            if param_type.is_target_trajectory_parameter() and not (0 <= tgt < self.num_targets()):
+                return None
+            elif param_type == SegParamType.DURATION:
+                return self.dur
+            elif param_type == SegParamType.MARKER:
+                return self.pulse_ch
+            elif param_type == SegParamType.FIX_TGT1:
+                return self.fix1
+            elif param_type == SegParamType.FIX_TGT2:
+                return self.fix2
+            elif param_type == SegParamType.XY_UPDATE_INTV:
+                return self.xy_update_intv
+            elif param_type == SegParamType.TGT_ON_OFF:
+                return self.tgt_on[tgt]
+            elif param_type == SegParamType.TGT_REL:
+                return self.tgt_rel[tgt]
+            elif param_type == SegParamType.TGT_VSTAB:
+                return self.tgt_vel_stab_mask[tgt]
+            elif param_type == SegParamType.TGT_POS_H:
+                return self.tgt_pos[tgt].x
+            elif param_type == SegParamType.TGT_POS_V:
+                return self.tgt_pos[tgt].y
+            elif param_type == SegParamType.TGT_VEL_H:
+                return self.tgt_vel[tgt].x
+            elif param_type == SegParamType.TGT_VEL_V:
+                return self.tgt_vel[tgt].y
+            elif param_type == SegParamType.TGT_ACC_H:
+                return self.tgt_acc[tgt].x
+            elif param_type == SegParamType.TGT_ACC_V:
+                return self.tgt_acc[tgt].y
+            elif param_type == SegParamType.TGT_PAT_VEL_H:
+                return self.tgt_pat_vel[tgt].x
+            elif param_type == SegParamType.TGT_PAT_VEL_V:
+                return self.tgt_pat_vel[tgt].y
+            elif param_type == SegParamType.TGT_PAT_ACC_H:
+                return self.tgt_pat_acc[tgt].x
+            elif param_type == SegParamType.TGT_PAT_ACC_V:
+                return self.tgt_pat_acc[tgt].y
+            return None
+
         def summary(self) -> Dict[str, Any]:
             """
             Generate a summary of this trial segment for display purposes only. Returns a dictionary with the following
@@ -2085,6 +2135,34 @@ class Trial(NamedTuple):
                     out.append(SegParam._make([SegParamType.TGT_PAT_ACC_V, i, j]))
         return out
 
+    def retrieve_segment_table_parameter_value(self, param: SegParam) -> Union[bool, int, float, None]:
+        """
+        Retrieve a parameter from this trial's segment table. This is primarily intended to find the value of a defined
+        random variable in a particular instance of a trial protocol.
+
+        Args:
+            param: The identified parameter.
+
+        Returns:
+            The parameter value (an int, float, or boolean). Returns None if the parameter is invalid.
+        """
+        out: Union[bool, int, float, None] = None
+        try:
+            out = self.segments[param.seg_idx].value_of(param.type, param.tgt_idx)
+        except IndexError:
+            pass
+        return out
+
+    def record_start(self) -> int:
+        """
+        Get elapsed trial time at which recording began. Normally, this is 0. However, if the trial's record segment
+        index is NOT the first segment, then it is the sum of the segment durations prior to the record segment.
+
+        Returns:
+            Time at which recording of behavioral responses and events began, in milliseconds since trial start.
+        """
+        return sum(self.segments[i].dur for i in range(self.record_seg))
+
 
 class DocEnum(Enum):
     """
@@ -2185,11 +2263,11 @@ class Protocol(NamedTuple):
         variables' in the trial protocol.
     """
     trial: Trial
-    diffs: Set[SegParam]
+    diffs: List[SegParam]
     md5_digest: str
 
     @staticmethod
-    def extract_protocols_from_session_data(archive: zipfile.ZipFile) -> List[Protocol]:
+    def extract_protocols_from_session_data(archive: zipfile.ZipFile) -> Tuple[List[Protocol], Dict[str, str]]:
         """
         Examine all Maestro data files contained in the ZIP archive specified and return the list of trial protocols
         culled from those files. This is an important task when committing an experiment session's worth of data to
@@ -2200,7 +2278,9 @@ class Protocol(NamedTuple):
             be open for reading and is NOT closed on return.
 
         Returns:
-            List of all Maestro trial protocols culled from the session data.
+            A 2-tuple: a list of all Maestro trial protocols culled from the session data, and a dictionary that maps
+            the filename of each trial data file to the protocol hash digest identifying the trial protocol presented
+            when that file was recorded.
 
         Raises:
             DataFileError if a problem occurs while reading the ZIP archive and processing the data files therein.
@@ -2209,6 +2289,7 @@ class Protocol(NamedTuple):
             archive_list = archive.infolist()
             data_file_name_pattern = re.compile('.[0-9][0-9][0-9][0-9]+$')
             trial_protocols: List[Protocol] = list()
+            filename_to_protocol: Dict[str, str] = dict()
             for info in archive_list:
                 if data_file_name_pattern.search(info.filename) is not None:
                     try:
@@ -2217,18 +2298,24 @@ class Protocol(NamedTuple):
                         for protocol in trial_protocols:
                             if protocol.trial.is_similar_to(trial):
                                 found = True
-                                protocol.diffs.update(protocol.trial.segment_table_differences(trial))
+                                diffs = protocol.trial.segment_table_differences(trial)
+                                for diff in diffs:
+                                    if not (diff in protocol.diffs):
+                                        protocol.diffs.append(diff)
+                                filename_to_protocol[info.filename] = protocol.md5_digest
                                 break
                         if not found:
                             hash_attrs = [trial.path_name(), len(trial.segments), trial.targets, trial.perts,
                                           trial.sections, trial.record_seg, trial.global_transform]
                             digester = hashlib.md5()
                             digester.update(pickle.dumps(hash_attrs))
-                            trial_protocols.append(Protocol._make([trial, set(), digester.hexdigest()]))
+                            protocol = Protocol._make([trial, list(), digester.hexdigest()])
+                            trial_protocols.append(protocol)
+                            filename_to_protocol[info.filename] = protocol.md5_digest
                     except DataFileError as err:
                         msg = f"===> Error: Failed loading file {info.filename}: {str(err)}"
                         raise DataFileError(msg)
-            return trial_protocols
+            return trial_protocols, filename_to_protocol
         except DataFileError:
             raise
         except Exception as err:

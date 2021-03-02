@@ -33,8 +33,9 @@ development efforts
         /username1
             All experiment sessions committed by the user 'username1' will be kept in this directory. All required data
             for a given session will be stored in two files: {subj_name}_{session_date}_{sfx}.zip is the ZIP file
-            uploaded by the user during the original commit, and {subj_name}_{session_date}_{sfx}.json is a small JSON
-            file containing all metadata entered manually by the user during the commit process.
+            uploaded by the user during the original commit, and {subj_name}_{session_date}_{sfx}.pickle is a Python
+            pickle file containing data prepared during pre-processing of the archive or entered manually by the user
+            during the commit process.
         /username2
             Similarly for all sessions committed by 'username2'
 
@@ -69,6 +70,7 @@ Created on Wed Jun  3 14:13:38 2020
 
 @author: sruffner
 """
+from typing import Dict, Any, Optional
 
 import datajoint as dj
 import time
@@ -275,9 +277,9 @@ class Session(dj.Manual):
         # only support the Omniplex as a source.
         probe_type : enum('single', '32-channel', 'other')
         sampling_rate : float           # Electrode signal sampling rate in Hz
-        probe_x : float                 # X,Y location of probe within recording cylinder implant (units?)
+        probe_x : float                 # X,Y location of probe within recording cylinder implant in mm
         probe_y : float
-        probe_depth : float             # Insertion depth of probe (units?)
+        probe_depth : float             # Insertion depth of probe in mm
         -> BrainArea                    # Desired/target area of brain for the electrode recording
         """
 
@@ -289,9 +291,9 @@ class Session(dj.Manual):
         ---
         unit_channel : varchar(10)          # ID/label for source channel on which unit was recorded
         (unit_type) -> NeuronType           # Identified neuron type
-        unit_firing_rate : float            # Mean firing rate of neural unit while held (in Hz)
+        unit_rate : float                   # Mean firing rate of neural unit while held (in Hz)
         unit_snr : float                    # Signal-to-noise ratio (indication of quality of recording?)
-        unit_template : longblob            # Average spike waveform template
+        unit_template : blob                # Average spike waveform template
         """
 
 
@@ -306,20 +308,24 @@ So, a trial protocol is defined by the fixed part of the trial definition (most 
 variables defining what parameter(s) will vary randomly with each presentation of the protocol. Another tricky aspect
 to this concept is that Maestro lets the experimenter set a 'global target transform', which will transform target
 trajectories without changing the original Maestro trial definition. Since the transform parameters are included in
-each data file along with the trial codes, it is possible to recover the original trial definition.
+each data file along with the trial codes, it is possible to recover the original trial definition. However, the
+transform is used to adapt a trial definition to the spatio-temporal receptive field of a neural unit being recorded,
+so all the reps presented to that unit will use the same transform value. For that reason, the global target transform
+is considered part of the trial protocol, rather than something that changes per trial.
 
 The purpose of defining a trial protocol is two-fold: (1) To reduce the memory footprint of each individual trial in
 the Trial table -- because we won't have to store the stimulus target trajectories (they can be calculated from the
-trial protocol and some information (like the global transform) stored in the individual trial entity. (2) To identify
-repeated presentations of the same trial protocol, for aggregate analyses of behavioral and neuronal responses.
+trial protocol and some information stored in the individual trial entity. (2) To identify repeated presentations of the
+same trial protocol, for aggregate analyses of behavioral and neuronal responses.
 
 New trial protocols are inserted into this table when an experiment session is digested by the web application
 interface to the DataJoint pipeline and lab database. All the trial data files are scanned to identify distinct trial
 protocols. Any protocols not already found in the TrialProtocol table will be verified with the user interactively
 through the web app, then inserted into the table.
 
-TODO: Add attributes that tie a trial protocol to a behavior like "smooth pursuit"? Other broad characterizations of
-stimulus paradigms? The idea here is to be able to search for particular trial protocols in a meaningful way.
+A trial protocol's definition is rather complex. Rather than storing it so that any segment or target parameter can be
+accessed via DataJoint queries, the entire definition is stored as a blob in an internal format -- see Protocol in 
+maestro.py. Backend server code will load this definition and use it to calculate target trajectories as needed.
 """
 
 
@@ -332,21 +338,29 @@ class TrialProtocol(dj.Manual):
     proto_name : varchar(50)            # Trial name
     proto_set : varchar(50)             # Name of trial set to which trial belongs (may be empty string)
     proto_subset : varchar(50)          # Name of trial subset to which trial belongs (may be empty string)
-    proto_segs : tinyint unsigned       # Number of trial segments
-    proto_tgts : tinyint unsigned       # Number of participating targets
-    proto_perts : tinyint unsigned      # Number of perturbations
-    proto_sects : tinyint unsigned      # Number of tagged sections
-    proto_json : longblob               # trial protocol definition in JSON format (includes seg table, targets, etc)
+    proto_def : blob                    # full trial protocol definition (opaque format: maestro.Protocol)
     """
 
-    class RandomVariable(dj.Part):
-        definition = """
-        # Trial segment table parameters that vary randomly with each repeat presentation of trial protocol
-        -> master
-        var_type : enum('segdur','hpos','vpos','hvel','vvel','hacc','vacc','hpatvel','vpatvel','hpatacc','vpatacc')
-        seg_idx : tinyint unsigned
-        tgt_idx : tinyint unsigned      # ignored when variable type is segment duration
+
+class TrialProducer:
+    """
+    The Trial class relies on a trial "producer" to populate the Trial database table and its part tables with all the
+    trials for a given experiment session during an auto-populate cycle. This mixin class defines but does not implement
+    the single method called during an auto-populate cycle.
+    """
+    def insert_trials_for_session(self, session_key: Dict[str, Any]) -> None:
         """
+        Prepare and insert into the Trial table (and its part tables) all trials presented during the experiment
+        session specified. This method is intended to be called only from within Trial.make() during an auto-populate
+        cycle (so that Trial.insert() is allowed).
+
+        Args:
+            session_key: Primary key identifying an existing session in the lab database.
+
+        Raises:
+            Exception: If any error occurs while populating the Trial table and its part tables.
+        """
+        raise NotImplemented("Derived class must handle the task of inserting trials during auto-populate cycle")
 
 
 @schema
@@ -355,41 +369,29 @@ class Trial(dj.Imported):
     -> Session                          # The experimental session during which the trial was presented
     trial_idx : int unsigned            # Indicates order of presentation during session (starts at 1)
     ---
-    header_json : longblob              # Original data file header in JSON format (to retrieve rarely used params)
+    trial_header : blob                 # Original data file header (in opaque format for use by backend server)
     trial_filename : varchar(50)        # Maestro data filename (ends in 4-digit extension like .0001)
     trial_dur : int unsigned            # recorded duration of trial in milliseconds
     trial_record_start : int unsigned   # if non-zero, recording began this many milliseconds after trial start
-    disp_w_pix : smallint unsigned      # width of video display in pixels
-    disp_h_pix : smallint unsigned      # height of video display in pixels
-    disp_w_mm : smallint unsigned       # width of video display in mm
-    disp_h_mm : smallint unsigned       # height of video display in mm
-    disp_d_mm : smallint unsigned       # perpendicular distance from eye to video display, in mm
-    disp_rate_hz : float                # refresh rate of video display in Hz
-    xfm_offset_h : float                # global target transform in effect -- horizontal position offset (deg)
-    xfm_offset_v : float                # vertical position offset (deg)
-    xfm_pos_scale : float               # position scale factor
-    xfm_pos_rotate : float              # position rotation angle (deg CCW)
-    xfm_vel_scale : float               # velocity scale factor
-    xfm_vel_rotate : float              # velocity rotation angle (deg CCW)
-    reward1_len : smallint unsigned     # length of reward pulse 1 in msecs
-    reward2_len : smallint unsigned     # length of reward pulse 2 in msecs
-    success : boolean                   # trial completed successfully
-    reward_given : boolean              # could be false if reward earned but was randomly withheld
-    timestamp_time : float              # trial start timestamp, in seconds elapsed since a reference time -- either
-                                        # the in-file timestamp (since Maestro started) or based on file creation time
-                                        # (reported relative to start of first trial in session).
-    timestamp_ref : enum('internal', 'filecreate')
+    trial_success : boolean             # trial completed successfully
+    trial_rewarded : boolean            # could be false if reward earned but was randomly withheld
+    trial_rew1: int                     # length of reward pulse 1 in milliseconds
+    trial_rew2: int                     # length of reward pulse 2 in milliseconds
+    trial_ts: float                     # trial start timestamp, in elapsed secs since start of first trial in session
+                                        # (-1 if not available)
     -> TrialProtocol                    # trial protocol details (aka, Maestro trial definition)
+    trial_rvs: blob                     # list of trial random variable values (opaque format; list of int/float values,
+                                        # in same order as maestro.Protocol.diffs; empty list if no protocol RVs)
     """
 
-    class RandomVarValue(dj.Part):
+    _trial_producer: Optional[TrialProducer] = None
+
+    class Event(dj.Part):
         definition = """
-        # Value of random variables for this instance of trial protocol. For segment duration, value is in msecs. For
-        # target trajectory params, divide scaled integer by 1000, then round to 2 fractional digits to recover
-        # target position in deg, velocity in deg/sec, or acceleration in deg/sec^2.
         -> master
-        -> TrialProtocol.RandomVariable
-        rv_value : int                  # The value (scaled by 1000 for target trajectory params)
+        event_ch : int unsigned         # Digital input channel number for the TTL event
+        ---
+        event_times : blob              # Event time(s) in seconds since trial started. 1D Numpy array
         """
 
     class BehavioralResponse(dj.Part):
@@ -397,8 +399,8 @@ class Trial(dj.Imported):
         -> master
         response_id : enum('HEPOS', 'VEPOS', 'HEVEL', 'VEVEL', 'HDVEL')
         ---
-        response_trace : longblob       # The response in deg (or deg/sec), from trial start. If recording started
-                                        # AFTER trial start, initial samples are NaN. Sample rate = 1KHz.
+        response_trace : blob           # Response in deg (or deg/sec) for RECORDED duration of trial. Sample rate =
+                                        # 1KHz. 1D Numpy array.
         """
 
     class NeuronalResponse(dj.Part):
@@ -406,8 +408,23 @@ class Trial(dj.Imported):
         -> master
         -> Session.Neuron
         ---
-        spike_times : longblob          # Spike times recorded during trial in seconds since trial start
+        spike_times : blob              # Spike times during trial in seconds since trial start. 1D Numpy array.
         """
 
+    def set_trial_producer(self, producer: Optional[TrialProducer]) -> None:
+        self._trial_producer = producer
+
     def make(self, key):
-        pass
+        """
+        This method is called during an auto-populate cycle to populate the Trial table and its part tables with all
+        trials presented during a just-added experiment session.
+
+        The implementation delegates the work to a trial "producer" which must be installed via set_trial_producer()
+        immediately before invoking Trial.populate() and then removed immediately afterward.
+
+        Args:
+            key: This will contain the primary key of the new session.
+        """
+        if not self._trial_producer:
+            raise Exception("Missing trial producer delegate")
+        self._trial_producer.insert_trials_for_session(key)

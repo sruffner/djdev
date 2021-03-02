@@ -190,8 +190,8 @@ class TableAttr(_nt_TableAttr):
 
         'label' - (str) User-facing label.
 
-        'type' - (str) Data type: 'text', 'email', 'date', 'float', 'int', 'enum', 'fkey', 'auto'. NOTES: (1) The
-        'auto' type is shorthand for 'int auto_increment' and is applicable only to a PK attribute; by convention, a
+        'type' - (str) Data type: 'text', 'email', 'date', 'float', 'int', 'enum', 'fkey', 'auto'. NOTES: (1)
+        The 'auto' type is shorthand for 'int auto_increment' and is applicable only to a PK attribute; by convention, a
         table PK containing an 'auto' attribute will have no other attributes in the primary key. Also, an 'auto'
         attribute is not really intended for user-facing display. (2) A text area should be used as an input widget for
         'text' if the maximum text range exceeds 100 characters. (3) The 'email' type refers to a string that matches
@@ -286,11 +286,12 @@ class BaseTableView:
         attribute comprising the table's primary key. Its value is assigned automatically in the MySQL database on each
         insert, rather than being specified manually. Such attributes are NOT user-facing, but they're important in
         implementing simple associative tables that map entities in one table to those in another.
+        5) CANNOT be used for tables containing 'blob' attributes!
         5) Handling of DataJoint/database errors IS A WORK IN PROGRESS!
     """
 
     def __init__(self, table: dj.Table, label: str, row_label: str, attrs: List[TableAttr],
-                 restrict: Optional[Tuple[str]] = None):
+                 restrict: Optional[Tuple[str]] = None, master_pk: Optional[List[str]] = None):
         """
         Construct a view for the specified DataJoint-administered table in the Lisberger lab's research database.
         Subclasses call this constructor to configure the table class, attributes, label, and row label.
@@ -307,6 +308,9 @@ class BaseTableView:
                 which pk_id != pk_value cannot be affected by this table view. In addition, the attribute pk_id itself
                 is not exposed by the view. If the argument is not None but is not a tuple of two strings or if pk_id
                 is not a primary key attribute of the database table, then no subset restriction is enforced.
+            master_pk : If not None, then the table is a DataJoint part table, and this is a list of the attribute IDs
+                that comprise the primary key of the part table's master. Each attribute ID must correspond to one of
+                the attributes in the 'attrs' argument.
 
         Raises:
             ValueError: If any of the required arguments are found to be invalid.
@@ -314,15 +318,19 @@ class BaseTableView:
         if not isinstance(table, dj.Table):
             raise ValueError("DataJoint database table must be specified")
         self._table = table
+        """ The DataJoint-administered database table represented by this view."""
         if not (isinstance(label, str) and len(label) > 0):
             raise ValueError("Invalid table label")
         self._label = label
+        """ User-facing label for the database table. """
         if not (isinstance(row_label, str) and len(row_label) > 0):
             raise ValueError("Invalid table row label")
         self._row_label = row_label
+        """ User-facing generic label for any single entity (aka, row) in the database table. """
         if not (isinstance(attrs, list) and len(attrs) > 0):
             raise ValueError("Invalid table attributes")
-        self._has_auto_pk = False
+
+        has_auto_pk = False
         for attr in attrs:
             auto_pk_err = ValueError('Primary key with an auto-incremented attribute may contain no other attributes')
             if not isinstance(attr, TableAttr):
@@ -330,20 +338,39 @@ class BaseTableView:
             if attr.type == 'auto':
                 if not attr.pkey:
                     raise ValueError("An auto-incremented attribute must be in the table's primary key")
-                elif self._has_auto_pk:
+                elif has_auto_pk:
                     raise auto_pk_err
                 else:
-                    self._has_auto_pk = True
-            elif attr.pkey and self._has_auto_pk:
+                    has_auto_pk = True
+            elif attr.pkey and has_auto_pk:
                 raise auto_pk_err
+        self._has_auto_pk = has_auto_pk
+        """ Flag set if database table uses an auto-incrementing primary key. """
+
         self._attrs = list(attrs)
-        self._restrict = None
-        if restrict and isinstance(restrict, tuple) and (len(restrict) == 2) and isinstance(restrict[1], str):
+        """ The table's attributes, listed in the order in which they should be displayed in a user-facing tabular
+        layout of the table's contents. """
+
+        ok = isinstance(restrict, tuple) and (len(restrict) == 2) and isinstance(restrict[1], str)
+        if ok:
             for attr in self._attrs:
                 if attr.id == restrict[0]:
                     if attr.pkey:
-                        self._restrict = restrict
+                        ok = True
                     break
+        self._restrict = restrict if ok else None
+        """ Optional subset restriction, a 2-tuple (pk_id, pk_value) listing the primary key attribute ID and value
+        that defines the restriction. """
+
+        ok = isinstance(master_pk, list) and (len(master_pk) > 0)
+        if ok:
+            attr_ids = [attr.id for attr in self._attrs if attr.pkey]
+            for el in master_pk:
+                if not (el in attr_ids):
+                    raise ValueError(f"Master table attribute {el} missing from part table's primary key")
+        self._master_pk = master_pk if ok else None
+        """ For a part table, this is a list of the attribute IDs in the master table's primary key. By definition,
+        they are also in the part table's primary key. Always None if the table is NOT a part table. """
 
     def _foreign_key_descriptor(self, fkey_attr: TableAttr) -> Tuple[Type[dj.Table], str]:
         """
@@ -420,6 +447,23 @@ class BaseTableView:
                     auto_id = attr.id
                     break
         return auto_id
+
+    def is_part_table(self) -> bool:
+        """ Is this table a DataJoint part table? """
+        return not (self._master_pk is None)
+
+    def attributes_not_in_master(self) -> List[TableAttr]:
+        """ Get the attributes in this part table that are NOT in the master table's primary key. If this is not a
+        part table, this returns the same list as attributes()."""
+        if self._master_pk:
+            return [attr for attr in self.attributes() if not (attr.id in self._master_pk)]
+        else:
+            return self.attributes()
+
+    def attributes_in_master(self) -> Optional[List[TableAttr]]:
+        """ Get the attributes in this part table that comprise the master table's primary key. Returns None if this is
+        NOT a part table. """
+        return [attr for attr in self.attributes() if (attr.id in self._master_pk)] if self._master_pk else None
 
     def columns(self) -> List[Column]:
         """
@@ -602,7 +646,7 @@ class BaseTableView:
                 restriction = {self._restrict[0]: self._restrict[1]}
 
         try:
-            query = (self._table & restriction) if self._restrict else self._table
+            query = (self._table & restriction) if restriction else self._table
             rows = query.fetch(as_dict=True)
             if self._restrict:
                 for row in rows:
@@ -638,18 +682,23 @@ class BaseTableView:
         return error_msg
 
     def remove_row(self, row_pk: Dict[str, Any]) -> str:
-        """Delete the specified entry (aka, row) from the underlying table.
+        """
+        Delete the specified entry (aka, row) from the underlying table.
 
         Args:
             row_pk (Dict[str, Any]): Must contain, at a minimum, the primary key attribute-value pairs that uniquely
-            identify the table row. Any other attributes are ignored!
+                identify the table row. Any other attributes are ignored!
 
         Returns:
             str: A description of the error if operation fails on database. An empty string if operation succeeds.
 
         Raises:
             ValueError: If row_pk is missing any of the table's primary key attributes.
+            NotImplementedError: If this is a part table. Deletions from a part table are handled automatically when
+                an entity in its master table is removed
         """
+        if self.is_part_table():
+            raise NotImplementedError("Cannot delete a row from a part table. Operate on master table instead. ")
         table_pk = self._primary_key_ids()
         error_msg = ""
         if self._restrict:
@@ -663,7 +712,7 @@ class BaseTableView:
             raise ValueError("Incomplete primary key")
         return error_msg
 
-    def _row_exists(self, row_pk: Dict[str, Any]) -> bool:
+    def row_exists(self, row_pk: Dict[str, Any]) -> bool:
         """Does the specified entry/row currently exist in the underlying table?
 
         Args:
@@ -686,48 +735,55 @@ class BaseTableView:
             raise ValueError("Incomplete primary key")
         return exists
 
-    def check_row(self, row: Dict[str, Any]) -> Optional[str]:
+    def check_row(self, row: Dict[str, Any], omit_master: bool = False) -> Optional[str]:
         """
         Check whether or not the proposed row entry is valid and does not yet exist in the underlying table.
 
         Args:
-            row (Dict[str, Any]): The proposed entry. It must contain a valid attribute value for each table attribute
+            row: The proposed entry. It must contain a valid attribute value for each table attribute
                 specified by attributes() -- except for an auto-incrementing primary key, and it must not yet exist in
                 the database.
+            omit_master: If True and this is a part table, attributes in 'row' that are part of the master table's
+                primary key are NOT checked, and existence is not checked. This is a way to check a new entry in the
+                part table without first inserting the corresponding entry in the master table. Default is False.
         Returns:
             str: None if operation succeeds, else a user-facing description of the error (missing attribute, invalid
             attribute value, entry already exists, database error).
         """
         err_msg = None
         try:
-            self._validate_row(row)
+            self._validate_row(row, omit_master)
         except (Exception, ValueError) as err:
             err_msg = f"Invalid entry: {str(err)}"
         return err_msg
 
-    def _validate_row(self, row: Dict[str, Any]) -> None:
+    def _validate_row(self, row: Dict[str, Any], omit_master: bool = False) -> None:
         """Validate a proposed new entry in the underlying table.
 
         Args:
             row (Dict[str, Any]): The new entry. NOTE: If the table uses an auto-incrementing attribute as its primary
                 key, that attribute is removed from the entry, if specified. Its value is set by the database on insert.
-
+            omit_master: If True and this is a part table, attributes in 'row' that are part of the master table's
+                primary key are NOT checked, and existence is not checked. This is a way to check a new entry in the
+                part table without first inserting the corresponding entry in the master table. Default is False.
         Raises:
             Exception: On an attempt to add an already existing row as new; if entry is missing any attribute value.
             ValueError: If any attribute value is invalid.
         """
         # we never check existence when the table uses an auto-incrementing PK!
-        if (not self._has_auto_pk) and self._row_exists(row):
+        if (not (self._has_auto_pk or omit_master)) and self.row_exists(row):
             raise Exception("Attempt to add a new entry with an existing primary key")
         for attr in self._attrs:
             if attr.type != 'auto':
-                if attr.id not in row:
-                    raise Exception(f"Missing attribute: {attr.id}")
-                self._validate_attribute_value(attr, row[attr.id])
+                if not (omit_master and self.is_part_table() and (attr.id in self._master_pk)):
+                    if attr.id not in row:
+                        raise Exception(f"Missing attribute: {attr.id}")
+                    if not (omit_master and self.is_part_table() and (attr.id in self._master_pk)):
+                        self._validate_attribute_value(attr, row[attr.id])
             elif attr.id in row:
                 row.pop(attr.id, None)
 
-    def _validate_attribute_value(self, attr: TableAttr, attr_value: str) -> None:
+    def _validate_attribute_value(self, attr: TableAttr, attr_value: Union[str, int, float]) -> None:
         """Validate the proposed value for an attribute in the underlying table.
 
         Validation of the string value depends on the attribute type:
@@ -741,16 +797,17 @@ class BaseTableView:
             'fkey': The attribute value must identify an existing entity in the parent table.
             'auto': An auto-incrementing PK. This type of attribute is ignored. Its value is set by the database on
                 insert, NOT by the user.
+
         Args:
-            attr (TableAttr): The attribute.
-            attr_value (str]): The proposed value for the attribute, in string form.
+            attr: The attribute.
+            attr_value: The proposed value for the attribute.
 
         Raises:
             ValueError: If the proposed attribute value is not valid in any way. The error description is intended to
             provide a user-facing description of the problem.
         """
-        if not isinstance(attr_value, str):
-            attr_value = ""
+        if not isinstance(attr_value, (str, int, float)):
+            raise ValueError(f"Attribute value must be a string or number: '{attr.label}'")
         if attr.type == "auto":
             return
         if attr.pkey:
@@ -773,7 +830,7 @@ class BaseTableView:
                 raise ValueError(f"'{attr.label}': Date is invalid, earlier than 1900-01-01, or in the future.")
         elif attr.type == 'float':
             try:
-                num_value = float(attr_value)
+                num_value = float(attr_value) if isinstance(attr_value, str) else attr_value
             except(TypeError, ValueError):
                 raise ValueError(f"'{attr.label}' = '{attr_value}' cannot be parsed as a floating-point value")
             self.check_numeric_attribute_value(attr, num_value)
@@ -1443,24 +1500,20 @@ class SessionEPhysView(BaseTableView):
             TableAttr('sampling_rate', 'Sample Rate (Hz)', 'float', False, None, [2, 10], None, None,
                       'Enter the electrode sampling rate in Hz', '100px'),
             TableAttr('probe_x', 'Probe X', 'float', False, None, [2, 10], None, None,
-                      'Enter the X-coordinate of probe within recording cylinder implant (units?)', '100px'),
+                      'Enter the X-coordinate of probe within recording cylinder implant (mm)', '100px'),
             TableAttr('probe_y', 'Probe Y', 'float', False, None, [2, 10], None, None,
-                      'Enter the Y-coordinate of probe within recording cylinder implant (units?)', '100px'),
+                      'Enter the Y-coordinate of probe within recording cylinder implant (mm)', '100px'),
             TableAttr('probe_depth', 'Probe Depth', 'float', False, None, [2, 10], None, None,
-                      'Enter insertion depth of probe (units?)', '100px'),
+                      'Enter insertion depth of probe (mm)', '100px'),
             TableAttr('ba_id', 'Target Region', 'fkey', False, None, None, None, None, None, None)
         ]
-        super().__init__(sgl.Session.EPhys(), "EPhys recording", "ephys", attrs)
+        super().__init__(sgl.Session.EPhys(), "EPhys recording", "ephys", attrs, restrict=None,
+                         master_pk=['experimenter', 'subj_id', 'session_date', 'session_sfx'])
 
     __fkey_info = {'experimenter': (sgl.User, 'username'), 'subj_id': (sgl.Subject, 'subj_id'),
                    'rig_id': (sgl.Rig, 'rig_id'), 'study_id': (sgl.Study, 'study_id'),
                    'session_date': (sgl.Session, 'session_date'), 'session_sfx': (sgl.Session, 'session_sfx'),
                    'ba_id': (sgl.BrainArea, 'ba_id')}
-
-    def attributes_in_master(self) -> List[TableAttr]:
-        """ Get the attributes in this part table that comprise the master table's primary key. """
-        master_pk = ['experimenter', 'subj_id', 'session_date', 'session_sfx']
-        return [attr for attr in self.attributes() if (attr.id in master_pk)]
 
     def _foreign_key_descriptor(self, fkey_attr: TableAttr) -> Tuple[Type[dj.Table], str]:
         """ Overridden to supply the necessary information for all foreign keys in the SessionEPhys table. """
@@ -1483,8 +1536,3 @@ class SessionEPhysView(BaseTableView):
             return res
         else:
             return super().foreign_key_choices(attr)
-
-    def check_numeric_attribute_value(self, attr: TableAttr, value: Union[int, float]) -> None:
-        """ Override restricts the 'session_sfx' attribute to the integer range [0..9]. """
-        if attr.id == 'session_sfx' and ((value < 0) or (value > 9)):
-            raise ValueError("Invalid value for session suffix (must lie in 0..9)")

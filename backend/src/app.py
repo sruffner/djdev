@@ -23,6 +23,7 @@ du.configure_upload(app, str(upload_dir))
 dj.config['database.host'] = 'db'
 dj.config['database.user'] = 'root'
 dj.config['safemode'] = False
+dj.config['enable_python_native_blobs'] = True
 if 'MYSQL_ROOT_PASSWORD' not in os.environ:
     raise RuntimeError('The environment variable MYSQL_ROOT_PASSWORD is required.')
 dj.config['database.password'] = os.environ['MYSQL_ROOT_PASSWORD']
