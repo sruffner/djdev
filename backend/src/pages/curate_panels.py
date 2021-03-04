@@ -90,7 +90,8 @@ def entry_form(view: tv.BaseTableView, omit_attrs: Optional[List[tv.TableAttr]] 
                 placeholder=attr.placeholder
             )
         else:
-            input_type = 'number' if (attr.type == 'float') else ('email' if 'email' in attr.id else 'text')
+            input_type = 'number' if ((attr.type == 'float') or (attr.type == 'int')) \
+                else ('email' if 'email' in attr.id else 'text')
             entry_widget = dbc.Input(
                 id=f"{attr.id}_input",
                 type=input_type,

@@ -6,4 +6,4 @@ venv/**
 .DS_Store
 **/__pycache/**
 *.pyc
-/backend/src/test_largezip.py
+
