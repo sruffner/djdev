@@ -7,11 +7,11 @@ purpose of this script.
 
 Usage: Bring up the Docker Compose application that includes the 'db' and 'backend' services in the normal way. Stop
 the 'backend' service with 'docker-compose stop backend'. Run this script as a one-time command against the 'backend'
-service: 'docker-compose run backend python ./database/reset.zip'. Once the script completes, resume the normal
+service: 'docker-compose run backend python -m database.reset'. Once the script completes, resume the normal
 backend service with 'docker-compose restart backend'.
 
-NOTE that the main method dynamically imports the database schema in 'sgl_schema.py' after dropping the schema from
-the database. The schema is declared on the database the FIRST time the sgl_schema module is imported in a running
+NOTE: The main method dynamically imports the database schema in 'sgl_schema.py' after dropping the schema from the
+database. The schema is declared on the database the FIRST time the sgl_schema module is imported in a running
 python shell. If we imported sgl_schema in the normal manner (with the import statement), the import would happen
 before the schema was dropped, and so the schema would not get declared on the database.
 
@@ -26,6 +26,7 @@ from json import JSONDecoder
 from typing import Optional, Any
 
 import datajoint as dj
+from .manager import DataBaseManager
 
 
 def seed_database(sgl: Any) -> None:
@@ -68,6 +69,7 @@ def seed_database(sgl: Any) -> None:
     }
     json_decoder = JSONDecoder()
     n_parsed = n_added = 0
+    database_manager = DataBaseManager()
     try:
         with open('./assets/seed_data.txt', 'r') as file_obj:
             for add_dict in json_parse(file_obj, json_decoder):
@@ -76,6 +78,9 @@ def seed_database(sgl: Any) -> None:
                         and (add_dict["table"] in name_to_table):
                     try:
                         name_to_table[add_dict["table"]].insert1(add_dict["entry"], replace=False)
+                        msg = database_manager.log_add_table_row(add_dict["table"], add_dict["entry"])
+                        if msg:
+                            print(f"   Backup log error: {str(msg)}", flush=True)
                         n_added += 1
                     except Exception as e:
                         print(f"    Insert into {add_dict['table']} failed: {str(e)}", flush=True)
@@ -117,7 +122,6 @@ def json_parse(file_obj, decoder: JSONDecoder = JSONDecoder(), buffer_size: int 
 
 if __name__ == '__main__':
     print("reset.py: Reset the Lisberger lab database...", flush=True)
-
     print("==> Attempting to connect to the database...")
     dj.config['database.host'] = 'db'
     dj.config['database.user'] = 'root'
@@ -151,7 +155,7 @@ if __name__ == '__main__':
 
     print("==> Creating and seeding 'sgl' database...", flush=True)
     try:
-        sgl_module = importlib.import_module('sgl_schema', package='database')
+        sgl_module = importlib.import_module('.sgl_schema', package='database')
         seed_database(sgl_module)
     except Exception as err:
         print(f"====> ERROR: Failed to import sgl_schema.py - {str(err)}.", flush=True)
