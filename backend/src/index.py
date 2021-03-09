@@ -5,6 +5,7 @@ import dash_bootstrap_components as dbc
 
 from app import app
 # import all pages in the app
+from database.manager import DataBaseManager
 from pages import home, curate, commit_session
 
 navbar = dbc.NavbarSimple(
@@ -45,4 +46,8 @@ def display_page(pathname):
 
 
 if __name__ == '__main__':
+    mgr = DataBaseManager()
+    msg = mgr.on_startup()
+    if msg:
+        print(f"===> {msg}", flush=True)
     app.run_server(host='0.0.0.0', port='8050', debug=True)

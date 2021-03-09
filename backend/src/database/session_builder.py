@@ -77,7 +77,6 @@ client return to stage 1.
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
 import re
-import sys
 import threading
 from copy import deepcopy
 from queue import Queue

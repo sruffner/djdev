@@ -22,10 +22,11 @@ from datetime import date
 import struct
 import re
 import math
-from enum import Enum
 import zipfile
 import hashlib
 import pickle
+
+from common import DocEnum
 
 
 class DataFileError(Exception):
@@ -2162,18 +2163,6 @@ class Trial(NamedTuple):
             Time at which recording of behavioral responses and events began, in milliseconds since trial start.
         """
         return sum(self.segments[i].dur for i in range(self.record_seg))
-
-
-class DocEnum(Enum):
-    """
-    Convenience subclass to simplify documenting the individual members of an Enum.
-    """
-    def __new__(cls, value, doc=None):
-        self = object.__new__(cls)  # calling super().__new__(value) here would fail
-        self._value_ = value
-        if doc is not None:
-            self.__doc__ = doc
-        return self
 
 
 class SegParamType(DocEnum):

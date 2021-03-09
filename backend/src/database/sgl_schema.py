@@ -76,7 +76,7 @@ import datajoint as dj
 import time
 import warnings
 
-# Attempt to create a connection to the database
+# On first import, we connect to the database and declare the schema (if it is not already defined in database)
 while True:
     try:
         db_connection = dj.conn()

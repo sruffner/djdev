@@ -32,33 +32,11 @@ Created on Thu Aug 6 09:36:00 2020
 
 import re
 from datetime import date
-from typing import List, Dict, Any, Tuple, Set, Optional, Type, Union
+from typing import List, Dict, Tuple, Set, Optional, Union
 from collections import namedtuple
 
-from datajoint import DataJointError
-import datajoint as dj
-import database.sgl_schema as sgl
-
-
-def check_date_string(date_str: str) -> bool:
-    """
-    Validate a date string that appears in the laboratory database. It must exactly match the ISO format 'YYYY-DD-MM',
-    with a 4-digit year, 2-digit day, and 2-digit month. The year must be 1900 or greater, and the date cannot be in
-    the future.
-
-    Args:
-        date_str: The date string to test
-
-    Returns:
-        (bool) True if date string satisfies the requirements described.
-    """
-    ok = False
-    try:
-        date_obj = date.fromisoformat(date_str)
-        ok = ((date_obj.year > 1899) and (date_obj < date.today()))
-    except(TypeError, ValueError):
-        pass
-    return ok
+from common import check_date
+from database.manager import DBTable, DataBaseManager, AttributeValue
 
 
 _nt_TableAttr = namedtuple("TableAttr", [
@@ -152,8 +130,9 @@ class BaseTableView:
     Base class implementing read/write access to a DataJoint-administered table in the Lisberger lab's
     research database.
 
-    This base class implements basic low-level methods for accessing the underlying table. Users of this module
-    should not instantiate this base table view directly.
+    This base class implements basic low-level methods for accessing the underlying table. All table access and
+    manipulation goes through DatabaseManager in manager.py. Users of this module should not instantiate this base table
+    view directly.
 
     The implementation also supports exposing only a subset of the database table, by specifying a primary key
     restriction in the constructor.
@@ -174,14 +153,14 @@ class BaseTableView:
         5) Handling of DataJoint/database errors IS A WORK IN PROGRESS!
     """
 
-    def __init__(self, table: dj.Table, label: str, row_label: str, attrs: List[TableAttr],
+    def __init__(self, table_id: DBTable, label: str, row_label: str, attrs: List[TableAttr],
                  restrict: Optional[Tuple[str]] = None, master_pk: Optional[List[str]] = None):
         """
         Construct a view for the specified DataJoint-administered table in the Lisberger lab's research database.
         Subclasses call this constructor to configure the table class, attributes, label, and row label.
 
         Args:
-            table (dj.Table): The DataJoint-administered database table represented by this view.
+            table_id: ID of the DataJoint-administered database table represented by this view.
             label (str): User-facing label for the database table.
             row_label (str): User-facing generic label for any single entity (aka row) in the database table.
             attrs (List[TableAttr]): The table attributes. These should appear in the list in the same order in which
@@ -199,10 +178,10 @@ class BaseTableView:
         Raises:
             ValueError: If any of the required arguments are found to be invalid.
         """
-        if not isinstance(table, dj.Table):
-            raise ValueError("DataJoint database table must be specified")
-        self._table = table
-        """ The DataJoint-administered database table represented by this view."""
+        if not isinstance(table_id, DBTable):
+            raise ValueError("DataJoint database table ID must be specified")
+        self._table_id = table_id
+        """ ID of the DataJoint-administered database table represented by this view."""
         if not (isinstance(label, str) and len(label) > 0):
             raise ValueError("Invalid table label")
         self._label = label
@@ -256,9 +235,9 @@ class BaseTableView:
         """ For a part table, this is a list of the attribute IDs in the master table's primary key. By definition,
         they are also in the part table's primary key. Always None if the table is NOT a part table. """
 
-    def _foreign_key_descriptor(self, fkey_attr: TableAttr) -> Tuple[Type[dj.Table], str]:
+    def _foreign_key_descriptor(self, fkey_attr: TableAttr) -> Tuple[DBTable, str]:
         """
-        Get the DataJoint table class of the parent table for a foreign key attribute defined on this table, along with
+        Get the DataJoint table ID of the parent table for a foreign key attribute defined on this table, along with
         the defined ID of the attribute in that table (it could be different than the attribute ID in this table).
 
         Consider these two foreign key attribute declarations:
@@ -274,12 +253,11 @@ class BaseTableView:
         foreign key attributes must override this method appropriately.
 
         Args:
-            fkey_attr (TableAttr): The foreign key attribute.
+            fkey_attr: The foreign key attribute.
 
         Returns:
-            Tuple[Type[dj.Table], str]: A tuple (table_cls, pk_id) containing the DataJoint table class for the parent
-                table and the ID of its (single) primary key attribute, which maps to the specified foreign key
-                attribute in this table.
+            A tuple (table_id, pk_id) containing the ID of the the parent table and the ID of its (single) primary key
+                attribute, which maps to the specified foreign key attribute in this table.
 
         Raises:
             ValueError: If *fkey_attr* is not a recognized foreign key attribute for this table view. The method will
@@ -313,7 +291,7 @@ class BaseTableView:
         is also omitted from the list of attributes.
 
         Returns:
-            List[TableAttr]: The attribute list, as described.
+            The attribute list, as described.
         """
         return [attr for attr in self._attrs
                 if (attr.type != 'auto') and ((not self._restrict) or (attr.id != self._restrict[0]))]
@@ -365,11 +343,11 @@ class BaseTableView:
         supplied by this method.
 
         Returns:
-            List[Column]: The list of displayed table columns.
+            The list of displayed table columns.
         """
         return [Column(attr.id, attr.label, attr.col_width, False) for attr in self.attributes()]
 
-    def _transform_rows(self, rows: List[Dict[str, Any]]) -> None:
+    def _transform_rows(self, rows: List[Dict[str, AttributeValue]]) -> None:
         """
         Transform each row retrieved from the underlying database table to provide the user-facing view of the table's
         contents.
@@ -379,11 +357,11 @@ class BaseTableView:
         alter the default user-facing view offered by BaseTableView.
 
         Args:
-            rows (List[Dict[str, Any]]): The list of rows as retrieved directly from the underlying database table. On
-                return, each row is transformed in the same manner to match the user-facing table columns supplied by
-                columns(). NOTE: Do NOT remove any primary key attribute (such as an auto-incrementing primary key),
-                even if columns() is defined so that the attribute is hidden from the user. The primary key attribute
-                values are needed in order to specify a row to delete via remove_row().
+            rows: The list of rows as retrieved directly from the underlying database table. On return, each row is
+                transformed in the same manner to match the user-facing table columns supplied by columns(). NOTE: Do
+                NOT remove any primary key attribute (such as an auto-incrementing primary key), even if columns() is
+                defined so that the attribute is hidden from the user. The primary key attribute values are needed in
+                order to specify a row to delete via remove_row().
         """
         pass
 
@@ -395,11 +373,11 @@ class BaseTableView:
         override, returning a positive integer N, indicating that all rows should display N text lines.
 
         Returns:
-            int: Number of text lines per row; 0 = no restriction.
+            Number of text lines per row; 0 = no restriction.
         """
         return 0
 
-    def tooltip_data_for(self, data: List[Dict[str, Any]]) -> List[dict]:
+    def tooltip_data_for(self, data: List[Dict[str, AttributeValue]]) -> List[dict]:
         """
         Generate the tooltip contents for the specified rows in a user-facing presentation of this view's underlying
         database table.
@@ -410,13 +388,13 @@ class BaseTableView:
             data (List[Dict[str, Any]]): The current table data, as would be returned by rows().
 
         Returns:
-            List[dict]: The tooltip data -- compatible with the Dash DataTable's 'tooltip_data' property. If no
-                tooltips are needed, return an empty list. Otherwise, the list length must match the number of rows
-                in the supplied table data (so that any tooltip will match the corresponding table cell).
+            The tooltip data -- compatible with the Dash DataTable's 'tooltip_data' property. If no tooltips are needed,
+                return an empty list. Otherwise, the list length must match the number of rows in the supplied table
+                data (so that any tooltip will match the corresponding table cell).
         """
         return []
 
-    def to_row_alias(self, row: Dict[str, Any]) -> RowAlias:
+    def to_row_alias(self, row: Dict[str, AttributeValue]) -> RowAlias:
         """
         Generate a representation of the specified table row that is geared toward presentation in the user interface
         within a list- or dropdown-style widget.
@@ -427,7 +405,7 @@ class BaseTableView:
         meaningful to the user (such as an auto-incrementing integer), should override this method.
 
         Args:
-            row (Dict[str, Any]): A complete entity in the underlying database table, in dictionary format.
+            row: A complete entity in the underlying database table, in dictionary format.
         Returns:
             RowAlias: A compact representation of that entity for UI purposes, as described.
         Raises:
@@ -446,7 +424,7 @@ class BaseTableView:
         """Get the set of attribute IDs comprising the primary key for the underlying table."""
         return {attr.id for attr in self._attrs if attr.pkey}
 
-    def foreign_key_choices(self, attr: TableAttr) -> List[Tuple[str, Any]]:
+    def foreign_key_choices(self, attr: TableAttr) -> List[Tuple[str, AttributeValue]]:
         """
         Retrieve the list of available choices for a 'fkey' attribute. To support using this list in a user-facing
         dropdown or list widget, each "choice" is represented by 2-tuple (label, fkey_value), where fkey_value is the
@@ -456,12 +434,11 @@ class BaseTableView:
         override if this is not the case (eg., if the foreign key value is a meaningless number).
 
         Args:
-            attr (TableAttr): The attribute.
+            attr: The attribute.
 
         Returns:
-            List[Tuple[str, Any]]: List of all available value choices for the foreign key table attribute, with
-                companion label as described. Sorted alphabetically by the label. Returns an empty list if unable to
-                access the database.
+            List of all available value choices for the foreign key table attribute, with companion label as described.
+                Sorted alphabetically by the label. Returns an empty list if unable to access the database.
 
         Raises:
             ValueError: If the specified attribute is unrecognized or is not a foreign key attribute.
@@ -471,30 +448,20 @@ class BaseTableView:
         if not (attr.type == 'fkey'):
             raise ValueError(f"{attr.id} is not a foreign key attribute!")
 
-        parent_table: Type[dj.Table]
+        parent_table: DBTable
         attr_id: str
         parent_table, attr_id = self._foreign_key_descriptor(attr)
-
-        res = []
-        try:
-            fkey_values = sorted(parent_table().fetch(attr_id))
-            res = [(v, v) for v in fkey_values]
-        except (DataJointError, Exception):
-            pass
-        return res
+        fkey_values = sorted(DataBaseManager().fetch_attribute_values(parent_table, attr_id))
+        return [(v, v) for v in fkey_values]
 
     def num_rows(self) -> int:
         """
         Get the current number of entities in the underlying database table. Returns 0 if unable to access database.
         """
-        try:
-            query = (self._table & {self._restrict[0]: self._restrict[1]}) if self._restrict else self._table
-            n = len(query)
-        except DataJointError:
-            n = 0
-        return n
+        restriction = {self._restrict[0]: self._restrict[1]} if self._restrict else None
+        return DataBaseManager().num_table_rows(self._table_id, restriction)
 
-    def rows(self, condition: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def rows(self, condition: Optional[Dict[str, AttributeValue]] = None) -> List[Dict[str, AttributeValue]]:
         """Get all or a subset of rows in the underlying table in dictionary form.
 
         NOTE: This method should only be used for the small "manual-entry" tables in the lab database, as it retrieves
@@ -505,14 +472,13 @@ class BaseTableView:
         particular row in the table.
 
         Args:
-            condition (Optional[Dict[str, Any]]): The attribute ID-value pairs in this dictionary specify a condition
-            that any row returned in the result must satisfy. Default value is None -- thereby retrieving all rows in
-            the table.
+            condition: The attribute ID-value pairs in this dictionary specify a condition that any row returned in the
+                result must satisfy. Default value is None -- thereby retrieving all rows in the table.
 
         Returns:
-            List[Dict[str, Any]]: The table contents in dictionary form. Each element of the list is a dictionary
-            representing one table row, eg: {'attr1': value1, 'attr2': value2, ... }. Returns an empty list if the
-            table has no rows or if unable to retrieve table contents.
+            The table contents in dictionary form. Each element of the list is a dictionary representing one table row,
+                eg: {'attr1': value1, 'attr2': value2, ... }. Returns an empty list if the table has no rows, if the
+                specified condition is not satisfied by any table row, or if unable to retrieve table contents.
 
         Raises:
             ValueError: If any attribute ID in *condition* is not a recognized attribute of this table.
@@ -529,18 +495,15 @@ class BaseTableView:
             else:
                 restriction = {self._restrict[0]: self._restrict[1]}
 
-        try:
-            query = (self._table & restriction) if restriction else self._table
-            rows = query.fetch(as_dict=True)
+        rows = DataBaseManager().fetch_rows(self._table_id, restriction)
+        if len(rows) > 0:
             if self._restrict:
                 for row in rows:
                     row.pop(self._restrict[0], None)
             self._transform_rows(rows)
-        except DataJointError:
-            rows = []
         return rows
 
-    def add_row(self, row: Dict[str, Any]) -> str:
+    def add_row(self, row: Dict[str, AttributeValue]) -> str:
         """
         Add an entry (aka, row) to the underlying table.
 
@@ -548,30 +511,31 @@ class BaseTableView:
         be ignored, since its value is automatically supplied by the database when the new entry is inserted.
 
         Args:
-            row (Dict[str, Any]): The new entry. It must contain a valid attribute value for each table attribute
-                specified by attributes() -- with the exception of an auto-incrementing primary key.
+            row: The new entry. It must contain a valid attribute value for each table attribute -- with the exception
+                of an auto-incrementing primary key.
 
         Returns:
-            str: An empty string if operation succeeds, else a user-facing description of the error (missing attribute,
+            An empty string if operation succeeds, else a user-facing description of the error (missing attribute,
             invalid attribute value, attempt to add an already existing row, database error).
         """
-        error_msg = ""
         if self._restrict:
             row[self._restrict[0]] = self._restrict[1]
         try:
             self._validate_row(row)   # this removes auto-incrementing PK from argument, if included
-            self._table.insert1(row, replace=False)
+            error_msg = DataBaseManager().insert_into_table(self._table_id, row)
+            if error_msg:
+                raise Exception(error_msg)
         except Exception as err:
             error_msg = f"Add failed: {str(err)}"
-        return error_msg
+        return error_msg if error_msg else ""
 
-    def remove_row(self, row_pk: Dict[str, Any]) -> str:
+    def remove_row(self, row_pk: Dict[str, AttributeValue]) -> str:
         """
         Delete the specified entry (aka, row) from the underlying table.
 
         Args:
-            row_pk (Dict[str, Any]): Must contain, at a minimum, the primary key attribute-value pairs that uniquely
-                identify the table row. Any other attributes are ignored!
+            row_pk: Must contain, at a minimum, the primary key attribute-value pairs that uniquely identify a single
+                row in the table row. Any other attributes are ignored!
 
         Returns:
             str: A description of the error if operation fails on database. An empty string if operation succeeds.
@@ -584,27 +548,24 @@ class BaseTableView:
         if self.is_part_table():
             raise NotImplementedError("Cannot delete a row from a part table. Operate on master table instead. ")
         table_pk = self._primary_key_ids()
-        error_msg = ""
         if self._restrict:
             row_pk[self._restrict[0]] = self._restrict[1]
-        try:
-            restriction = {key: row_pk[key] for key in table_pk}
-            (self._table & restriction).delete(verbose=False)
-        except DataJointError as err:
-            error_msg = f"Delete failed: {str(err)}"
-        except KeyError:
-            raise ValueError("Incomplete primary key")
-        return error_msg
+        for key in table_pk:
+            if not (key in row_pk):
+                raise ValueError(f"Delete failed: Missing primary key '{key}'")
+        restriction = {key: row_pk[key] for key in table_pk}
+        error_msg = DataBaseManager().delete_from_table(self._table_id, restriction)
+        return error_msg if error_msg else ""
 
-    def row_exists(self, row_pk: Dict[str, Any]) -> bool:
+    def row_exists(self, row_pk: Dict[str, AttributeValue]) -> bool:
         """Does the specified entry/row currently exist in the underlying table?
 
         Args:
-            row_pk (Dict[str, Any]): This dictionary must contain, at a minimum, the primary key attribute-value pairs
-            that uniquely identify a single table row. Any other attributes are ignored!
+            row_pk: This dictionary must contain, at a minimum, the primary key attribute ID-value pairs that uniquely
+                identify a single table row. Any other attributes are ignored!
 
         Returns:
-            bool: True if row exists, false otherwise.
+            True if row exists, false otherwise.
 
         Raises:
             ValueError: If row_pk is missing any of the table's primary key attributes.
@@ -612,27 +573,24 @@ class BaseTableView:
         table_pk = self._primary_key_ids()
         try:
             restriction = {key: row_pk[key] for key in table_pk}
-            exists = (len(self._table & restriction) == 1)
-        except DataJointError:
-            exists = False
+            exists = (DataBaseManager().num_table_rows(self._table_id, restriction) == 1)
         except KeyError:
             raise ValueError("Incomplete primary key")
         return exists
 
-    def check_row(self, row: Dict[str, Any], omit_master: bool = False) -> Optional[str]:
+    def check_row(self, row: Dict[str, AttributeValue], omit_master: bool = False) -> Optional[str]:
         """
         Check whether or not the proposed row entry is valid and does not yet exist in the underlying table.
 
         Args:
-            row: The proposed entry. It must contain a valid attribute value for each table attribute
-                specified by attributes() -- except for an auto-incrementing primary key, and it must not yet exist in
-                the database.
+            row: The proposed entry. It must contain a valid attribute value for each table attribute -- except for an
+                auto-incrementing primary key, and it must not yet exist in the database.
             omit_master: If True and this is a part table, attributes in 'row' that are part of the master table's
                 primary key are NOT checked, and existence is not checked. This is a way to check a new entry in the
                 part table without first inserting the corresponding entry in the master table. Default is False.
         Returns:
-            str: None if operation succeeds, else a user-facing description of the error (missing attribute, invalid
-            attribute value, entry already exists, database error).
+            None if operation succeeds, else a user-facing description of the error (missing attribute, invalid
+                attribute value, entry already exists, database error).
         """
         err_msg = None
         try:
@@ -641,17 +599,17 @@ class BaseTableView:
             err_msg = f"Invalid entry: {str(err)}"
         return err_msg
 
-    def _validate_row(self, row: Dict[str, Any], omit_master: bool = False) -> None:
+    def _validate_row(self, row: Dict[str, AttributeValue], omit_master: bool = False) -> None:
         """Validate a proposed new entry in the underlying table.
 
         Args:
-            row (Dict[str, Any]): The new entry. NOTE: If the table uses an auto-incrementing attribute as its primary
-                key, that attribute is removed from the entry, if specified. Its value is set by the database on insert.
+            row: The new entry. NOTE: If the table uses an auto-incrementing attribute as its primary key, that
+                attribute is removed from the entry, if specified. Its value is set by the database on insert.
             omit_master: If True and this is a part table, attributes in 'row' that are part of the master table's
                 primary key are NOT checked, and existence is not checked. This is a way to check a new entry in the
                 part table without first inserting the corresponding entry in the master table. Default is False.
         Raises:
-            Exception: On an attempt to add an already existing row as new; if entry is missing any attribute value.
+            Exception: If the proposed entry already exists in table, or if entry is missing any attribute value.
             ValueError: If any attribute value is invalid.
         """
         # we never check existence when the table uses an auto-incrementing PK!
@@ -667,15 +625,17 @@ class BaseTableView:
             elif attr.id in row:
                 row.pop(attr.id, None)
 
-    def _validate_attribute_value(self, attr: TableAttr, attr_value: Union[str, int, float]) -> None:
+    def _validate_attribute_value(self, attr: TableAttr, attr_value: Union[str, int, float, date]) -> None:
         """Validate the proposed value for an attribute in the underlying table.
 
-        Validation of the string value depends on the attribute type:
+        Validation of the attribute value depends on the attribute type:
             'text': The value must satisfy any regular expression defined for the attribute (if any), as well as the
                 min/max restriction on text length.
-            'float': Value must satisfy min/max restriction on text length and be parsable as a floating-point number.
-            'int': Value must satisfy min/max restrictions on text length and be parsable as an integer.
-            'date': Value must represent a valid date in the string format 'YYYY-MM-DD', and it must represent a date
+            'float': Can be str, int or float, but a string value must be parsable as a float. If string, it must
+                satisfy min/max restriction on text length.
+            'int': Can be str or int, but a string value must be parsable as an integer. If string, it must satisfy
+                min/max restriction on text length.
+            'date': Can be a date or string. A string value must satisfy the format 'YYYY-MM-DD'. The date must be
                 after 12/31/1899 and before today.
             'enum': Value must be one of the valid options for the attribute.
             'fkey': The attribute value must identify an existing entity in the parent table.
@@ -690,31 +650,27 @@ class BaseTableView:
             ValueError: If the proposed attribute value is not valid in any way. The error description is intended to
             provide a user-facing description of the problem.
         """
-        if not isinstance(attr_value, (str, int, float)):
-            raise ValueError(f"Attribute value must be a string or number: '{attr.label}'")
+        if not isinstance(attr_value, (str, int, float, date)):
+            raise ValueError(f"Attribute value must be a string, number, or date: '{attr.label}'")
         if attr.type == "auto":
             return
         if attr.pkey:
-            if attr_value == "":
+            if isinstance(attr_value, str) and (attr_value == ""):
                 raise ValueError(f"Missing value for primary key attribute: '{attr.label}'")
         if attr.type == 'fkey':
-            foreign_table_class: dj.Table
-            foreign_table_class, fk_attr_id = self._foreign_key_descriptor(attr)
-            restriction = f'{fk_attr_id} = "{attr_value}"'
-            try:
-                if not bool(foreign_table_class & restriction):
-                    raise ValueError(f"Missing foreign key: '{attr.label}' = '{attr_value}'")
-            except DataJointError:
-                raise ValueError(f"Database error. Unable to verify foreign key: '{attr.label}' = '{attr_value}'")
+            foreign_table_id: DBTable
+            foreign_table_id, fk_attr_id = self._foreign_key_descriptor(attr)
+            if not DataBaseManager().attribute_exists(foreign_table_id, fk_attr_id, attr_value):
+                raise ValueError(f"Missing foreign key: '{attr.label}' = '{attr_value}'")
         elif attr.type == 'enum':
             if not (attr_value in attr.options):
                 raise ValueError(f"Invalid option for '{attr.label}': '{attr_value}'")
         elif attr.type == 'date':
-            if not check_date_string(attr_value):
+            if not check_date(attr_value):
                 raise ValueError(f"'{attr.label}': Date is invalid, earlier than 1900-01-01, or in the future.")
         elif attr.type == 'float':
             try:
-                num_value = float(attr_value) if isinstance(attr_value, str) else attr_value
+                num_value = float(attr_value)
             except(TypeError, ValueError):
                 raise ValueError(f"'{attr.label}' = '{attr_value}' cannot be parsed as a floating-point value")
             self.check_numeric_attribute_value(attr, num_value)
@@ -724,7 +680,9 @@ class BaseTableView:
             except(TypeError, ValueError):
                 raise ValueError(f"'{attr.label}' = '{attr_value}' cannot be parsed as an integer")
             self.check_numeric_attribute_value(attr, num_value)
-        else:
+        else:  # 'text' or 'email'
+            if not isinstance(attr_value, str):
+                raise ValueError(f"'{attr.label}': Value must be a string")
             if attr.textrange:
                 min_len, max_len = attr.textrange
                 if (len(attr_value) < min_len) | (len(attr_value) > max_len):
@@ -770,14 +728,14 @@ class MappingView:
     which includes a user-facing label and tooltip as well as the entity's primary key value.
     """
 
-    def __init__(self, src_table_view: BaseTableView, dst_table_view: BaseTableView, map_table: dj.Table):
+    def __init__(self, src_table_view: BaseTableView, dst_table_view: BaseTableView, map_table_id: DBTable):
         """
         Construct an associative mapping between a source and destination table via a cross-reference table.
 
         Args:
-            src_table_view (BaseTableView): The table view for the source table in the database.
-            dst_table_view (BaseTableView): The table view for the destination table in the database.
-            map_table (dj.Table): The cross-reference table in the database. Its primary key is ASSUMED to consist of
+            src_table_view: The table view for the source table in the database.
+            dst_table_view: The table view for the destination table in the database.
+            map_table_id: ID of the cross-reference table in the database. Its primary key is ASSUMED to consist of
                 two foreign keys, namely, the auto-incrementing PKs of the source and destination tables.
         """
         self._src_pk = MappingView.__check_table_view(src_table_view)
@@ -785,9 +743,9 @@ class MappingView:
         self._dst_pk = MappingView.__check_table_view(dst_table_view)
         self._dst_table_view = dst_table_view
 
-        if not isinstance(map_table, dj.Table):
+        if not isinstance(map_table_id, DBTable):
             raise ValueError("Invalid cross-reference table")
-        self._map_table = map_table
+        self._map_table_id = map_table_id
 
     @staticmethod
     def __check_table_view(table_view: BaseTableView) -> str:
@@ -815,16 +773,14 @@ class MappingView:
         Return all source-destination entity associations stored in this mapping's cross-reference table
 
         Returns:
-            Dict[int, List[RowAlias]]: Each key in this dictionary is a PK identifying an entity in the source table
-            that is associated with at least one entity in the destination table, while the corresponding value is a
-            list of RowAliases identifying entities in the destination table associated with that source entity. If an
-            entity in the source table is not associated with any entity in the destination table, its primary key will
-            not appear in this dictionary. Each RowAlias list is sorted alphabetically IAW the alias' label field.
-
-        Raises:
-            DataJointError: If a database error occurs while accessing the tables underlying this mapping view.
+            Each key in this dictionary is a PK identifying an entity in the source table that is associated with at
+                least one entity in the destination table, while the corresponding value is a list of RowAlias
+                identifying entities in the destination table associated with that source entity. If an entity in the
+                source table is not associated with any entity in the destination table, its primary key will not appear
+                in this dictionary. Each RowAlias list is sorted alphabetically IAW the alias's label field. The
+                dictionary will be empty if there are no current mappings or if a database access error occurs.
         """
-        map_rows = self._map_table.fetch(as_dict=True)
+        map_rows = DataBaseManager().fetch_rows(self._map_table_id)
         dst_map = {row[self._dst_pk]: self._dst_table_view.to_row_alias(row) for row in self._dst_table_view.rows()}
         src_to_dst = dict()
         for row in map_rows:
@@ -841,30 +797,27 @@ class MappingView:
         Return all entities in this mapping's destination table that map to the specified entity in the source table.
 
         Args:
-            src_pk_val (Optional[int]): Primary key value for an entity in the source table (which must be an integer,
-            by convention). If None, then the method retrieves all existing entities in the destination table.
+            src_pk_val: Primary key value for an entity in the source table (which must be an integer, by convention).
+                If None, then the method retrieves all existing entities in the destination table.
         Returns:
-            Optional[List[RowAlias]]: The list of all entities in the destination table that map to the specified entity
-            in the source table, OR the list of all entities in the destination table. In either case, each destination
-            table row is represented by a RowAlias, geared for compact representation in a list- or dropdown-style
-            UI widget. The returned list is sorted alphabetically by the row alias's label field. Returns None if
-            src_pk_val is not None but does not identify an existing entity in the source table. Also returns None on a
-            database error.
+            The list of all entities in the destination table that map to the specified entity in the source table, OR
+                the list of all entities in the destination table. In either case, each destination table row is
+                represented by a RowAlias, geared for compact representation in a list- or dropdown-style UI widget.
+                The returned list is sorted alphabetically by the row alias's label field. Returns None if src_pk_val is
+                not None but does not identify an existing entity in the source table. Also returns None on a database
+                access error.
         """
-        result = None
-        try:
-            dst_map = {row[self._dst_pk]: self._dst_table_view.to_row_alias(row) for row in self._dst_table_view.rows()}
-            if src_pk_val is None:
-                result = [v for k, v in dst_map.items()]
-            else:
-                restriction = {self._src_pk: src_pk_val}
-                dst_pks = (self._map_table & restriction).fetch(self._dst_pk)
-                result = [dst_map[pk] for pk in dst_pks]
-        except DataJointError:
-            pass
-        if result:
-            result = sorted(result, key=lambda alias: alias.label)
-        return result
+        dst_map = {row[self._dst_pk]: self._dst_table_view.to_row_alias(row) for row in self._dst_table_view.rows()}
+        if src_pk_val is None:
+            result = [v for k, v in dst_map.items()]
+        else:
+            restriction = {self._src_pk: src_pk_val}
+            dst_pks = DataBaseManager().fetch_attribute_values(self._map_table_id, self._dst_pk, restriction)
+            result = [dst_map[pk] for pk in dst_pks]
+        if len(result) > 0:
+            return sorted(result, key=lambda alias: alias.label)
+        else:
+            return None
 
     def update_mappings_for(self, src_pk_val: int, assoc_entities: Set[int]) -> str:
         """
@@ -883,16 +836,9 @@ class MappingView:
             non-existent entity in either the source or destination table; database error.
 
         """
-        xref_rows = [{self._src_pk: src_pk_val, self._dst_pk: key} for key in assoc_entities]
-        error_msg = ""
-        try:
-            with self._map_table.connection.transaction:
-                (self._map_table & {self._src_pk: src_pk_val}).delete(verbose=False)
-                self._map_table.insert(xref_rows)
-        except Exception as err:
-            error_msg = f"Failed to add {self._src_table_view.row_label()} to {self._dst_table_view.row_label()} "
-            error_msg += f"cross-references: {str(err)}"
-        return error_msg
+        error_msg = DataBaseManager().update_xref_table(self._map_table_id, self._src_pk, src_pk_val,
+                                                        self._dst_pk, assoc_entities)
+        return error_msg if error_msg else ""
 
 
 class UserView(BaseTableView):
@@ -920,7 +866,7 @@ class UserView(BaseTableView):
                       ["Principal Investigator", "Post Doctoral Researcher", "Graduate Student", "Administrator"],
                       None, None, None, None, '150px')
         ]
-        super().__init__(sgl.User(), 'Lab members', 'member', attrs)
+        super().__init__(DBTable.USER, 'Lab members', 'member', attrs)
 
 
 class RigView(BaseTableView):
@@ -940,7 +886,7 @@ class RigView(BaseTableView):
             TableAttr('rig_loc', 'Location', 'text', False, None, [0, 50], r'[\s\S]*',
                       'Enter rig location (eg, building and room number) [optional, up to 50 chars]', '', '500px'),
         ]
-        super().__init__(sgl.Rig(), 'Experiment rigs', 'rig', attrs)
+        super().__init__(DBTable.RIG, 'Experiment rigs', 'rig', attrs)
 
 
 class _SubjectImplantView(BaseTableView):
@@ -977,14 +923,14 @@ class _SubjectImplantView(BaseTableView):
                       'Enter cylinder angle relative to medial-dorsal axis, in degrees CCW', '75px'),
         ]
         restrict = ('subj_id', subj_id) if subj_id else None
-        super().__init__(sgl.SubjectImplant(), "Implant history", "implant record", attrs, restrict)
+        super().__init__(DBTable.IMPLANT, "Implant history", "implant record", attrs, restrict)
 
-    def _foreign_key_descriptor(self, fkey_attr: TableAttr) -> Tuple[Type[dj.Table], str]:
+    def _foreign_key_descriptor(self, fkey_attr: TableAttr) -> Tuple[DBTable, str]:
         """
         Overridden to supply the necessary information for the foreign key 'subj_id'
         """
         if fkey_attr and (fkey_attr.id == 'subj_id'):
-            return sgl.Subject, 'subj_id'
+            return DBTable.SUBJECT, 'subj_id'
         else:
             raise ValueError("Not a recognized foreign key on this table")
 
@@ -1018,7 +964,7 @@ class SubjectView(BaseTableView):
             TableAttr('dob', 'Date of Birth', 'date', False, None, [10, 10], None, None, 'YYYY-MM-DD', '150px'),
             TableAttr('sex', 'Sex', 'enum', False, ['M', 'F', '?'], None, None, None, None, '150px')
         ]
-        super().__init__(sgl.Subject(), 'Experiment subjects', 'subject', attrs)
+        super().__init__(DBTable.SUBJECT, 'Experiment subjects', 'subject', attrs)
 
     @staticmethod
     def implant_history_for(subj_id: str) -> BaseTableView:
@@ -1048,9 +994,9 @@ class NeuronTypeView(BaseTableView):
                       'May only contain Unicode word characters, digits, and select punctuation',
                       'Enter a concise name or abbreviation for neuron cell type (unique, 3-50 characters)', '550px')
         ]
-        super().__init__(sgl.NeuronType(), 'Neuron Types', 'neuron type', attrs)
+        super().__init__(DBTable.NEURON_TYPE, 'Neuron Types', 'neuron type', attrs)
 
-    def to_row_alias(self, row: Dict[str, Any]) -> RowAlias:
+    def to_row_alias(self, row: Dict[str, AttributeValue]) -> RowAlias:
         super().to_row_alias(row)  # to validate argument
         return RowAlias({'nt_id': row['nt_id']}, row['nt_name'], None)
 
@@ -1073,9 +1019,9 @@ class BrainRegionView(BaseTableView):
                       'May only contain Unicode word characters, digits, and select punctuation',
                       'Enter a concise name or abbreviation for brain region (unique, 3-50 characters)', '550px')
         ]
-        super().__init__(sgl.BrainArea(), 'Brain regions', 'region', attrs)
+        super().__init__(DBTable.BRAIN_AREA, 'Brain regions', 'region', attrs)
 
-    def to_row_alias(self, row: Dict[str, Any]) -> RowAlias:
+    def to_row_alias(self, row: Dict[str, AttributeValue]) -> RowAlias:
         super().to_row_alias(row)  # to validate argument
         return RowAlias({'ba_id': row['ba_id']}, row['ba_name'], None)
 
@@ -1086,7 +1032,7 @@ class BrainRegionView(BaseTableView):
         return([Column('ba_name', 'Brain Region', '300px', False),
                 Column('assoc_ntypes', 'Associated Neuron Types', '300px', False)])
 
-    def _transform_rows(self, rows: List[Dict[str, Any]]) -> None:
+    def _transform_rows(self, rows: List[Dict[str, AttributeValue]]) -> None:
         """
         Override appends an additional column reflecting the neuron types associated with each brain region.
 
@@ -1107,11 +1053,11 @@ class BrainRegionView(BaseTableView):
 class BrainRegionToNeuronTypeView(MappingView):
     """
     View managing the map of brain regions (BrainRegionView) to neuron types (NeuronTypeView) via a cross-reference
-    table (sgl.BrainAreaNeuronType) in the lab database.
+    table in the lab database.
     """
 
     def __init__(self):
-        super().__init__(BrainRegionView(), NeuronTypeView(), sgl.BrainAreaNeuronType())
+        super().__init__(BrainRegionView(), NeuronTypeView(), DBTable.BRAIN_AREA_TO_NEURON_TYPE)
 
 
 class PublicationView(BaseTableView):
@@ -1133,9 +1079,9 @@ class PublicationView(BaseTableView):
             TableAttr('doi', 'DOI', 'text', False, None, [0, 100], r'[\s\S]*', '',
                       "Enter publication's digital object ID (optional; 100 chars max)", '0px')
         ]
-        super().__init__(sgl.Publication(), 'Publications', 'publication', attrs)
+        super().__init__(DBTable.PUB, 'Publications', 'publication', attrs)
 
-    def to_row_alias(self, row: Dict[str, Any]) -> RowAlias:
+    def to_row_alias(self, row: Dict[str, AttributeValue]) -> RowAlias:
         super().to_row_alias(row)  # to validate argument
         citation = row['citation']
         truncated = (len(citation) > 50)
@@ -1159,7 +1105,7 @@ class PublicationView(BaseTableView):
         cols[1] = Column('link', "", '10px', True)
         return cols
 
-    def _transform_rows(self, rows: List[Dict[str, Any]]) -> None:
+    def _transform_rows(self, rows: List[Dict[str, AttributeValue]]) -> None:
         """
         Override uses HTML markdown to embed the DOI in the 'link' column as a clickable link. This requires that the
         'link' column be tagged for markdown presentation in the Dash DataTable.
@@ -1171,7 +1117,7 @@ class PublicationView(BaseTableView):
                 row['link'] = ""
         return
 
-    def tooltip_data_for(self, data: List[Dict[str, Any]]) -> List[dict]:
+    def tooltip_data_for(self, data: List[Dict[str, AttributeValue]]) -> List[dict]:
         """ Override includes a tooltip for the 'citation' attribute that also includes the DOI in text form."""
         tips = []
         for row in data:
@@ -1195,9 +1141,9 @@ class KeywordView(BaseTableView):
                       'May only contain Unicode word characters, digits, and select punctuation',
                       'Enter new, unique keyword or phrase (3-50 characters)', '550px')
         ]
-        super().__init__(sgl.Keyword(), 'Research keywords', 'keyword', attrs)
+        super().__init__(DBTable.KEYWORD, 'Research keywords', 'keyword', attrs)
 
-    def to_row_alias(self, row: Dict[str, Any]) -> RowAlias:
+    def to_row_alias(self, row: Dict[str, AttributeValue]) -> RowAlias:
         super().to_row_alias(row)  # to validate argument
         return RowAlias({'kw_id': row['kw_id']}, row['keyword'], None)
 
@@ -1218,18 +1164,18 @@ class StudyView(BaseTableView):
             TableAttr('study_desc', 'Description', 'text', False, None, [0, 2048], r'[\s\S]*', '',
                       'Enter a description of the research project (optional, up to 2048 chars)', '700px')
         ]
-        super().__init__(sgl.Study(), 'Research projects', 'project', attrs)
+        super().__init__(DBTable.STUDY, 'Research projects', 'project', attrs)
 
-    def to_row_alias(self, row: Dict[str, Any]) -> RowAlias:
+    def to_row_alias(self, row: Dict[str, AttributeValue]) -> RowAlias:
         super().to_row_alias(row)  # to validate argument
         return RowAlias({'study_id': row['study_id']}, row['study_title'], None)
 
-    def _foreign_key_descriptor(self, fkey_attr: TableAttr) -> Tuple[Type[dj.Table], str]:
+    def _foreign_key_descriptor(self, fkey_attr: TableAttr) -> Tuple[DBTable, str]:
         """
         Overridden to supply the necessary information for the foreign key 'study_lead'
         """
         if fkey_attr and (fkey_attr.id == 'study_lead'):
-            return sgl.User, 'username'
+            return DBTable.USER, 'username'
         else:
             raise ValueError("Not a recognized foreign key on this table")
 
@@ -1247,7 +1193,7 @@ class StudyView(BaseTableView):
                 Column('study_desc', 'Description - Keywords', '700px', False),
                 Column('n_pubs', 'Pubs', '50px', False)])
 
-    def _transform_rows(self, rows: List[Dict[str, Any]]) -> None:
+    def _transform_rows(self, rows: List[Dict[str, AttributeValue]]) -> None:
         """
         Override to include information in cross-reference tables: The number of related publications is displayed in
         the 'n_pubs' column. Keywords related to a research project are stored as as a comma-separated list in an
@@ -1264,7 +1210,7 @@ class StudyView(BaseTableView):
             for row in rows:
                 study_id = row['study_id']
                 row['n_pubs'] = str(len(study_to_pub[study_id])) if study_id in study_to_pub else "0"
-                row['keywords'] = row['n_pubs_tip'] = None
+                row['keywords'] = row['n_pubs_tip'] = ""
                 if study_id in study_to_key:
                     row['keywords'] = ', '.join([alias.label for alias in study_to_key[study_id]])
                 if study_id in study_to_pub:
@@ -1272,7 +1218,7 @@ class StudyView(BaseTableView):
                     for item in [alias.label for alias in study_to_pub[study_id]]:
                         row['n_pubs_tip'] = row['n_pubs_tip'] + f"- {item}\n"
 
-    def tooltip_data_for(self, data: List[Dict[str, Any]]) -> List[dict]:
+    def tooltip_data_for(self, data: List[Dict[str, AttributeValue]]) -> List[dict]:
         """
         Overridden to prepare tooltips for selected columns. For the 'study_desc' column, the tip lists the keywords
         related to the study, followed by the full description text. For the 'n_pubs' column, the tip lists the
@@ -1298,7 +1244,7 @@ class StudyToKeywordView(MappingView):
     """
 
     def __init__(self):
-        super().__init__(StudyView(), KeywordView(), sgl.StudyKeyword())
+        super().__init__(StudyView(), KeywordView(), DBTable.STUDY_TO_KEY)
 
 
 class StudyToPublicationView(MappingView):
@@ -1308,7 +1254,7 @@ class StudyToPublicationView(MappingView):
     """
 
     def __init__(self):
-        super().__init__(StudyView(), PublicationView(), sgl.StudyPublication())
+        super().__init__(StudyView(), PublicationView(), DBTable.STUDY_TO_PUB)
 
 
 class SessionView(BaseTableView):
@@ -1330,30 +1276,25 @@ class SessionView(BaseTableView):
             TableAttr('session_notes', 'Notes', 'text', False, None, [0, 2048], r'[\s\S]*', '',
                       'Enter any notes about this particular session (optional, up to 2048 chars)', '500px')
         ]
-        super().__init__(sgl.Session(), "Experiment Sessions", "session", attrs)
+        super().__init__(DBTable.SESSION, "Experiment Sessions", "session", attrs)
 
-    __fkey_info = {'experimenter': (sgl.User, 'username'), 'subj_id': (sgl.Subject, 'subj_id'),
-                   'rig_id': (sgl.Rig, 'rig_id'), 'study_id': (sgl.Study, 'study_id')}
+    __fkey_info = {'experimenter': (DBTable.USER, 'username'), 'subj_id': (DBTable.SUBJECT, 'subj_id'),
+                   'rig_id': (DBTable.RIG, 'rig_id'), 'study_id': (DBTable.STUDY, 'study_id')}
 
-    def _foreign_key_descriptor(self, fkey_attr: TableAttr) -> Tuple[Type[dj.Table], str]:
+    def _foreign_key_descriptor(self, fkey_attr: TableAttr) -> Tuple[DBTable, str]:
         """ Overridden to supply the necessary information for all foreign keys in the Session table. """
         if fkey_attr and (fkey_attr.id in SessionView.__fkey_info):
             return SessionView.__fkey_info[fkey_attr.id]
         else:
             raise ValueError("Not a recognized foreign key on this table")
 
-    def foreign_key_choices(self, attr: TableAttr) -> List[Tuple[str, Any]]:
+    def foreign_key_choices(self, attr: TableAttr) -> List[Tuple[str, AttributeValue]]:
         """ Overridden to supply a user-facing label for each research study in the foreign table sgl.Study. The actual
         foreign key value is an integer ID. Otherwise, defers to base class. """
         if attr and (attr.id == 'study_id'):
-            res = []
-            try:
-                studies = sorted(sgl.Study().proj('study_id', 'study_title').fetch(as_dict=True),
-                                 key=lambda study: study['study_title'])
-                res = [(study['study_title'], study['study_id']) for study in studies]
-            except (DataJointError, Exception):
-                pass
-            return res
+            studies = sorted(DataBaseManager().fetch_proj(DBTable.STUDY, ['study_id', 'study_title']),
+                             key=lambda study: study['study_title'])
+            return [] if len(studies) == 0 else [(study['study_title'], study['study_id']) for study in studies]
         else:
             return super().foreign_key_choices(attr)
 
@@ -1391,32 +1332,27 @@ class SessionEPhysView(BaseTableView):
                       'Enter insertion depth of probe (mm)', '100px'),
             TableAttr('ba_id', 'Target Region', 'fkey', False, None, None, None, None, None, None)
         ]
-        super().__init__(sgl.Session.EPhys(), "EPhys recording", "ephys", attrs, restrict=None,
+        super().__init__(DBTable.SESSION_EPHYS, "EPhys recording", "ephys", attrs, restrict=None,
                          master_pk=['experimenter', 'subj_id', 'session_date', 'session_sfx'])
 
-    __fkey_info = {'experimenter': (sgl.User, 'username'), 'subj_id': (sgl.Subject, 'subj_id'),
-                   'rig_id': (sgl.Rig, 'rig_id'), 'study_id': (sgl.Study, 'study_id'),
-                   'session_date': (sgl.Session, 'session_date'), 'session_sfx': (sgl.Session, 'session_sfx'),
-                   'ba_id': (sgl.BrainArea, 'ba_id')}
+    __fkey_info = {'experimenter': (DBTable.USER, 'username'), 'subj_id': (DBTable.SUBJECT, 'subj_id'),
+                   'rig_id': (DBTable.RIG, 'rig_id'), 'study_id': (DBTable.STUDY, 'study_id'),
+                   'session_date': (DBTable.SESSION, 'session_date'), 'session_sfx': (DBTable.SESSION, 'session_sfx'),
+                   'ba_id': (DBTable.BRAIN_AREA, 'ba_id')}
 
-    def _foreign_key_descriptor(self, fkey_attr: TableAttr) -> Tuple[Type[dj.Table], str]:
+    def _foreign_key_descriptor(self, fkey_attr: TableAttr) -> Tuple[DBTable, str]:
         """ Overridden to supply the necessary information for all foreign keys in the SessionEPhys table. """
         if fkey_attr and (fkey_attr.id in SessionEPhysView.__fkey_info):
             return SessionEPhysView.__fkey_info[fkey_attr.id]
         else:
             raise ValueError("Not a recognized foreign key on this table")
 
-    def foreign_key_choices(self, attr: TableAttr) -> List[Tuple[str, Any]]:
+    def foreign_key_choices(self, attr: TableAttr) -> List[Tuple[str, AttributeValue]]:
         """ Overridden to supply a user-facing label for each brain region in the foreign table sgl.BrainArea. The
         actual foreign key value is an integer ID. Otherwise, defers to base class. """
         if attr and (attr.id == 'ba_id'):
-            res = []
-            try:
-                regions = sorted(sgl.BrainArea().proj('ba_id', 'ba_name').fetch(as_dict=True),
-                                 key=lambda region: region['ba_name'])
-                res = [(region['ba_name'], region['ba_id']) for region in regions]
-            except (DataJointError, Exception):
-                pass
-            return res
+            regions = sorted(DataBaseManager().fetch_proj(DBTable.BRAIN_AREA, ['ba_id', 'ba_name']),
+                             key=lambda region: region['ba_name'])
+            return [] if len(regions) == 0 else [(region['ba_name'], region['ba_id']) for region in regions]
         else:
             return super().foreign_key_choices(attr)
