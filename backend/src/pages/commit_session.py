@@ -38,7 +38,7 @@ import json
 import uuid
 
 from database import maestro
-from database.session_builder import SessionBuilder, OmniplexUnit
+from database.manager import DataBaseManager, OmniplexUnit
 from database.table_views import SessionView, SessionEPhysView, NeuronTypeView
 from pages.curate_panels import entry_form
 from typing import Any, List
@@ -154,7 +154,7 @@ class _SessionCommitter:
 
     @staticmethod
     def stage3_body(task_id: str) -> Any:
-        session_builder = SessionBuilder()
+        session_builder = DataBaseManager()
         session_info = session_builder.get_session_info(task_id)
         session_info_tab_content = dbc.Card(
             dbc.CardBody(entry_form(SessionView(), None, session_info, None)), className="mt-3"
@@ -384,7 +384,7 @@ class _SessionCommitter:
             if start_btn is None:
                 raise dash.exceptions.PreventUpdate
 
-            session_builder = SessionBuilder()
+            session_builder = DataBaseManager()
 
             # check to see if a commit task ID is in the local store. If so, then we should not be in stage 1. Sync
             # with server and switch to the correct stage.
@@ -421,7 +421,7 @@ class _SessionCommitter:
             out = [dash.no_update] * 6
             trigger = ctx.triggered[0]['prop_id'].split('.')[0]
             if (trigger.find('stage2_check_progress') > -1) and (n_intervals is not None):
-                session_builder = SessionBuilder()
+                session_builder = DataBaseManager()
                 stage, message, result = session_builder.progress_update(client_state['task_id'])
                 if stage == 1:
                     out[0] = "Client out of sync; please cancel and try again"
@@ -448,7 +448,7 @@ class _SessionCommitter:
                            [Input('stage2_cancel_btn', 'n_clicks'), Input('stage2_continue_btn', 'n_clicks')],
                            [State('commit_state', 'data')])
         def on_stage2_transition(n_cancel, n_continue, client_state):
-            session_builder = SessionBuilder()
+            session_builder = DataBaseManager()
             next_state = None
             task_id = client_state['task_id']
             if n_cancel is not None:
@@ -461,7 +461,7 @@ class _SessionCommitter:
         @dash_app.callback(Output('stage3_protocol_div', 'children'), [Input('stage3_proto_select', 'value')],
                            [State('commit_state', 'data')])
         def on_stage3_proto_select(proto_key, client_state):
-            session_builder = SessionBuilder()
+            session_builder = DataBaseManager()
             task_id = client_state['task_id']
             protocol = session_builder.get_trial_protocol(task_id, proto_key)
             if protocol:
@@ -472,7 +472,7 @@ class _SessionCommitter:
                            [State('commit_state', 'data')])
         def on_stage3_unit_select(value, client_state):
             unit_idx = int(value) if isinstance(value, str) else -1
-            session_builder = SessionBuilder()
+            session_builder = DataBaseManager()
             task_id = client_state['task_id']
             unit = session_builder.get_neural_unit_metrics(task_id, unit_idx)
             if unit:
@@ -484,7 +484,7 @@ class _SessionCommitter:
                            [State('stage3_unit_select', 'value'), State('commit_state', 'data')])
         def on_stage3_neuron_type_select(type_str, unit_idx_str, client_state):
             unit_idx = int(unit_idx_str) if isinstance(unit_idx_str, str) else -1
-            session_builder = SessionBuilder()
+            session_builder = DataBaseManager()
             task_id = client_state['task_id']
             session_builder.set_neural_unit_type(task_id, unit_idx, int(type_str))
             return dash.no_update
@@ -503,7 +503,7 @@ class _SessionCommitter:
             if not ctx.triggered:
                 raise dash.exceptions.PreventUpdate
 
-            session_builder = SessionBuilder()
+            session_builder = DataBaseManager()
             client_state = args[-1]
             task_id = client_state['task_id']
             if n_cancel is not None:
@@ -536,7 +536,7 @@ class _SessionCommitter:
             if not ctx.triggered:
                 raise dash.exceptions.PreventUpdate
 
-            session_builder = SessionBuilder()
+            session_builder = DataBaseManager()
             task_id = client_state['task_id']
             trigger = ctx.triggered[0]['prop_id'].split('.')[0]
             if n_cancel is not None:
@@ -608,7 +608,7 @@ def update_layout_on_client_state_change(ts, client_state):
     if client_state and ('stage' in client_state) and ('task_id' in client_state):
         stage, task_id = (client_state['stage'], client_state['task_id'])
     if len(task_id) > 0:
-        stage, substage = SessionBuilder().get_commit_task_stage(task_id)
+        stage, substage = DataBaseManager().get_commit_task_stage(task_id)
         if stage == 1:
             task_id = ""
     return __session_committer.header(stage), __session_committer.body(stage, substage, task_id), \
