@@ -70,6 +70,8 @@ Created on Wed Jun  3 14:13:38 2020
 
 @author: sruffner
 """
+from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
+
 from typing import Dict, Any, Optional
 
 import datajoint as dj
@@ -95,7 +97,7 @@ class User(dj.Manual):
     username : varchar(20)              # Network login name
     ---
     full_name : varchar(50)             # Full name of lab member. Recommend format as would appear in publication
-    contact_email : varchar(100)        # Email address
+    contact_email : varchar(80)        # Email address
     role : enum("Principal Investigator", "Post Doctoral Researcher", "Graduate Student", "Administrator")
     """
 
@@ -222,35 +224,32 @@ class StudyPublication(dj.Manual):
     """
 
 
-"""
-While the Session table is 'manual', new entries are added through an interactive web application. Prior to the commit,
-the user must compress all session data (Maestro trial files, Omniplex PL2 file(s), and the spike sorting results) into
-a single ZIP archive file. Then, after entering some essential session information (date, subject, rig, etc), the user
-uploads the ZIP file through the web app into a staging directory with the data repository. The backend server will 
-scan all the Maestro data files within the ZIP (in situ, without extracting the archive) to identify the distinct trial
-protocols presented during the experimental session. It will query the user to verify the trial protocols and to collect
-other session metadata.
-
-The experimenter MUST provide a file containing the results of their spike-sorting analysis to identify the distinct
-neural units recorded during the session. The exact format of this file is TBD, but it must contain, for
-each identified unit: Omniplex/Plexon source channel number ('spkNN', with two-digit channel number NN), the Plexon
-source filename (to support multiple Plexon files recorded during one session), and a potentially long vector holding
-the spike occurrence times (in seconds) in the Plexon timeline. The web app will ask the user to specify the (putative)
-neuron type (choose from an entity in the NeuronType table). The backend will analyze the Plexon data to calculate the
-unit's mean firing rate in Hz, signal-to-noise ration, and the average spike waveform template. With the exception of
-the spike times, this information is stored in the Session.Neuron part table.
-
-Once the script has prepared the session directory and collected all required metadata, it will then insert a new
-entry in the Session table. If the session included an electrophysiological recording, the requisite information is
-inserted as a new entry in the Session.EPhys part table, and any identified neural units are inserted into the
-Session.Neuron part table. It will also insert any new trial protocols into the TrialProtocols table.
-
-Finally, it will call populate() on the one imported table in this pipeline - Trial.
-"""
-
-
 @schema
 class Session(dj.Manual):
+    """
+    While the Session table is 'manual', new entries are added through an interactive web application. The user must
+    compress all session data (Maestro trial files, Omniplex PL2 file(s), and the spike sorting results) into a single
+    ZIP archive file which is uploaded through the web app into a staging directory with the data repository. The
+    backend server will scan all the Maestro data files within the ZIP (in situ, without extracting the archive) to
+    identify the distinct trial protocols presented during the experimental session. It will query the user to verify
+    the trial protocols and to collect other session metadata.
+
+    The experimenter MUST provide a file containing the results of their spike-sorting analysis to identify the distinct
+    neural units recorded during the session. The exact format of this file is TBD, but it must contain, for each
+    identified unit: Omniplex source channel ID, Omniplex source filename (to support multiple Omniplex files recorded
+    during one session), and a potentially long vector holding the spike occurrence times (in seconds since the Omniplex
+    recording began). The web app will ask the user to specify the (putative) neuron type (choose from an entity in the
+    NeuronType table). The backend will analyze the Omniplex raw data to calculate the unit's mean firing rate in Hz,
+    signal-to-noise ration, and the average spike waveform template. With the exception of the spike times, this
+    information is stored in the Session.Neuron part table.
+
+    Once the script has prepared the session directory and collected all required metadata, it will then insert a new
+    entry in the Session table. If the session included an electrophysiological recording, the requisite information is
+    inserted as a new entry in the Session.EPhys part table, and any identified neural units are inserted into the
+    Session.Neuron part table. It will also insert any new trial protocols into the TrialProtocols table.
+
+    Finally, it will call populate() on the one imported table in this pipeline - Trial.
+    """
     definition = """
     # Experimental sessions conducted in the laboratory
     (experimenter) -> User              # The user conducting the experiment
@@ -263,11 +262,11 @@ class Session(dj.Manual):
     session_notes : varchar(2048)       # Notes about session
     """
 
-    """
-    Information on electrophysiological recording that took place during experimental session (if at all). This is a
-    part table because not every experiment session includes electrophysiological recordings.
-    """
     class EPhys(dj.Part):
+        """
+         Information on electrophysiological recording that took place during experimental session (if at all). This is
+         a part table because not every experiment session includes electrophysiological recordings.
+        """
         definition = """
         # Electrophysiological recordings performed during experimental sessions
         -> master
@@ -297,40 +296,38 @@ class Session(dj.Manual):
         """
 
 
-"""
-A trial protocol essentially corresponds to a Maestro trial definition and defines the trajectories of visual stimuli
-during the trial. A given trial protocol is typically repeated multiple times over the course of a single experiment
-session; a trial rep is just one particular instance of a trial protocol. Typically, every trial rep is unique because
-it contains at least one random variable -- most notably, the random duration of a 'fixation segment' that precedes
-stimulus onset.
-
-So, a trial protocol is defined by the fixed part of the trial definition (most of it), plus zero or more random
-variables defining what parameter(s) will vary randomly with each presentation of the protocol. Another tricky aspect
-to this concept is that Maestro lets the experimenter set a 'global target transform', which will transform target
-trajectories without changing the original Maestro trial definition. Since the transform parameters are included in
-each data file along with the trial codes, it is possible to recover the original trial definition. However, the
-transform is used to adapt a trial definition to the spatio-temporal receptive field of a neural unit being recorded,
-so all the reps presented to that unit will use the same transform value. For that reason, the global target transform
-is considered part of the trial protocol, rather than something that changes per trial.
-
-The purpose of defining a trial protocol is two-fold: (1) To reduce the memory footprint of each individual trial in
-the Trial table -- because we won't have to store the stimulus target trajectories (they can be calculated from the
-trial protocol and some information stored in the individual trial entity. (2) To identify repeated presentations of the
-same trial protocol, for aggregate analyses of behavioral and neuronal responses.
-
-New trial protocols are inserted into this table when an experiment session is digested by the web application
-interface to the DataJoint pipeline and lab database. All the trial data files are scanned to identify distinct trial
-protocols. Any protocols not already found in the TrialProtocol table will be verified with the user interactively
-through the web app, then inserted into the table.
-
-A trial protocol's definition is rather complex. Rather than storing it so that any segment or target parameter can be
-accessed via DataJoint queries, the entire definition is stored as a blob in an internal format -- see Protocol in 
-maestro.py. Backend server code will load this definition and use it to calculate target trajectories as needed.
-"""
-
-
 @schema
 class TrialProtocol(dj.Manual):
+    """
+    A trial protocol essentially corresponds to a Maestro trial definition and defines the trajectories of visual
+    stimuli during the trial. A given trial protocol is typically repeated multiple times over the course of a single
+    experiment session and across many different sessions; a trial is just one particular presentation of a trial
+    protocol. Typically, every trial rep is unique because it contains at least one random variable -- most notably, the
+    random duration of a 'fixation segment' that precedes stimulus onset.
+
+    So, a trial protocol is defined by the fixed part of the trial definition (most of it), plus zero or more random
+    variables defining what parameter(s) will vary randomly with each presentation of the protocol. Another tricky
+    aspect to this concept is that Maestro lets the experimenter set a 'global target transform', which will transform
+    target trajectories without changing the original Maestro trial definition. Since the transform parameters are
+    included in each data file along with the trial codes, it is possible to recover the original trial definition.
+    However, the transform is used to adapt a trial definition to the spatio-temporal receptive field of a neural unit
+    being recorded, so all the reps presented to that unit will use the same transform value. For that reason, the
+    global target transform is considered part of the trial protocol, rather than something that changes per trial.
+
+    The purpose of defining a trial protocol is two-fold: (1) To reduce the memory footprint of each individual trial in
+    the Trial table -- because we won't have to store the stimulus target trajectories (they can be calculated from the
+    trial protocol and some information stored in the individual trial entity. (2) To identify repeated presentations of
+    the same trial protocol, for aggregate analyses of behavioral and neuronal responses.
+
+    New trial protocols are inserted into this table when an experiment session is digested by the web app interface
+    to the DataJoint pipeline and lab database. All the trial data files are scanned to identify distinct trial
+    protocols. Any protocols not already found in the TrialProtocol table will be verified with the user interactively
+    through the web app, then inserted into the table.
+
+    A trial protocol's definition is rather complex. Rather than storing it so that any segment or target parameter can
+    be accessed via DataJoint queries, the entire definition is stored as a blob in an internal format -- see Protocol
+    in maestro.py. Backend server code will load this definition and use it to calculate target trajectories as needed.
+    """
     definition = """
     # Stimulus-target trial protocol
     proto_hash : char(32)               # MD5 hash of trial protocol definition (encoded in url-safe Base64 ASCII)
@@ -367,6 +364,7 @@ class TrialProducer:
 class Trial(dj.Imported):
     definition = """
     -> Session                          # The experimental session during which the trial was presented
+    -> TrialProtocol                    # trial protocol (aka, Maestro trial definition)
     trial_idx : int unsigned            # Indicates order of presentation during session (starts at 1)
     ---
     trial_header : blob                 # Original data file header (in opaque format for use by backend server)
@@ -379,7 +377,6 @@ class Trial(dj.Imported):
     trial_rew2: int                     # length of reward pulse 2 in milliseconds
     trial_ts: float                     # trial start timestamp, in elapsed secs since start of first trial in session
                                         # (-1 if not available)
-    -> TrialProtocol                    # trial protocol details (aka, Maestro trial definition)
     trial_rvs: blob                     # list of trial random variable values (opaque format; list of int/float values,
                                         # in same order as maestro.Protocol.diffs; empty list if no protocol RVs)
     """

@@ -39,8 +39,7 @@ import uuid
 
 from database import maestro
 from database.manager import DataBaseManager, OmniplexUnit
-from database.table_views import SessionView, SessionEPhysView, NeuronTypeView
-from pages.curate_panels import entry_form
+import database.table_info as ti
 from typing import Any, List
 
 
@@ -156,9 +155,8 @@ class _SessionCommitter:
     def stage3_body(task_id: str) -> Any:
         session_builder = DataBaseManager()
         session_info = session_builder.get_session_info(task_id)
-        session_info_tab_content = dbc.Card(
-            dbc.CardBody(entry_form(SessionView(), None, session_info, None)), className="mt-3"
-        )
+        entry_form = DataBaseManager.entry_form(ti.DBTable.SESSION, None, session_info, None)
+        session_info_tab_content = dbc.Card(dbc.CardBody(entry_form), className="mt-3")
 
         proto_map = session_builder.get_trial_protocol_paths(task_id)
         first_key = next(iter(proto_map.keys()))
@@ -173,11 +171,8 @@ class _SessionCommitter:
 
         # note: this tab will be disabled if session does not include neural units recordings
         ephys_info = session_builder.get_ephys_info(task_id)
-        ephys_view = SessionEPhysView()
-        omit_attrs = ephys_view.attributes_in_master()
-        ephys_info_tab_content = dbc.Card(
-            dbc.CardBody(entry_form(ephys_view, omit_attrs, ephys_info, None)), className="mt-3"
-        )
+        ephys_form = DataBaseManager.entry_form(ti.DBTable.SESSION_EPHYS, None, ephys_info, None)
+        ephys_info_tab_content = dbc.Card(dbc.CardBody(ephys_form), className="mt-3")
 
         num_units = session_builder.get_num_neural_units(task_id)
         if num_units is None:
@@ -297,7 +292,7 @@ class _SessionCommitter:
     @staticmethod
     def stage3_display_unit(unit: OmniplexUnit) -> List[Any]:
         # dropdown lets user assign neuron type to the unit
-        neuron_types = NeuronTypeView().rows()
+        neuron_types = DataBaseManager.fetch_rows(ti.DBTable.NEURON_TYPE)
         initial_selection = str(unit.neuron_type) if unit.neuron_type in [nt['nt_id'] for nt in neuron_types] else None
         select_type = dbc.InputGroup(
             [
@@ -489,9 +484,9 @@ class _SessionCommitter:
             session_builder.set_neural_unit_type(task_id, unit_idx, int(type_str))
             return dash.no_update
 
-        state_vector = [State(f"{attr.id}_input", "value") for attr in SessionView().attributes()]
-        state_vector.extend([State(f"{attr.id}_input", "value")
-                             for attr in SessionEPhysView().attributes_not_in_master()])
+        state_vector = [State(f"{attr_id}_input", "value") for attr_id in ti.attributes_of(ti.DBTable.SESSION)]
+        state_vector.extend([State(f"{attr_id}_input", "value")
+                             for attr_id in ti.attributes_of(ti.DBTable.SESSION_EPHYS)])
         state_vector.append(State('commit_state', 'data'))
 
         @dash_app.callback([Output('stage3_next_state', 'children'), Output('stage3_alert', 'children'),
@@ -512,13 +507,25 @@ class _SessionCommitter:
             elif n_continue is not None:
                 session_info = dict()
                 ephys_info = None
-                for i, attr in enumerate(SessionView().attributes()):
-                    session_info[attr.id] = args[i]
+                for i, attr_id in enumerate(ti.attributes_of(ti.DBTable.SESSION)):
+                    session_info[attr_id] = args[i]
                 if session_builder.get_ephys_info(task_id) is not None:
                     ofs = len(session_info.keys())
                     ephys_info = dict()
-                    for i, attr in enumerate(SessionEPhysView().attributes_not_in_master()):
-                        ephys_info[attr.id] = args[ofs+i]
+                    for i, attr_id in enumerate(ti.attributes_of(ti.DBTable.SESSION_EPHYS)):
+                        ephys_info[attr_id] = args[ofs+i]
+
+                # FIX to handle BUG in dbc.Select: the 'value' will be a string if the user changes the selection from
+                # the initial value, even though I use integers for the option values. This leads to downstream issue
+                # when the DataBaseManager checks the foreign key attributes in session_info and ephys_info. So here
+                # I force them to int:
+                try:
+                    session_info['study_id'] = int(session_info['study_id'])
+                    if ephys_info:
+                        ephys_info['ba_id'] = int(ephys_info['ba_id'])
+                except Exception:
+                    pass
+
                 error_msg = session_builder.start_commit(task_id, session_info, ephys_info)
                 if not error_msg:
                     return json.dumps({'stage': 4, 'task_id': task_id}), dash.no_update, dash.no_update

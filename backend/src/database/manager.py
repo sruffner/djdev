@@ -1,9 +1,7 @@
 """
 manager.py: Manage access to the Lisberger lab database and backing repository.
 
-For now, I've only added code managing a log file that tracks all changes to the lab database so that the database
-can be regenerated upon a catastrophic failure. However, I may want to refactor things so that it includes everything
-in session_builder.py and table_views.py.
+TODO: COMPLETE DESCRIPTION - DataBaseManager now handles session commits and all database operations...
 
 The database log file is a Python pickle file that contains a chronological sequence of database entries logging all
 changes to the database since inception. Then, to rebuild the database from scratch, we would simply process each entry
@@ -18,12 +16,12 @@ repository. All the information needed to re-commit the experiment session is in
 metadata, trial protocols, neural unit data, and the original recorded data files.
 
 The lab database schema also includes some "mapping" or cross-reference tables such as BrainAreaNeuronType. We restrict
-the nature of these tables and the two tables they "associate" -- see MappingView in table_views.py: the associated
-tables' primary keys are both single-attribute, auto-incrementing integer keys. The mapping table has a primary key
-consisting of the those two foreign keys and nothing else, and the table has no non-primary attributes. A log entry
-recording an update to a mapping table consists of the name of the mapping table, an integer identifying an entity in
-the source table, and a set of integers (possibly empty) identifying entities in the destination table that are
-associated with the entity in the source table.
+the nature of these tables and the two tables they "associate": the associated tables' primary keys are both single
+auto-incrementing integer keys. The mapping table has a primary key consisting of the those two foreign keys and nothing
+else, and the table has no non-primary attributes.
+
+TODO: Need to update how we log a mapping table update. Since an update only applies to one src_pk at a time, and all
+ mappings for that src_pk are deleted before doign the update, there's a better way to log it.
 
 Summary of the log entry types:
     1) Add row to manual-entry table: {'op': 'add', 'table': DBTable, 'row': Dict}
@@ -41,11 +39,12 @@ import os
 import pickle
 import re
 from copy import deepcopy
+import dash_bootstrap_components as dbc
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from queue import Queue
-from typing import Optional, Dict, Any, Set, Union, List, IO, Tuple
+from typing import Optional, Dict, Any, Set, List, IO, Tuple
 import threading
 import time
 import shutil
@@ -56,40 +55,38 @@ import numpy as np
 import scipy.signal
 import datajoint as dj
 
-from common import json_parse, DocEnum, check_date
+from common import json_parse, check_date
+
+import database.table_info as ti
+from database.table_info import DBTable, AttributeValue, AttrTypeEnum
 import database.maestro as maestro
 import database.PL2 as PL2
 import database.sgl_schema as sgl
 
 
-class DBTable(DocEnum):
-    """
-    An enumeration of all tables (except part tables) in the Lisberger laboratory database schema (sgl_schema.py).
-    """
-    USER = 1, "Table of laboratory members"
-    SUBJECT = 2, "Table of experiment subjects"
-    IMPLANT = 3, "Table of implants on experiment subjects"
-    RIG = 4, "Table of experiment rigs"
-    BRAIN_AREA = 5, "Table of brain regions"
-    NEURON_TYPE = 6, "Table of neuron types"
-    BRAIN_AREA_TO_NEURON_TYPE = 7, "Cross-reference table: Brain region to neuron type"
-    STUDY = 8, "Table of research projects/studies"
-    KEYWORD = 9, "Table of research keywords"
-    PUB = 10, "Table of research publications"
-    STUDY_TO_KEY = 11, "Cross-reference table: Research study to keyword"
-    STUDY_TO_PUB = 12, "Cross-reference table: Research study to publication"
-    SESSION = 13, "Table of experiment sessions"
-    SESSION_EPHYS = 13, "Part table of electrophysiology metadata for experiment sessions"
-    TRIAL_PROTOCOL = 14, "Table of trial protocol definitions"
-    TRIAL = 15, "Table of individual trial response data"
-
-    def is_mapping_table(self) -> bool:
-        """ Return True for a cross-reference table. """
-        return self in (DBTable.BRAIN_AREA_TO_NEURON_TYPE, DBTable.STUDY_TO_KEY, DBTable.STUDY_TO_PUB)
-
-
-AttributeValue = Union[str, int, float, bool, date, np.ndarray, bytes]
-""" Database table attribute value type - a union of all the input types supported by the backend server. """
+_table_map: Dict[DBTable, dj.Table] = {
+    DBTable.USER: sgl.User(),
+    DBTable.SUBJECT: sgl.Subject(),
+    DBTable.IMPLANT: sgl.SubjectImplant(),
+    DBTable.RIG: sgl.Rig(),
+    DBTable.BRAIN_AREA: sgl.BrainArea(),
+    DBTable.NEURON_TYPE: sgl.NeuronType(),
+    DBTable.BRAIN_AREA_TO_NEURON_TYPE: sgl.BrainAreaNeuronType(),
+    DBTable.STUDY: sgl.Study(),
+    DBTable.KEYWORD: sgl.Keyword(),
+    DBTable.PUB: sgl.Publication(),
+    DBTable.STUDY_TO_KEY: sgl.StudyKeyword(),
+    DBTable.STUDY_TO_PUB: sgl.StudyPublication(),
+    DBTable.SESSION: sgl.Session(),
+    DBTable.SESSION_EPHYS: sgl.Session.EPhys(),
+    DBTable.SESSION_NEURON: sgl.Session.Neuron(),
+    DBTable.TRIAL_PROTOCOL: sgl.TrialProtocol(),
+    DBTable.TRIAL: sgl.Trial(),
+    DBTable.TRIAL_EVENT: sgl.Trial.Event(),
+    DBTable.TRIAL_BEHAVIORAL: sgl.Trial.BehavioralResponse(),
+    DBTable.TRIAL_NEURONAL: sgl.Trial.NeuronalResponse()
+}
+""" Maps enumerated database table ID to the corresponding DataJoint table class in the Lisberger lab schema. """
 
 
 class DataBaseManager:
@@ -116,25 +113,6 @@ class DataBaseManager:
             """ Lock object guarding access to the set of running session commit jobs. """
             self._log_lock: threading.Lock = threading.Lock()
             """ Lock object guarding access to the database updates log file. """
-            self._table_class_map = {
-                DBTable.USER: sgl.User(),
-                DBTable.SUBJECT: sgl.Subject(),
-                DBTable.IMPLANT: sgl.SubjectImplant(),
-                DBTable.RIG: sgl.Rig(),
-                DBTable.BRAIN_AREA: sgl.BrainArea(),
-                DBTable.NEURON_TYPE: sgl.NeuronType(),
-                DBTable.BRAIN_AREA_TO_NEURON_TYPE: sgl.BrainAreaNeuronType(),
-                DBTable.STUDY: sgl.Study(),
-                DBTable.KEYWORD: sgl.Keyword(),
-                DBTable.PUB: sgl.Publication(),
-                DBTable.STUDY_TO_KEY: sgl.StudyKeyword(),
-                DBTable.STUDY_TO_PUB: sgl.StudyPublication(),
-                DBTable.SESSION: sgl.Session(),
-                DBTable.SESSION_EPHYS: sgl.Session.EPhys(),
-                DBTable.TRIAL_PROTOCOL: sgl.TrialProtocol(),
-                DBTable.TRIAL: sgl.Trial()
-            }
-            """ Maps enumerated database table ID to the corresponding DataJoint table object."""
 
     def on_startup(self) -> Optional[str]:
         """
@@ -251,7 +229,155 @@ class DataBaseManager:
             error_msg = f"Failed to post 'session' entry to database update log: {str(err)}"
         return error_msg
 
-    def num_table_rows(self, table_id: DBTable, restriction: Optional[Dict[str, AttributeValue]] = None) -> int:
+    @staticmethod
+    def entry_form(table_id: DBTable, include_attrs: Optional[List[str]] = None,
+                   initial_entry: Optional[Dict[str, AttributeValue]] = None,
+                   alert_id: Optional[str] = None) -> dbc.Form:
+        """
+        Generate a Dash Bootstrap form that may be used to gather information from the user to add a new entity (row)
+        to the specified database table. Each attribute defining a table entity is represented by a form group
+        consisting of a label and an input widget appropriate to the attribute's data type:
+            1) 'enum': A Bootstrap Select widget populated with the fixed set of options for that attribute.
+            2  'bool' : A Bootstrap Select widget with "Yes" (True) and "No" (False) options.
+            2) 'fkey' (foreign key): Similar to 'enum', except that the database is queried for the available choices
+            for that foreign key.
+            3) 'text' (length > 100): A Bootstrap Textarea widget with 2 or 4 rows (depending on max text length).
+            4) Otherwise: A Bootstrap Input widget of type 'number', 'email', or 'text'.
+
+        Selected attributes may be omitted from the form (for tables with an auto-incrementing primary key, that key is
+        always omitted because it is not user-specified), and initial values may be specified for each attribute. The
+        form optionally includes a Bootstrap Alert component in which an error message can be displayed when the user
+        enters an invalid value in the form.
+
+        So that you can use the input widgets on the form in a Dash callback, the 'id' of each widget is set to
+        "<attr.id>-input", where <attr.id> is the ID of the table attribute displayed/edited in that widget.
+
+        Args:
+            table_id: ID of the database table.
+            include_attrs: If None, the form will include all table attributes on the form, with the exception of an
+                auto-incrementing primary key (value controlled by database) and any blob-valued attribute (not
+                supported). Otherwise, only the attributes identified in this list (again ignoring an auto key or a
+                blob-valued attribute) are exposed on the form.
+            initial_entry: If not None, this dictionary contains initial values for the attributes, keyed by attribute
+                ID. If present, it must contain a key-value pair for each table attribute that is included on the form.
+            alert_id: If not None, this is the ID assigned to the Alert component included along the bottom of the form;
+                otherwise, no Alert component is generated.
+
+        Returns:
+            A Dash Bootstrap Form component, as described.
+
+        Raises:
+            KeyError: If table ID is invalid or identifies a table that does not support form-based user entry; if
+                any attribute ID specified is invalid; or if any attribute ID is missing in initial_entry.
+        """
+        if not ti.table_info_for(table_id).allow_form_entry:
+            raise KeyError(f"Entry form not supported for the database table {str(table_id)}.")
+        form_groups = []
+        for attr_id in ti.attributes_of(table_id):
+            if include_attrs and not (attr_id in include_attrs):
+                continue
+            attr_info = ti.attribute_info(table_id, attr_id)
+            if (attr_info.type == AttrTypeEnum.AUTO) or (attr_info.type == AttrTypeEnum.BLOB):
+                continue
+            elif attr_info.type == AttrTypeEnum.ENUM:
+                entry_widget = dbc.Select(
+                    id=f"{attr_id}_input",
+                    options=[{"label": opt, "value": opt} for opt in attr_info.options],
+                    value=initial_entry[attr_id] if initial_entry else attr_info.options[0]
+                )
+            elif attr_info.type == AttrTypeEnum.BOOL:
+                entry_widget = dbc.Select(
+                    id=f"{attr_id}_input",
+                    options=[{"label": "Yes", "value": 1}, {"label": "No", "value": 0}],
+                    value=(1 if initial_entry[attr_id] else 0) if initial_entry else 0
+                )
+            elif attr_info.type == AttrTypeEnum.FKEY:
+                entry_widget = dbc.Select(
+                    id=f"{attr_id}_input",
+                    options=[{"label": opt[0], "value": opt[1]}
+                             for opt in DataBaseManager.foreign_key_choices(table_id, attr_id)],
+                    value=initial_entry[attr_id] if initial_entry else None
+                )
+            elif (attr_info.type == AttrTypeEnum.TEXT) and attr_info.textrange and (attr_info.textrange[1] > 100):
+                entry_widget = dbc.Textarea(
+                    id=f"{attr_id}_input",
+                    minLength=attr_info.textrange[0], maxLength=attr_info.textrange[1],
+                    rows=2 if attr_info.textrange[1] < 400 else 4,
+                    value=initial_entry[attr_id] if initial_entry else "",
+                    placeholder=attr_info.placeholder
+                )
+            else:
+                if (attr_info.type == AttrTypeEnum.FLOAT) or (attr_info.type == AttrTypeEnum.INT):
+                    input_type = 'number'
+                else:
+                    input_type = 'email' if 'email' in attr_id else 'text'
+                entry_widget = dbc.Input(
+                    id=f"{attr_id}_input",
+                    type=input_type,
+                    minLength=attr_info.textrange[0] if attr_info.textrange else 0,
+                    maxLength=attr_info.textrange[1] if attr_info.textrange else 100,
+                    value=initial_entry[attr_id] if initial_entry else "",
+                    placeholder=attr_info.placeholder
+                )
+
+            form_groups.append(dbc.FormGroup(
+                [
+                    dbc.Label(attr_info.label, width=2),
+                    dbc.Col(entry_widget, width=10)
+                ],
+                row=True,
+            ))
+
+        # alert raised when an add operation fails - displays a brief error message. Otherwise hidden.
+        if alert_id:
+            form_groups.append(dbc.FormGroup(
+                dbc.Alert("", id=f"{alert_id}", dismissable=True, duration=10000, fade=True, is_open=False)
+            ))
+
+        return dbc.Form(form_groups)
+
+    @staticmethod
+    def foreign_key_choices(table_id: DBTable, fkey_id: str) -> List[Tuple[str, AttributeValue]]:
+        """
+        Retrieve the list of available choices for the specified foreign key attribute in the specified table. To
+        support using this list in a user-facing dropdown or list widget, each "choice" is represented by 2-tuple
+        (label, fkey_value), where fkey_value is the actual value of the foreign key and label is a unique user-facing
+        string identifying that value.
+
+        Args:
+            table_id: ID of database table.
+            fkey_id: ID of foreign key attribute.
+
+        Returns:
+            List of all available value choices for the foreign key table attribute, with companion label as described.
+                Sorted alphabetically by the label. Returns an empty list if unable to access the database.
+
+        Raises:
+            KeyError: If table_id is invalid, if fkey_id is invalid or is not a foreign key attribute.
+        """
+        attr_info = ti.attribute_info(table_id, fkey_id)
+        if attr_info.type != AttrTypeEnum.FKEY:
+            raise KeyError(f"{fkey_id} is not a foreign key attribute!")
+
+        # for select parent tables, we sort on a user-facing attribute rather than the primary key
+        if attr_info.fkey_table == DBTable.STUDY:
+            studies = sorted(DataBaseManager.fetch_proj(DBTable.STUDY, ['study_id', 'study_title']),
+                             key=lambda study: study['study_title'])
+            return [] if len(studies) == 0 else [(study['study_title'], study['study_id']) for study in studies]
+        elif attr_info.fkey_table == DBTable.BRAIN_AREA:
+            regions = sorted(DataBaseManager.fetch_proj(DBTable.BRAIN_AREA, ['ba_id', 'ba_name']),
+                             key=lambda region: region['ba_name'])
+            return [] if len(regions) == 0 else [(region['ba_name'], region['ba_id']) for region in regions]
+        elif attr_info.fkey_table == DBTable.NEURON_TYPE:
+            n_types = sorted(DataBaseManager.fetch_proj(DBTable.NEURON_TYPE, ['nt_id', 'nt_name']),
+                             key=lambda n_type: n_type['nt_name'])
+            return [] if len(n_types) == 0 else [(n_type['ba_name'], n_type['ba_id']) for n_type in n_types]
+
+        fkey_values = sorted(DataBaseManager().fetch_attribute_values(attr_info.fkey_table, attr_info.fkey_id))
+        return [(v, v) for v in fkey_values]
+
+    @staticmethod
+    def num_table_rows(table_id: DBTable, restriction: Optional[Dict[str, AttributeValue]] = None) -> int:
         """
         Get the current number of entities in the specified database table.
 
@@ -266,14 +392,15 @@ class DataBaseManager:
             has no rows satisfying that condition).
         """
         try:
-            table: dj.Table = self._table_class_map[table_id]
+            table: dj.Table = _table_map[table_id]
             query = (table & restriction) if restriction else table
             n = len(query)
         except Exception:
             n = 0
         return n
 
-    def attribute_exists(self, table_id: DBTable, attr_id: str, attr_value: AttributeValue) -> bool:
+    @staticmethod
+    def attribute_exists(table_id: DBTable, attr_id: str, attr_value: AttributeValue) -> bool:
         """
         Does the specified attribute have the specified value in any row in the specified table?
         Args:
@@ -284,10 +411,11 @@ class DataBaseManager:
         Returns:
             False if attribute value not found in table (or if an error occurs).
         """
-        existing_values = self.fetch_attribute_values(table_id, attr_id)
+        existing_values = DataBaseManager.fetch_attribute_values(table_id, attr_id)
         return attr_value in existing_values
 
-    def fetch_attribute_values(self, table_id: DBTable, attr_id: str,
+    @staticmethod
+    def fetch_attribute_values(table_id: DBTable, attr_id: str,
                                restriction: Optional[Dict[str, AttributeValue]] = None) -> List[AttributeValue]:
         """
         Fetch all existing values of the specified attribute within the specified database table, optionally restricted
@@ -305,14 +433,15 @@ class DataBaseManager:
                 is not sorted. Returns an empty list if specified table does not exist or if a database error occurs.
         """
         try:
-            table: dj.Table = self._table_class_map[table_id]
+            table: dj.Table = _table_map[table_id]
             query = (table & restriction) if restriction else table
             attr_values = query.fetch(attr_id)
         except Exception:
             attr_values = []
         return attr_values
 
-    def fetch_proj(self, table_id: DBTable, attributes: List[str]) -> List[Dict[str, AttributeValue]]:
+    @staticmethod
+    def fetch_proj(table_id: DBTable, attributes: List[str]) -> List[Dict[str, AttributeValue]]:
         """
         Fetch selected attributes (aka, columns) from the specified table.
 
@@ -327,13 +456,14 @@ class DataBaseManager:
                 'attributes' argument. Returns an empty list if the table is empty or a database error occurs.
         """
         try:
-            table: dj.Table = self._table_class_map[table_id]
+            table: dj.Table = _table_map[table_id]
             rows = table.proj(*attributes).fetch(as_dict=True)
         except Exception:
             rows = []
         return rows
 
-    def fetch_rows(self, table_id: DBTable, restriction: Optional[Dict[str, AttributeValue]] = None) -> \
+    @staticmethod
+    def fetch_rows(table_id: DBTable, restriction: Optional[Dict[str, AttributeValue]] = None) -> \
             List[Dict[str, AttributeValue]]:
         """
         Fetch all or a subset of the rows in the specified database table.
@@ -349,7 +479,7 @@ class DataBaseManager:
                 (if any), or a database error occurs.
         """
         try:
-            table: dj.Table = self._table_class_map[table_id]
+            table: dj.Table = _table_map[table_id]
             query = (table & restriction) if restriction else table
             rows = query.fetch(as_dict=True)
         except Exception:
@@ -371,10 +501,10 @@ class DataBaseManager:
             None if successful; else a user-facing description of the error (missing attribute, bad attribute value,
             entry already exists, database error).
         """
-        if not (table_id in self._table_class_map):
+        if not (table_id in _table_map):
             return f"Unrecognized database table ID: {str(table_id)}"
         try:
-            table: dj.Table = self._table_class_map[table_id]
+            table: dj.Table = _table_map[table_id]
             with table.connection.transaction:
                 table.insert1(row, replace=False)
                 if log:
@@ -401,10 +531,10 @@ class DataBaseManager:
         Returns:
             None if successful; else a user-facing description of the error (bad table or attribute ID, database error).
         """
-        if not (table_id in self._table_class_map):
+        if not (table_id in _table_map):
             return f"Unrecognized database table ID: {str(table_id)}"
         try:
-            table: dj.Table = self._table_class_map[table_id]
+            table: dj.Table = _table_map[table_id]
             with table.connection.transaction:
                 query = (table & restriction) if restriction else table
                 query.delete(verbose=False)
@@ -415,6 +545,162 @@ class DataBaseManager:
         except Exception as e:
             return f"Delete failed: table={str(table_id)}, restrict={restriction} ===> {str(e)}"
         return None
+
+    @staticmethod
+    def row_exists(table_id: DBTable, row_pk: Dict[str, AttributeValue]) -> bool:
+        """
+        Does the specified entry/row currently exist in the specified table?
+
+        Args:
+            table_id: ID of the database table.
+            row_pk: This dictionary must contain, at a minimum, the primary key attribute ID-value pairs that uniquely
+                identify a single table row. Any other attributes are ignored!
+
+        Returns:
+            True if row exists, false otherwise.
+
+        Raises:
+            ValueError: If row_pk is missing any of the table's primary key attributes.
+        """
+        table_pk = ti.primary_key_of(table_id)
+        try:
+            restriction = {key: row_pk[key] for key in table_pk}
+            exists = (DataBaseManager.num_table_rows(table_id, restriction) == 1)
+        except KeyError:
+            raise ValueError("Incomplete primary key")
+        return exists
+
+    @staticmethod
+    def check_row(table_id: DBTable, row: Dict[str, AttributeValue], omit_master: bool = False) -> Optional[str]:
+        """
+        Check whether or not the proposed row entry is valid and does not yet exist in the specified database table.
+
+        Args:
+            table_id: ID of the database table.
+            row: The proposed entry. It must contain a valid attribute value for each table attribute -- except for an
+                auto-incrementing primary key, and it must not yet exist in the database. SIDE EFFECT: If the entry
+                includes a value for the auto primary key, that key-value pair is removed from the dictionary.
+            omit_master: If True and this is a part table, attributes in 'row' that are part of the master table's
+                primary key are NOT checked, and existence is not checked. This is a way to check a new entry in the
+                part table without first inserting the corresponding entry in the master table. Default is False.
+        Returns:
+            None if operation succeeds, else a user-facing description of the error (bad table ID, missing attribute,
+                bad attribute value, entry already exists, database error).
+        """
+        err_msg = None
+        try:
+            DataBaseManager._validate_row(table_id, row, omit_master)
+        except (Exception, ValueError) as err:
+            err_msg = f"Invalid entry: {str(err)}"
+        return err_msg
+
+    @staticmethod
+    def _validate_row(table_id: DBTable, row: Dict[str, AttributeValue], omit_master: bool = False) -> None:
+        """
+        Validate an entry (aka, row) that is to be inserted into the database table specified.
+
+        Args:
+            table_id: ID of the database table.
+            row: The new entry. NOTE: If the table uses an auto-incrementing attribute as its primary key, that
+                attribute is removed from the entry, if specified. Its value is set by the database on insert.
+            omit_master: If True and the specified table is a part table, attributes in 'row' that are part of the
+                parent table's primary key are NOT checked, and existence is not checked. This is a way to check a new
+                entry in the part table without first inserting the corresponding entry in the master table. Default is
+                False.
+
+        Raises:
+            Exception: If the proposed entry already exists in table, or if entry is missing any attribute value.
+            ValueError: If any attribute value is invalid.
+        """
+        # we never check existence when the table uses an auto-incrementing PK!
+        if not (ti.has_auto_primary_key(table_id) or omit_master):
+            if DataBaseManager.row_exists(table_id, row):
+                raise Exception("Attempt to add a new entry with an existing primary key")
+        table_info = ti.table_info_for(table_id)
+        for attr_id, attr_info in table_info.attributes.items():
+            if attr_info.type != AttrTypeEnum.AUTO:
+                if not (omit_master and table_info.parent and (attr_id in ti.primary_key_of(table_info.parent))):
+                    if attr_id not in row:
+                        raise Exception(f"Missing attribute: {attr_id}")
+                DataBaseManager._validate_attribute_value(table_id, attr_id, row[attr_id])
+            elif attr_id in row:
+                row.pop(attr_id, None)
+
+    @staticmethod
+    def _validate_attribute_value(table_id: DBTable, attr_id: str, attr_value: AttributeValue) -> None:
+        """Validate the proposed value for an attribute in the underlying table.
+
+        Validation of the attribute value depends on the attribute type, AttrTypeEnum:
+            TEXT: The value must satisfy any regular expression defined for the attribute (if any), as well as the
+                min/max restriction on text length.
+            FLOAT: Can be str, int or float, but a string value must be parsable as a float. If string, it must
+                satisfy min/max restriction on text length.
+            INT: Can be str or int, but a string value must be parsable as an integer. If string, it must satisfy
+                min/max restriction on text length.
+            DATE: Can be a date or string. A string value must satisfy the format 'YYYY-MM-DD'. The date must be
+                after 12/31/1899 and before today.
+            BOOL: Can be a number, or boolean. A non-zero number is considered True.
+            ENUM: Value must be one of the valid options for the attribute.
+            BLOB: The value must be a Numpy array or a bytes array. Its value is not otherwise checked.
+            FKEY: The attribute value must identify an existing entity in the parent table.
+            AUTO: An auto-incrementing PK. This type of attribute is ignored. Its value is set by the database on
+                insert, NOT by the user.
+
+        Args:
+            table_id: ID of the database table.
+            attr_id: The attribute ID.
+            attr_value: The proposed value for the attribute.
+
+        Raises:
+            ValueError: If the proposed attribute value is not valid in any way. The error description is intended to
+            provide a user-facing description of the problem.
+        """
+        table_info = ti.table_info_for(table_id)
+        attr_info = table_info.attributes[attr_id]
+        if not isinstance(attr_value, (str, bool, int, float, date, np.ndarray, bytes)):
+            raise ValueError(f"Attribute value is an unsupported data type: '{attr_info.label}'")
+        if attr_info.type == AttrTypeEnum.AUTO:
+            return
+        if attr_info.pkey:
+            if isinstance(attr_value, str) and (attr_value == ""):
+                raise ValueError(f"Missing value for primary key attribute: '{attr_info.label}'")
+        if attr_info.type == AttrTypeEnum.FKEY:
+            if not DataBaseManager.attribute_exists(attr_info.fkey_table, attr_info.fkey_id, attr_value):
+                raise ValueError(f"Missing foreign key: '{attr_info.label}' = '{str(attr_value)}'")
+        elif attr_info.type == AttrTypeEnum.ENUM:
+            if not (attr_value in attr_info.options):
+                raise ValueError(f"Invalid option for '{attr_info.label}': '{str(attr_value)}'")
+        elif attr_info.type == AttrTypeEnum.DATE:
+            if not check_date(attr_value):
+                raise ValueError(f"'{attr_info.label}': Date is invalid, earlier than 1900-01-01, or in the future.")
+        elif attr_info.type == AttrTypeEnum.FLOAT:
+            try:
+                num_value = float(attr_value)
+            except(TypeError, ValueError):
+                raise ValueError(f"'{attr_info.label}' = '{attr_value}' cannot be parsed as a floating-point value")
+            ti.validate_numeric_attribute_value(table_id, attr_id, num_value)
+        elif attr_info.type == AttrTypeEnum.INT:
+            try:
+                num_value = int(attr_value)
+            except(TypeError, ValueError):
+                raise ValueError(f"'{attr_info.label}' = '{attr_value}' cannot be parsed as an integer")
+            ti.validate_numeric_attribute_value(table_id, attr_id, num_value)
+        elif attr_info.type == AttrTypeEnum.BOOL:
+            if not isinstance(attr_value, (int, float, bool)):
+                raise ValueError(f"'{attr_info.label}' must be a number or boolean value")
+        elif attr_info.type == AttrTypeEnum.BLOB:
+            if not isinstance(attr_value, (np.ndarray, bytes)):
+                raise ValueError(f"'{attr_info.label}' must be a Numpy array or byte string")
+        else:  # 'text' or 'email'
+            if not isinstance(attr_value, str):
+                raise ValueError(f"'{attr_info.label}': Value must be a string")
+            if attr_info.textrange:
+                min_len, max_len = attr_info.textrange
+                if (len(attr_value) < min_len) | (len(attr_value) > max_len):
+                    raise ValueError(f"'{attr_info.label}': Value must be {min_len}-{max_len} characters long.")
+            if attr_info.regex:
+                if re.fullmatch(attr_info.regex, attr_value) is None:
+                    raise ValueError(f"Invalid value for {attr_info.label}: {attr_info.regex_hint}")
 
     def update_xref_table(self, map_table_id: DBTable, src_pk: str, src_pk_val: int,
                           dst_pk: str, map_set: Set[int], log: bool = True) -> Optional[str]:
@@ -438,11 +724,11 @@ class DataBaseManager:
         """
         error_msg = None
         try:
-            if not (map_table_id in self._table_class_map):
+            if not (map_table_id in _table_map):
                 raise Exception(f"Unrecognized database table ID: {str(map_table_id)}")
             if not map_table_id.is_mapping_table():
                 raise Exception(f"Table is not a cross-reference table!: {str(map_table_id)}")
-            map_table: dj.Table = self._table_class_map[map_table_id]
+            map_table: dj.Table = _table_map[map_table_id]
             xref_rows = [{src_pk: src_pk_val, dst_pk: value} for value in map_set]
             with map_table.connection.transaction:
                 (map_table & {src_pk: src_pk_val}).delete(verbose=False)
@@ -762,7 +1048,9 @@ class DataBaseManager:
                     if worker.ephys_info and not ephys_info:
                         error_msg = "Missing electrophysiology metadata for session."
                     else:
-                        error_msg = DataBaseManager._check_session_metadata(session_info, ephys_info)
+                        error_msg = DataBaseManager.check_row(DBTable.SESSION, session_info)
+                        if ephys_info and not error_msg:
+                            error_msg = DataBaseManager.check_row(DBTable.SESSION_EPHYS, ephys_info, True)
                     if not error_msg:
                         for k in worker.session_info.keys():
                             worker.session_info[k] = session_info[k]
@@ -775,72 +1063,6 @@ class DataBaseManager:
             else:
                 error_msg = f"In-progress commit task {task_id} not found on server. Start over."
         return error_msg
-
-    @staticmethod
-    def _check_session_metadata(session: Dict[str, AttributeValue],
-                                ephys: Optional[Dict[str, AttributeValue]]) -> Optional[str]:
-        """
-        Validate the proposed metadata for an experiment session to be committed to the database.
-        TODO: HACK - We can't use code in table_views.py, because it results in a circular import error
-
-        Args:
-            session: The proposed row entry in the Session database table (dictionary of attribute ID-value pairs).
-            ephys: The proposed row entry in the Session.EPhys part table. None for behavior-only sessions.
-
-        Returns:
-            None if metadata is valid, else a brief user-facing error description.
-        """
-        for key in ['experimenter', 'subj_id', 'session_date', 'session_sfx', 'rig_id', 'study_id', 'session_notes']:
-            if key not in session:
-                return f"Invalid entry: Missing attribute '{key}'"
-        if not DataBaseManager().attribute_exists(DBTable.USER, 'username', session['experimenter']):
-            return f"Invalid entry: Missing foreign key: 'experimenter' = {session['experimenter']}"
-        if not DataBaseManager().attribute_exists(DBTable.SUBJECT, 'subj_id', session['subj_id']):
-            return f"Invalid entry: Missing foreign key: 'subj_id' = {session['subj_id']}"
-        if not DataBaseManager().attribute_exists(DBTable.RIG, 'rig_id', session['rig_id']):
-            return f"Invalid entry: Missing foreign key: 'rig_id' = {session['rig_id']}"
-        try:
-            session['study_id'] = int(session['study_id'])
-        except (TypeError, ValueError):
-            return "Invalid entry: Foreign key 'study_id' must be an integer"
-        if not DataBaseManager().attribute_exists(DBTable.STUDY, 'study_id', session['study_id']):
-            return f"Invalid entry: Missing foreign key: 'study_id' = {session['study_id']}"
-        if not check_date(session['session_date']):
-            return f"Invalid entry: 'session_date' = {session['session_date']}: Date is invalid, earlier" \
-                   f" than 1900-01-01, or in the future."
-        try:
-            num_value = int(session['session_sfx'])
-            if num_value < 0 or num_value > 9:
-                return "Invalid entry: 'session_sfx' must lie in [0..9]"
-        except(TypeError, ValueError):
-            return f"Invalid entry: 'session_sfx' = '{str(session['session_sfx'])}' cannot be parsed as an integer"
-
-        session_pk = {key: session[key] for key in ['experimenter', 'subj_id', 'session_date', 'session_sfx']}
-        if DataBaseManager().num_table_rows(DBTable.SESSION, restriction=session_pk) != 0:
-            return "Invalid entry: Duplicate session key!"
-
-        if not ephys:
-            return None
-        for key in ['ephys_src', 'probe_type', 'sampling_rate', 'probe_x', 'probe_y', 'probe_depth', 'ba_id']:
-            if key not in ephys:
-                return f"Invalid entry: Missing attribute '{key}'"
-        ephys_sources = ['Omniplex', 'Omniplex clips', 'Plexon MAP', 'Maestro Waveform', 'Maestro Spike Ch']
-        if ephys['ephys_src'] not in ephys_sources:
-            return f"Invalid entry: Unsupported option for 'ephys_src': '{str(ephys['ephys_src'])}'"
-        if ephys['probe_type'] not in ['single', '32-channel', 'other']:
-            return f"Invalid entry: Unsupported option for 'probe_type': '{str(ephys['probe_type'])}'"
-        for key in ['sampling_rate', 'probe_x', 'probe_y', 'probe_depth']:
-            try:
-                float(ephys[key])
-            except(TypeError, ValueError):
-                return f"Invalid entry: '{key}' = '{ephys[key]}' cannot be parsed as a floating-point value"
-        try:
-            ephys['ba_id'] = int(ephys['ba_id'])
-        except (TypeError, ValueError):
-            return "Invalid entry: Foreign key 'ba_id' must be an integer"
-        if not DataBaseManager().attribute_exists(DBTable.BRAIN_AREA, 'ba_id', ephys['ba_id']):
-            return f"Invalid entry: Missing foreign key: 'ba_id' = {ephys['ba_id']}"
-        return None
 
     def cancel(self, task_id: str) -> bool:
         """
@@ -1163,7 +1385,6 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                 # subject ID from the ZIP archive file name or a Maestro data file name. If there already exists a
                 # session or session on the same date for the same subject and experimenter, adjust the session suffix
                 # accordingly.
-                # TODO: This is kind of a HACK because we have to know a lot about the underlying tables here
                 self.session_info = dict()
                 user_choices = DataBaseManager().fetch_attribute_values(DBTable.USER, 'username')
                 self.session_info['experimenter'] = user_choices[0]
@@ -1378,6 +1599,7 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
 
                 trial_entry: Dict[str, Any] = dict(
                     session_key,
+                    proto_hash=t_info.proto_hash,
                     trial_idx=(num_inserted + 1),
                     trial_header=pickle.dumps(data_file.header),
                     trial_filename=trial_filename,
@@ -1386,8 +1608,7 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                     trial_success=((data_file.header.flags & maestro.FLAG_REWARD_EARNED) != 0),
                     trial_rewarded=((data_file.header.flags & maestro.FLAG_REWARD_GIVEN) != 0),
                     trial_rew1=data_file.header.reward_len1_ms,
-                    trial_rew2=data_file.header.reward_len2_ms,
-                    proto_hash=t_info.proto_hash
+                    trial_rew2=data_file.header.reward_len2_ms
                     )
 
                 # compute trial start time relative to start of first trial in session -- if possible
@@ -1423,6 +1644,7 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                         response = np.array(data_file.ai_data[ai_channel]) * scale
                         response_entry = dict(
                             session_key,
+                            proto_hash=t_info.proto_hash,
                             trial_idx=(num_inserted + 1),
                             response_id=response_id,
                             response_trace=response
@@ -1442,6 +1664,7 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                         spikes_in_trial = (spikes_in_trial - t_info.omniplex_start) * maestro_omniplex_time_scaling
                         response_entry = dict(
                             session_key,
+                            proto_hash=t_info.proto_hash,
                             trial_idx=(num_inserted + 1),
                             unit_id=(i + 1),
                             spike_times=spikes_in_trial
@@ -1455,6 +1678,7 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                         event_times = np.array(data_file.events[di_channel]) * 0.001 + data_file.trial.record_start()
                         event_entry = dict(
                             session_key,
+                            proto_hash=t_info.proto_hash,
                             trial_idx=(num_inserted + 1),
                             event_ch=di_channel,
                             event_times=event_times
