@@ -897,8 +897,7 @@ class _MappingSubPanel(_BasePanel):
             non-existent entity in either the source or destination table; database error.
 
         """
-        error_msg = DataBaseManager().update_xref_table(self._map_table_id, self._src_pk, src_pk_val,
-                                                        self._dst_pk, assoc_entities)
+        error_msg = DataBaseManager().update_mapping_table(self._map_table_id, src_pk_val, assoc_entities)
         return error_msg if error_msg else ""
 
 

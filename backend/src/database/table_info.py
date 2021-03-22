@@ -1,7 +1,17 @@
 """
 table_info.py: Descriptive information about the tables in the Lisberger lab database.
 
+This module contains information about the tables defined in the Lisberger lab's database schema that help define how
+their contents are displayed and edited on the web front-end. The module does not reference the DataJoint table classes
+directly because we intend for all access/manipulation of database content to go through the manager.py module.
 
+    DBTable - An enumeration of all defined tables in the database.
+    AttrTypeEnum - An enumeration of the different types of attributes employed in the table definitions.
+    AttrInfo - A data container that holds descriptive information about a table attribute.
+    TableInfo - A data container that holds descriptive information about a database table.
+
+A "private" module global defines the TableInfo for each database table, and various "public" module methods provide
+access to the table information. All of this information is intended to be "read-only".
 
 @author: sruffner
 @created: 16mar2021
@@ -89,6 +99,7 @@ def validate_numeric_attribute_value(table_id: DBTable, attr_id: str, value: Uni
     """
     Validate the value of a numeric (int or float) attribute of a table in the Lisberger lab database. Currently, the
     only enforced restriction on a numeric attribute is that the suffix for an experiment session must lie in [0..9].
+    No exception is raised if this method is invoked on any other table attribute.
 
     Args:
         table_id: ID of database table.
@@ -131,6 +142,14 @@ class DBTable(DocEnum):
     def is_mapping_table(self) -> bool:
         """ Return True for a cross-reference table. """
         return _table_info[self].is_mapping_table
+
+    def source_key_for_mapping_table(self) -> Optional[str]:
+        """ Return source key attribute ID for a mapping table, or None if not a mapping table. """
+        return primary_key_of(self)[0] if self.is_mapping_table() else None
+
+    def destination_key_for_mapping_table(self) -> Optional[str]:
+        """ Return destination key attribute ID for a mapping table, or None if not a mapping table. """
+        return primary_key_of(self)[1] if self.is_mapping_table() else None
 
     def is_part_table(self) -> bool:
         """ Return True for a part table. """

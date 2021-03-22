@@ -1,7 +1,85 @@
 """
 manager.py: Manage access to the Lisberger lab database and backing repository.
 
-TODO: COMPLETE DESCRIPTION - DataBaseManager now handles session commits and all database operations...
+This module is the heart of the backend server for the Lisberger lab database web portal. The Dash-based front-end
+relies on this module to access and make any changes to the database and its backing repository.
+
+All database operations go through the singleton DataBaseManager object defined in this module: fetching contents,
+adding or removing rows from any database table, uploading and committing an experiment session's worth of data to the
+database, recording all changes in log file(s) in the backing repository so that the database can be reconstructed in
+the event of a catastrophic failure.
+
+==> Session commits.
+
+Committing an experiment session to the database requires a multi-stage, user-interactive procedure. Multiple clients
+could start a session commit workflow at the same time, so DataBaseManager manages a limited pool of worker threads
+that handle long-running tasks in the commit procedure: extracting files from the uploaded session data ZIP archive,
+processing the data files to collect the information that is stored in the database, and finally committing the trial
+behavioral and neural data to the database. As a shared resource, it maintains no state that is specific to a particular
+session commit in progress. Rather, per-commit state information is maintained by the worker thread handling the commit
+process. For details see the worker thread class ProcessArchiveThread.
+
+The commit process will take an extended period of time, and the user could leave and return to the process for any
+number of reasons. On the server side, uncommitted session data will be eventually expunged by a daemon. Thus, every
+client request to the server must include a "task ID" that identifies the particular commit process to which that
+request applies. The task ID is a string 'session-<uuid>', '<uuid>' is a random universally unique identifier assigned
+to the commit task, converted to a string in standard form. When the client initiates a new commit task, the server
+generates the task ID and creates a "staging" directory -- $DJDEV_ROOT_REPO/staging/<task_id> -- to which the session
+data archive is uploaded and then processed.
+
+To commit data from an experiment to the Lisberger lab database, the researcher must compress all of the session data
+files into a single ZIP archive. For those experiments that include electrophysiological recordings with the Omniplex
+system, the following data files must be present in the archive.
+
+    1) All Maestro trial data files.
+    2) A single pickle file (other formats may be supported in the future) containing the results of the researcher's
+       own spike-sorting analysis.
+    3) One or more Omniplex PL2 files containing the original Omniplex-recorded data from which the sorted spike trains
+       were derived. (We hope to support the older Plexon MAP files in the future.)
+
+The pickle file is identified by the extension '.pickle' or '.pkl', and there must be only one such file in the archive.
+It must contain a single dictionary with 2 or 3 keys: 'channel' is a List[str] where the N-th element is the name of the
+Omniplex analog source channel (wide-band "WB" or narrow-band "SPKC" only!) on which a neural unit was recorded,
+'filename' is a List[str] where the N-the element is the name of the PL2 file in which the neural unit was recorded
+(this field must be present ONLY if the spike-sorted units were derived from multiple PL2 files, all of which must be in
+the archive), and 'spiketimes' is a List[] where the N-th element is a Numpy array containing the spike timestamps for
+that neural unit. The float-valued timestamps are in seconds since the start of the Omniplex recording.
+
+Here is a summary of the commit process:
+
+    Stage 1: Session commit not started. Client must send a request to start a commit. In response, the server generates
+        a task ID, creates the staging directory for the commit, and spawns a worker thread dedicated to it.
+    Stage 2: Upload and pre-processing of session data archive. The "chunked" file upload is handled by a dash-uploader
+        component, independent of the worker thread, which merely monitors the upload progress by checking the contents
+        of the staging directory. If the upload fails to start or stalls for more than 10 minutes, the worker thread
+        deletes the staging directory and terminates. Once the ZIP archive has been uploaded, the worker thread begins
+        pre-processing its contents. All Maestro trial data files are examined to find the set of trial protocols
+        presented during the experiment session. The pickle file containing information about identified neural units is
+        processed. Any and all PL2 files are processed to get the Omniplex start and stop timestamps for every trial
+        data file in the archive, and to calculate metrics (SNR, firing rate, 10ms average spike waveform template) for
+        each identified neural unit. The results are stored in a separate pickle file, 'preprocessing.pickle', in the
+        staging directory. General session information such as session date, subject, etc may be "guessed" by analyzing
+        the session data. During pre-processing, the client merely polls the server for progress updates and displays
+        new progress messages to the user.
+    Stage 3: Review and edit. In this stage, the user reviews the results of the previous stage and provides some
+        additional information required to commit the session to the database (info for the Session table and its
+        Session.EPhys and Session.Neuron part tables). Client requests retrieve information to be presented on the front
+        end, such as trial protocols and identified neural units. On the server side, the worker thread is essentially
+        paused waiting for the user's approval to complete the commit process. To proceed to the final stage, any
+        missing session metadata must be supplied by the user.
+    Stage 4: Commit. In this stage, the worker completes the session commit: (1) the ZIP archive and other supporting
+        files are moved from the temporary staging directory to a permanent place within the backing repository; (2) an
+        entry for the new session is added to the Session database table (along with appropriate entries in the part
+        tables Session.EPhys and Session.Neuron); (3) any new trial protocols are added to the TrialProtocol table; and
+        (4) all trials are added to the Trial table (per-trial behavioral and response traces). (5) Lastly, the session
+        commit is recorded in the database updates log and the staging directory is removed. In this stage, the client
+        merely polls the server for progress updates and displays new progress messages to the user.
+
+In any of the stages 2-4, the client may issue a "cancel" command -- in which case DataBaseManager terminates the worker
+thread, deletes the staging directory (or fixes the database and repository if cancelled in the middle of stage 4), and
+both server and client return to stage 1.
+
+==> Logging all database changes in the backup repository.
 
 The database log file is a Python pickle file that contains a chronological sequence of database entries logging all
 changes to the database since inception. Then, to rebuild the database from scratch, we would simply process each entry
@@ -20,13 +98,10 @@ the nature of these tables and the two tables they "associate": the associated t
 auto-incrementing integer keys. The mapping table has a primary key consisting of the those two foreign keys and nothing
 else, and the table has no non-primary attributes.
 
-TODO: Need to update how we log a mapping table update. Since an update only applies to one src_pk at a time, and all
- mappings for that src_pk are deleted before doign the update, there's a better way to log it.
-
 Summary of the log entry types:
     1) Add row to manual-entry table: {'op': 'add', 'table': DBTable, 'row': Dict}
     2) Delete from manual-entry table: {'op': 'delete', 'table': DBTable, 'restriction': Dict}
-    3) Mapping table update: {'op': 'mapping', 'table': DBTable, 'map_rows': Dict}
+    3) Mapping table update: {'op': 'mapping', 'table': DBTable, 'src_pk': int, 'dst_pks': Set[int]}
     4) Session commit: {'op': 'session', 'username': str, 'subj_id': str, 'date': 'YYYY-MM-DD', 'suffix': int}
 
 @author: sruffner
@@ -142,7 +217,7 @@ class DataBaseManager:
             { "table": "User", "entry": {"username": "sruffner", "full_name": "Scott A Ruffner",
             "contact_email": "sruffner@srscicomp.com", "role": "Administrator"}
 
-        THIS METHOD IS INTENDED ONLY FOR USE DURING DEVELOPMENT, so that we can populate some the manual tables with
+        THIS METHOD IS INTENDED ONLY FOR USE DURING DEVELOPMENT, so that we can populate some of the manual tables with
         some entries after dropping and recreating the database.
 
         The entries listed in the seed file are assumed to be presented in a valid order. For example, a subject is
@@ -206,13 +281,13 @@ class DataBaseManager:
             error_msg = f"Failed to post 'delete' entry to database update log: {str(err)}"
         return error_msg
 
-    def _log_mapping_table_update(self, table_id: DBTable, map_rows: List[Dict[str, int]]) -> Optional[str]:
+    def _log_mapping_table_update(self, table_id: DBTable, src_pk_val: int, map_set: Set[int]) -> Optional[str]:
         error_msg: Optional[str] = None
         try:
             with self._log_lock:
                 DataBaseManager._ensure_logs_directory_exists()
                 with open(DataBaseManager._log_file_path(), 'ab') as file:
-                    pickle.dump({'op': 'mapping', 'table': table_id, 'map_rows': map_rows}, file)
+                    pickle.dump({'op': 'mapping', 'table': table_id, 'src_pk': src_pk_val, 'dst_pks': map_set}, file)
         except Exception as err:
             error_msg = f"Failed to post 'mapping' entry to database update log: {str(err)}"
         return error_msg
@@ -702,8 +777,8 @@ class DataBaseManager:
                 if re.fullmatch(attr_info.regex, attr_value) is None:
                     raise ValueError(f"Invalid value for {attr_info.label}: {attr_info.regex_hint}")
 
-    def update_xref_table(self, map_table_id: DBTable, src_pk: str, src_pk_val: int,
-                          dst_pk: str, map_set: Set[int], log: bool = True) -> Optional[str]:
+    def update_mapping_table(self, map_table_id: DBTable, src_pk_val: int, map_set: Set[int],
+                             log: bool = True) -> Optional[str]:
         """
         Update an associative mapping stored in a cross-reference table in the laboratory database, and log the change
         in the repository database updates log. If the log update fails, any changes are rolled back to maintain
@@ -711,12 +786,10 @@ class DataBaseManager:
 
         Args:
             map_table_id: ID of the cross-reference table.
-            src_pk: Source table's primary key attribute ID
             src_pk_val: Integer value identifying a row in the source table for the cross-reference. Must exist in
                 database or operation will fail.
-            dst_pk: Destination table's primary key attribute ID
-            map_set: Set of integer values identifying all rows in the destination table that map to the specified
-                source entity. All must exist in the destination table or the operation will fail.
+            map_set: Set of integer primary key values identifying all rows in the destination table that map to the
+                specified source entity. All must exist in the destination table or the operation will fail.
             log: If True, the change is logged in the backup updates log. Default = True.
 
         Returns:
@@ -729,12 +802,15 @@ class DataBaseManager:
             if not map_table_id.is_mapping_table():
                 raise Exception(f"Table is not a cross-reference table!: {str(map_table_id)}")
             map_table: dj.Table = _table_map[map_table_id]
+            src_pk = map_table_id.source_key_for_mapping_table()
+            dst_pk = map_table_id.destination_key_for_mapping_table()
             xref_rows = [{src_pk: src_pk_val, dst_pk: value} for value in map_set]
             with map_table.connection.transaction:
                 (map_table & {src_pk: src_pk_val}).delete(verbose=False)
-                map_table.insert(xref_rows)
+                if len(xref_rows) > 0:
+                    map_table.insert(xref_rows)
                 if log:
-                    err_msg = self._log_mapping_table_update(map_table_id, xref_rows)
+                    err_msg = self._log_mapping_table_update(map_table_id, src_pk_val, map_set)
                     if err_msg:
                         raise Exception(err_msg)
         except Exception as err:
