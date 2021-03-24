@@ -364,9 +364,9 @@ class TrialProducer:
 class Trial(dj.Imported):
     definition = """
     -> Session                          # The experimental session during which the trial was presented
-    -> TrialProtocol                    # trial protocol (aka, Maestro trial definition)
     trial_idx : int unsigned            # Indicates order of presentation during session (starts at 1)
     ---
+    -> TrialProtocol                    # trial protocol (aka, Maestro trial definition)
     trial_header : blob                 # Original data file header (in opaque format for use by backend server)
     trial_filename : varchar(50)        # Maestro data filename (ends in 4-digit extension like .0001)
     trial_dur : int unsigned            # recorded duration of trial in milliseconds

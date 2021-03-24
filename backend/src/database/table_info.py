@@ -78,6 +78,7 @@ def attributes_of(table_id: DBTable) -> List[str]:
 def primary_key_of(table_id: DBTable) -> List[str]:
     """
     Get the IDs of the attributes comprising the primary key of the specified table in the Lisberger lab database.
+    However, for part tables, it excludes the attributes that comprise the parent table's primary key.
 
     Raises:
         KeyError: If table_id is invalid
@@ -154,6 +155,24 @@ class DBTable(DocEnum):
     def is_part_table(self) -> bool:
         """ Return True for a part table. """
         return not (_table_info[self].parent is None)
+
+
+@dataclass(frozen=True)
+class Column:
+    """
+    A column in the user-facing presentation of a database table in a Dash DataTable -- characterized by these fields:
+        'id' - (str) The ID of the attribute displayed in the column
+
+        'label' - (str) User-facing label that serves as the column header.
+
+        'width' - (str) The suggested column width in pixels -- eg, '50px'.
+
+        'is_markdown' - (bool) Flag indicating if attribute value is formatted as HTML markdown rather than plain text.
+    """
+    id: str
+    label: str
+    width: str
+    is_markdown: bool = False
 
 
 AttributeValue = Union[str, int, float, bool, date, np.ndarray, bytes]
@@ -468,8 +487,8 @@ _table_info: Dict[DBTable, TableInfo] = {
             'subj_id': AttrInfo(AttrTypeEnum.FKEY, 'Subject ID', True, DBTable.SUBJECT, 'subj_id'),
             'session_date': AttrInfo(AttrTypeEnum.FKEY, 'Session Date', True, DBTable.SESSION, 'session_date'),
             'session_sfx': AttrInfo(AttrTypeEnum.FKEY, 'Session Suffix', True, DBTable.SESSION, 'session_sfx'),
-            'proto_hash': AttrInfo(AttrTypeEnum.FKEY, 'Protocol ID', True, DBTable.TRIAL_PROTOCOL, 'proto_hash'),
             'trial_idx': AttrInfo(AttrTypeEnum.INT, 'Trial Index', True, None, None, None, '50px'),
+            'proto_hash': AttrInfo(AttrTypeEnum.FKEY, 'Protocol ID', False, DBTable.TRIAL_PROTOCOL, 'proto_hash'),
             'trial_header': AttrInfo(AttrTypeEnum.BLOB, 'Header', False),
             'trial_filename': AttrInfo(AttrTypeEnum.TEXT, 'File Name', False),
             'trial_dur': AttrInfo(AttrTypeEnum.INT, 'Recorded Duration (ms)', False),

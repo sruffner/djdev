@@ -34,27 +34,6 @@ from database.manager import DataBaseManager
 
 
 @dataclass(frozen=True)
-class _Column:
-    """
-    A column in the user-facing presentation of a database table in a _BasePanel -- characterized by these fields:
-        'id' - (str) The ID of the corresponding table attribute.
-
-        'label' - (str) User-facing label that serves as the column header.
-
-        'width' - (str) The suggested column width in pixels -- eg, '50px'.
-
-        'is_markdown' - (bool) Flag indicating if attribute value is formatted as HTML markdown rather than plain text.
-
-    By convention, for a table with an 'auto' attribute, that attribute should not be exposed in a table column, since
-    it is not intended for user-facing display and is not user-specified.
-    """
-    id: str
-    label: str
-    width: str
-    is_markdown: bool = False
-
-
-@dataclass(frozen=True)
 class _RowAlias:
     """
     An alternative representation of a row in a database table that is intended for use when selecting entities from
@@ -314,7 +293,7 @@ class _BasePanel:
         )
         return data_table
 
-    def _columns(self) -> List[_Column]:
+    def _columns(self) -> List[ti.Column]:
         """
         Helper method for _data_table() prepares the list of columns included in a Dash DataTable rendering of the
         database table displayed in this panel.
@@ -332,10 +311,10 @@ class _BasePanel:
             The list of displayed table columns.
         """
         table_info = ti.table_info_for(self._table_id)
-        out: List[_Column] = list()
+        out: List[ti.Column] = list()
         for attr_id, attr_info in table_info.attributes.items():
             if attr_info.type not in [ti.AttrTypeEnum.AUTO, ti.AttrTypeEnum.BLOB]:
-                out.append(_Column(attr_id, attr_info.label, attr_info.col_width))
+                out.append(ti.Column(attr_id, attr_info.label, attr_info.col_width))
         return out
 
     def _rows(self) -> List[Dict[str, ti.AttributeValue]]:
@@ -958,7 +937,7 @@ class SubjectImplantPanel(_BasePanel):
         layout_cmpts.insert(0, html.H5(f"{self.tab_label()}"))
         return layout_cmpts
 
-    def _columns(self) -> List[_Column]:
+    def _columns(self) -> List[ti.Column]:
         """  Overridden to hide the 'subj_id' attribute (the first column). """
         cols = super()._columns()
         cols.pop(0)
@@ -1039,13 +1018,13 @@ class BrainRegionPanel(_BasePanel):
         subpanels = [BrainRegionPanel.NeuronTypePanel(app)]
         super().__init__(app, ti.DBTable.BRAIN_AREA, 'brain', subpanels)
 
-    def _columns(self) -> List[_Column]:
+    def _columns(self) -> List[ti.Column]:
         """
         Override excludes a column for the auto-incrementing primary key and adds a column that displays the
         neuron types associated with the brain region.
         """
-        return [_Column('ba_name', 'Brain Region', '300px', False),
-                _Column('assoc_ntypes', 'Associated Neuron Types', '300px', False)]
+        return [ti.Column('ba_name', 'Brain Region', '300px', False),
+                ti.Column('assoc_ntypes', 'Associated Neuron Types', '300px', False)]
 
     def _rows(self) -> List[Dict[str, ti.AttributeValue]]:
         """ Override appends an additional column reflecting the neuron types associated with each brain region. """
@@ -1081,16 +1060,16 @@ class StudyPanel(_BasePanel):
         subpanels = [StudyPanel.PublicationPanel(app), StudyPanel.KeywordPanel(app)]
         super().__init__(app, ti.DBTable.STUDY, 'study', subpanels)
 
-    def _columns(self) -> List[_Column]:
+    def _columns(self) -> List[ti.Column]:
         """
         Overridden to add a column indicating how many publications are associated with the study. Also, the
         study description column is labelled 'Description - Keywords', and the keywords related to a study are listed
         in the tooltip for each description cell.
         """
-        return([_Column('study_title', 'Project Title', '200px', False),
-                _Column('study_lead', 'Prj Lead', '100px', False),
-                _Column('study_desc', 'Description - Keywords', '700px', False),
-                _Column('n_pubs', 'Pubs', '50px', False)])
+        return([ti.Column('study_title', 'Project Title', '200px', False),
+                ti.Column('study_lead', 'Prj Lead', '100px', False),
+                ti.Column('study_desc', 'Description - Keywords', '700px', False),
+                ti.Column('n_pubs', 'Pubs', '50px', False)])
 
     def _rows(self) -> List[Dict[str, ti.AttributeValue]]:
         """
@@ -1144,14 +1123,14 @@ class StudyPanel(_BasePanel):
         def __init__(self, app: dash.Dash):
             super().__init__(app, ti.DBTable.STUDY_TO_PUB, 'pub')
 
-        def _columns(self) -> List[_Column]:
+        def _columns(self) -> List[ti.Column]:
             """"
             Overridden to hide DOI column, replacing it with a 'link' column that uses HTML markdown to present the DOI
             as a link to the online publication. This requires that the 'link' column be tagged for markdown
             presentation in the Dash DataTable.
             """
             cols = super()._columns()
-            cols[1] = _Column('link', "", '10px', True)
+            cols[1] = ti.Column('link', "", '10px', True)
             return cols
 
         def _rows(self) -> List[Dict[str, ti.AttributeValue]]:

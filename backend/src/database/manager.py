@@ -1675,8 +1675,8 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
 
                 trial_entry: Dict[str, Any] = dict(
                     session_key,
-                    proto_hash=t_info.proto_hash,
                     trial_idx=(num_inserted + 1),
+                    proto_hash=t_info.proto_hash,
                     trial_header=pickle.dumps(data_file.header),
                     trial_filename=trial_filename,
                     trial_dur=data_file.header.num_scans_saved - 1,
@@ -1720,7 +1720,6 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                         response = np.array(data_file.ai_data[ai_channel]) * scale
                         response_entry = dict(
                             session_key,
-                            proto_hash=t_info.proto_hash,
                             trial_idx=(num_inserted + 1),
                             response_id=response_id,
                             response_trace=response
@@ -1740,7 +1739,6 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                         spikes_in_trial = (spikes_in_trial - t_info.omniplex_start) * maestro_omniplex_time_scaling
                         response_entry = dict(
                             session_key,
-                            proto_hash=t_info.proto_hash,
                             trial_idx=(num_inserted + 1),
                             unit_id=(i + 1),
                             spike_times=spikes_in_trial
@@ -1754,7 +1752,6 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                         event_times = np.array(data_file.events[di_channel]) * 0.001 + data_file.trial.record_start()
                         event_entry = dict(
                             session_key,
-                            proto_hash=t_info.proto_hash,
                             trial_idx=(num_inserted + 1),
                             event_ch=di_channel,
                             event_times=event_times
