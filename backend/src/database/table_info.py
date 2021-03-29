@@ -79,7 +79,8 @@ def primary_key_of(table_id: DBTable) -> List[str]:
     """
     Get the IDs of the attributes comprising the primary key of the specified table in the Lisberger lab database.
     However, for part tables, it excludes the attributes that comprise the parent table's primary key.
-
+    Args:
+        table_id: Database table ID
     Raises:
         KeyError: If table_id is invalid
     """

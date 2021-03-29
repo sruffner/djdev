@@ -510,7 +510,7 @@ class _SessionCommitter:
                 for i, attr_id in enumerate(ti.attributes_of(ti.DBTable.SESSION)):
                     session_info[attr_id] = args[i]
                 if session_builder.get_ephys_info(task_id) is not None:
-                    ofs = len(session_info.keys())
+                    ofs = len(session_info.items())
                     ephys_info = dict()
                     for i, attr_id in enumerate(ti.attributes_of(ti.DBTable.SESSION_EPHYS)):
                         ephys_info[attr_id] = args[ofs+i]

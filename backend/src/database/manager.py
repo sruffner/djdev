@@ -113,6 +113,7 @@ from __future__ import annotations  # Needed in Python 3.7y to type-hint a metho
 import os
 import pickle
 import re
+import sys
 from copy import deepcopy
 import dash_bootstrap_components as dbc
 from dataclasses import dataclass
@@ -452,25 +453,30 @@ class DataBaseManager:
         return [(v, v) for v in fkey_values]
 
     @staticmethod
-    def num_table_rows(table_id: DBTable, restriction: Optional[Dict[str, AttributeValue]] = None) -> int:
+    def num_table_rows(table_id: DBTable,
+                       restriction: Optional[List[str], Dict[str, AttributeValue]] = None) -> int:
         """
         Get the current number of entities in the specified database table.
 
         Args:
             table_id: ID of database table.
-            restriction: If not None, this dictionary restricts the query to those rows of the table that contain the
-                attribute ID-value pairs specified in the dictionary.
+            restriction: If not None, then this argument specifies restriction conditions -- either as a dictionary of
+                attribute ID-value pairs, or as a list of string conditions (see DataJoint docs). Either way, the result
+                reflects the number of rows in the table that satisfy ALL conditions. The restriction conditions are not
+                checked for validity.
 
         Returns:
-            Number of rows in table. Returns 0 if unable to access database, if specified table does not exist, or if
-            a restriction condition is specified that includes an attribute not defined on the table (or if the table
-            has no rows satisfying that condition).
+            Number of rows in the table that satisfy the conditions specified (if any). Returns 0 if unable to access
+            database, if specified table does not exist, or if a restriction condition is specified that includes an
+            attribute not defined on the table (or if the table has no rows satisfying that condition).
         """
         try:
             table: dj.Table = _table_map[table_id]
-            query = (table & restriction) if restriction else table
+            query = (table & restriction) if isinstance(restriction, dict) else \
+                ((table & dj.AndList(restriction)) if isinstance(restriction, list) else table)
             n = len(query)
-        except Exception:
+        except Exception as e:
+            print(f"====> DEBUG: restriction = {restriction}, error={str(e)}", file=sys.stdout, flush=True)  # TODO
             n = 0
         return n
 
@@ -510,13 +516,14 @@ class DataBaseManager:
         try:
             table: dj.Table = _table_map[table_id]
             query = (table & restriction) if restriction else table
-            attr_values = query.fetch(attr_id)
+            attr_values = list(query.fetch(attr_id))
         except Exception:
             attr_values = []
         return attr_values
 
     @staticmethod
-    def fetch_proj(table_id: DBTable, attributes: List[str]) -> List[Dict[str, AttributeValue]]:
+    def fetch_proj(table_id: DBTable, attributes: List[str], restriction:
+                   Optional[List[str], Dict[str, AttributeValue]] = None) -> List[Dict[str, AttributeValue]]:
         """
         Fetch selected attributes (aka, columns) from the specified table.
 
@@ -524,7 +531,10 @@ class DataBaseManager:
             table_id: ID of database table.
             attributes: Tuple of attribute IDs identifying the subset of table attributes to fetch. The table's
                 primary-key attributes will be included in the result, even if they are omitted from this tuple.
-
+            restriction: If not None, then this argument specifies restriction conditions -- either as a dictionary of
+                attribute ID-value pairs, or as a list of string conditions (see DataJoint docs). Either way, the result
+                reflects the number of rows in the table that satisfy ALL conditions. The restriction conditions are not
+                checked for validity.
         Returns:
             The requested table contents. Each element in the list is a dictionary of attribute ID-value pairs. Each
                 dictionary will include only primary key attributes plus any other attributes identified in the
@@ -532,7 +542,9 @@ class DataBaseManager:
         """
         try:
             table: dj.Table = _table_map[table_id]
-            rows = table.proj(*attributes).fetch(as_dict=True)
+            query = (table & restriction) if isinstance(restriction, dict) else \
+                ((table & dj.AndList(restriction)) if isinstance(restriction, list) else table)
+            rows = query.proj(*attributes).fetch(as_dict=True)
         except Exception:
             rows = []
         return rows
