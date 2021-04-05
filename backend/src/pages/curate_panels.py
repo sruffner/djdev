@@ -121,7 +121,7 @@ class _BasePanel:
 
     def tab_label(self) -> str:
         """ Return a short (less than 20 chars) user-facing label for this panel."""
-        return ti.table_info_for(self._table_id).label
+        return ti.table_label(self._table_id)
 
     def _attributes_exposed(self) -> List[str]:
         """
@@ -135,8 +135,8 @@ class _BasePanel:
         Returns:
             List containing IDs of the table attributes exposed in this panel, as described.
         """
-        return [attr_id for attr_id, info in ti.table_info_for(self._table_id).attributes.items()
-                if info.type not in [ti.AttrTypeEnum.AUTO, ti.AttrTypeEnum.BLOB]]
+        return [attr_id for attr_id in ti.attributes_of(self._table_id, False)
+                if ti.attribute_info(self._table_id, attr_id).type not in [ti.AttrTypeEnum.AUTO, ti.AttrTypeEnum.BLOB]]
 
     def layout(self) -> List[Any]:
         """
@@ -161,7 +161,7 @@ class _BasePanel:
             dbc.Button("Remove", id=f"del_{pfx}_btn", color="primary", className="mr-2 mt-3", disabled=True),
             dbc.Modal(
                 [
-                    dbc.ModalHeader(f"Add {ti.table_info_for(self._table_id).row_label}"),
+                    dbc.ModalHeader(f"Add {ti.table_row_label(self._table_id)}"),
                     dbc.ModalBody(self._entry_form()),
                     dbc.ModalFooter(
                         dbc.Row([
@@ -310,9 +310,9 @@ class _BasePanel:
         Returns:
             The list of displayed table columns.
         """
-        table_info = ti.table_info_for(self._table_id)
         out: List[ti.Column] = list()
-        for attr_id, attr_info in table_info.attributes.items():
+        for attr_id in ti.attributes_of(self._table_id, False):
+            attr_info = ti.attribute_info(self._table_id, attr_id)
             if attr_info.type not in [ti.AttrTypeEnum.AUTO, ti.AttrTypeEnum.BLOB]:
                 out.append(ti.Column(attr_id, attr_info.label, attr_info.col_width))
         return out
@@ -388,10 +388,10 @@ class _BasePanel:
         """
         if not isinstance(row, dict):
             raise ValueError("Row must be a dict")
-        for attr_id in ti.attributes_of(self._table_id):
+        for attr_id in ti.attributes_of(self._table_id, False):
             if attr_id not in row:
                 raise ValueError(f"Missing table attribute: '{attr_id}'")
-        pk_dict = {k: row[k] for k in ti.primary_key_of(self._table_id)}
+        pk_dict = {k: row[k] for k in ti.primary_key_of(self._table_id, False)}
         label = ','.join([str(v) for _, v in pk_dict.items()])
         return _RowAlias(pk_dict, label if len(label) < 53 else (label[:50] + '...'))
 
@@ -576,10 +576,9 @@ class _BasePanel:
                 raise dash.exceptions.PreventUpdate
 
             attr_ids = self._attributes_exposed()
-            attr_dict = ti.table_info_for(self._table_id).attributes
             out = [True, 0, "", False]
             for attr_id in attr_ids:
-                attr_info = attr_dict[attr_id]
+                attr_info = ti.attribute_info(self._table_id, attr_id)
                 out.append(attr_info.options[0] if attr_info.type == ti.AttrTypeEnum.ENUM else "")
 
             btn_id = ctx.triggered[0]['prop_id'].split('.')[0]

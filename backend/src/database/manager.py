@@ -120,7 +120,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from queue import Queue
-from typing import Optional, Dict, Any, Set, List, IO, Tuple
+from typing import Optional, Dict, Any, Set, List, IO, Tuple, Union
 import threading
 import time
 import shutil
@@ -330,10 +330,11 @@ class DataBaseManager:
 
         Args:
             table_id: ID of the database table.
-            include_attrs: If None, the form will include all table attributes on the form, with the exception of an
-                auto-incrementing primary key (value controlled by database) and any blob-valued attribute (not
-                supported). Otherwise, only the attributes identified in this list (again ignoring an auto key or a
-                blob-valued attribute) are exposed on the form.
+            include_attrs: If None, the form will include all table attributes on the form, with these exceptions:
+                auto-incrementing primary key (value controlled by database), any blob-valued attribute (not supported),
+                and, for a part table, any attribute that is part of the master table's primary key. Otherwise, only the
+                attributes identified in this list  -- that are indeed valid attributes of the table and are not among
+                the exceptions above -- are exposed on the form.
             initial_entry: If not None, this dictionary contains initial values for the attributes, keyed by attribute
                 ID. If present, it must contain a key-value pair for each table attribute that is included on the form.
             alert_id: If not None, this is the ID assigned to the Alert component included along the bottom of the form;
@@ -346,7 +347,7 @@ class DataBaseManager:
             KeyError: If table ID is invalid or identifies a table that does not support form-based user entry; if
                 any attribute ID specified is invalid; or if any attribute ID is missing in initial_entry.
         """
-        if not ti.table_info_for(table_id).allow_form_entry:
+        if not ti.allows_form_entry(table_id):
             raise KeyError(f"Entry form not supported for the database table {str(table_id)}.")
         form_groups = []
         for attr_id in ti.attributes_of(table_id):
@@ -475,8 +476,7 @@ class DataBaseManager:
             query = (table & restriction) if isinstance(restriction, dict) else \
                 ((table & dj.AndList(restriction)) if isinstance(restriction, list) else table)
             n = len(query)
-        except Exception as e:
-            print(f"====> DEBUG: restriction = {restriction}, error={str(e)}", file=sys.stdout, flush=True)  # TODO
+        except Exception:
             n = 0
         return n
 
@@ -515,7 +515,9 @@ class DataBaseManager:
         """
         try:
             table: dj.Table = _table_map[table_id]
-            query = (table & restriction) if restriction else table
+            _restriction = None if not restriction else \
+                {attr: restriction[attr] for attr in ti.attributes_of(table_id, False) if attr in restriction}
+            query = (table & _restriction) if _restriction else table
             attr_values = list(query.fetch(attr_id))
         except Exception:
             attr_values = []
@@ -649,7 +651,7 @@ class DataBaseManager:
         Raises:
             ValueError: If row_pk is missing any of the table's primary key attributes.
         """
-        table_pk = ti.primary_key_of(table_id)
+        table_pk = ti.primary_key_of(table_id, False)
         try:
             restriction = {key: row_pk[key] for key in table_pk}
             exists = (DataBaseManager.num_table_rows(table_id, restriction) == 1)
@@ -703,12 +705,11 @@ class DataBaseManager:
         if not (ti.has_auto_primary_key(table_id) or omit_master):
             if DataBaseManager.row_exists(table_id, row):
                 raise Exception("Attempt to add a new entry with an existing primary key")
-        table_info = ti.table_info_for(table_id)
-        for attr_id, attr_info in table_info.attributes.items():
+        for attr_id in ti.attributes_of(table_id, omit_master):
+            attr_info = ti.attribute_info(table_id, attr_id)
             if attr_info.type != AttrTypeEnum.AUTO:
-                if not (omit_master and table_info.parent and (attr_id in ti.primary_key_of(table_info.parent))):
-                    if attr_id not in row:
-                        raise Exception(f"Missing attribute: {attr_id}")
+                if attr_id not in row:
+                    raise Exception(f"Missing attribute: {attr_id}")
                 DataBaseManager._validate_attribute_value(table_id, attr_id, row[attr_id])
             elif attr_id in row:
                 row.pop(attr_id, None)
@@ -742,8 +743,7 @@ class DataBaseManager:
             ValueError: If the proposed attribute value is not valid in any way. The error description is intended to
             provide a user-facing description of the problem.
         """
-        table_info = ti.table_info_for(table_id)
-        attr_info = table_info.attributes[attr_id]
+        attr_info = ti.attribute_info(table_id, attr_id)
         if not isinstance(attr_value, (str, bool, int, float, date, np.ndarray, bytes)):
             raise ValueError(f"Attribute value is an unsupported data type: '{attr_info.label}'")
         if attr_info.type == AttrTypeEnum.AUTO:
@@ -828,6 +828,140 @@ class DataBaseManager:
         except Exception as err:
             error_msg = f"Failed to update cross-reference table {str(map_table_id)}: {str(err)}"
         return error_msg
+
+    @staticmethod
+    def trial_protocols_for_neuron(neuron_key: Dict[str, AttributeValue]) -> Optional[Dict[str, str]]:
+        """
+        Get all trial protocols presented to the specified neural unit.
+
+        Args:
+            neuron_key: At a minimum, this dictionary must uniquely identify a recorded neural unit in the database.
+        Returns:
+            A dictionary containing the user-friendly pathname ("set/subset/name") of each trial protocol presented
+                while recording the response of the neural unit, keyed by the protocol's MD5 hash digest. The dictionary
+                items are ordered by pathname. Returns None if an error occurs while retrieving the information.
+        """
+        try:
+            proto_table: dj.Table = _table_map[DBTable.TRIAL_PROTOCOL]
+            # protocols = proto_table.proj('proto_name', 'proto_set', 'proto_subset').fetch(as_dict=True)
+            # proto_to_path = {p['proto_hash']: f"{p['proto_set']}/{p['proto_subset']}/{p['proto_name']}"
+            #                 for p in protocols}
+            trial_table: dj.Table = _table_map[DBTable.TRIAL]
+            response_table: dj.Table = _table_map[DBTable.TRIAL_NEURONAL]
+            neuron_pk = {k: neuron_key[k] for k in ti.primary_key_of(DBTable.SESSION_NEURON, False)}
+            results = (trial_table & (response_table & neuron_pk)).proj(..., '-trial_header').fetch(as_dict=True)
+            restriction = [f"proto_hash = '{r['proto_hash']}'" for r in results]
+            protocols = (proto_table & restriction).proj('proto_name', 'proto_set', 'proto_subset').fetch(as_dict=True)
+            out = {p['proto_hash']: f"{p['proto_set']}/{p['proto_subset']}/{p['proto_name']}" for p in protocols}
+            sorted_tuples = sorted(out.items(), key=lambda item: item[1])
+            return {k: v for k, v in sorted_tuples}
+        except Exception:
+            return None
+
+    @staticmethod
+    def get_trial_protocol_definition(proto_hash: str) -> Optional[maestro.Protocol]:
+        """
+        Retrieve the definition of the specified Maestro trial protocol definition from the lab database.
+
+        Args:
+            proto_hash: The MD5 hash digest that uniquely identifies the requested trial protocol.
+        Returns:
+            The trial protocol definition. Returns None if an error occurs or the specified protocol not found.
+        """
+        try:
+            proto_table: dj.Table = _table_map[DBTable.TRIAL_PROTOCOL]
+            protocol_entry = (proto_table & {'proto_hash': proto_hash}).fetch1()
+            return pickle.loads(protocol_entry['proto_def'])
+        except Exception:
+            return None
+
+    @staticmethod
+    def trials_for_neuron(
+            neuron_key: Dict[str, AttributeValue], proto_hash: Optional[str] = None) -> Optional[List[int]]:
+        """
+        Get the indices of all trials, or a subset thereof, presented to the specified neural unit.
+
+        Args:
+            neuron_key: At a minimum, this dictionary must uniquely identify a recorded neural unit in the database.
+            proto_hash: If this identifies a trial protocol in the database, then return only the indices of the trials
+                belonging to that protocol. Default = None.
+        Returns:
+            The list of indices of the relevant trials. The trial index indicates its presentation order during the
+                experiment session. The index plus the neural unit's session key is sufficient information to retrieve
+                the trial details and response data. Returns an empty list if no relevant trials found. Returns None if
+                an error occurs while retrieving the information.
+        """
+        try:
+            trial_table: dj.Table = _table_map[DBTable.TRIAL]
+            response_table: dj.Table = _table_map[DBTable.TRIAL_NEURONAL]
+            neuron_pk = {k: neuron_key[k] for k in ti.primary_key_of(DBTable.SESSION_NEURON, False)}
+            query = (trial_table & (response_table & neuron_pk)).proj('proto_hash')
+            if isinstance(proto_hash, str):
+                query = query & f"proto_hash = '{proto_hash}'"
+            relevant_trials = query.fetch(as_dict=True)
+            return [t['trial_idx'] for t in relevant_trials]
+        except Exception:
+            return None
+
+    @staticmethod
+    def data_for_trial(trial_key: Dict[str, AttributeValue], behavior: Optional[List[str]] = None,
+                       unit_ids: Optional[List[int]] = None) -> Optional[TrialData]:
+        """
+        Retrieve data recorded for a specified trial in the Lisberger lab database.
+
+        Args:
+            trial_key: At a minimum, this dictionary must uniquely identify a single trial record in the database.
+            behavior: Use this argument to request only selected behavioral responses ("HEPOS", "VEPOS", "HEVEL",
+                "VEVEL", "HDVEL") from the trial record. If None, all recorded behavioral responses are retrieved.
+            unit_ids: Use this argument to request the responses of only selected neural units (identified by their
+                integer unit ID). If None, all recorded neural unit responses are retrieved.
+        Returns:
+            The trial data container. Returns None if trial not found or if an error occurs while retrieving the
+                information.
+        """
+        try:
+            trial_table: dj.Table = _table_map[DBTable.TRIAL]
+            trial_pk = {k: trial_key[k] for k in ti.primary_key_of(DBTable.TRIAL)}
+            trial_info = (trial_table & trial_pk).fetch1()
+            trial_behavior: dj.Table = _table_map[DBTable.TRIAL_BEHAVIORAL]
+            results = (trial_behavior & trial_pk).fetch(as_dict=True)
+            behavioral_field: Dict[str, np.ndarray] = dict()
+            behaviors_wanted = behavior if behavior else maestro.BEHAVIOR_TO_CHANNEL.keys()
+            for response in results:
+                if response['response_id'] in behaviors_wanted:
+                    behavioral_field[response['response_id']] = response['response_trace']
+            trial_neuronal: dj.Table = _table_map[DBTable.TRIAL_NEURONAL]
+            results = (trial_neuronal & trial_pk).fetch(as_dict=True)
+            neuronal_field: Dict[int, np.ndarray] = dict()
+            for response in results:
+                if (not unit_ids) or (response['unit_id'] in unit_ids):
+                    neuronal_field[response['unit_id']] = response['spike_times']
+            protocol_table: dj.Table = _table_map[DBTable.TRIAL_PROTOCOL]
+            proto_info = (protocol_table & {'proto_hash': trial_info['proto_hash']}).fetch1()
+            proto_def: maestro.Protocol = pickle.loads(proto_info['proto_def'])
+
+            trial_data: TrialData = TrialData(
+                experimenter=trial_pk['experimenter'],
+                subj_id=trial_pk['subj_id'],
+                session_date=trial_pk['session_date'],
+                session_sfx=trial_pk['session_sfx'],
+                trial_idx=trial_pk['trial_idx'],
+                protocol=proto_def,
+                filename=trial_info['trial_filename'],
+                duration_ms=trial_info['trial_dur'],
+                record_start_ms=trial_info['trial_record_start'],
+                success=trial_info['trial_success'],
+                rewarded=trial_info['trial_rewarded'],
+                reward1_ms=trial_info['trial_rew1'],
+                reward2_ms=trial_info['trial_rew2'],
+                timestamp_sec=trial_info['trial_ts'],
+                trial_rvs=pickle.loads(trial_info['trial_rvs']),
+                behavior=behavioral_field,
+                neuronal=neuronal_field
+            )
+            return trial_data
+        except Exception:
+            return None
 
     def initiate_session_commit(self) -> Tuple[bool, str]:
         """
@@ -2188,3 +2322,44 @@ class OmniplexUnit:
     1ms before each timestamp in the spike times array). Units = micro-volts. """
     neuron_type: Optional[int] = None
     """ ID of the neuron type associated with this unit (value of primary key in NeuronType table). """
+
+
+@dataclass
+class TrialData:
+    """
+    Data container for the results from a single Maestro trial as retrieved from the Lisberger lab database.
+    """
+    experimenter: str
+    """ Username of lab member performing the experiment in which this trial was recorded. """
+    subj_id: str
+    """ ID of experiment subject. """
+    session_date: date
+    """ Date of experiment session during which trial was recorded. """
+    session_sfx: int
+    """ Session suffix (to distinguish multiple sessions on the same date). """
+    trial_idx: int
+    """ Trial index -- indicates order of presentation during the experiment session. """
+    protocol: maestro.Protocol
+    """ The trial protocol presented. """
+    filename: str
+    """ Original filename of the Maestro data file in which behavioral and other data was recorded. """
+    duration_ms: int
+    """ Recorded duration of this trial, in milliseconds. """
+    record_start_ms: int
+    """ Time at which recording began after trial start, in milliseconds (typically 0). """
+    success: bool
+    """ True if trial was completed successfully. """
+    rewarded: bool
+    """ True if subject was rewarded (could be false if random reward withholding in effect). """
+    reward1_ms: int
+    """ Duration of reward pulse #1 in milliseconds. """
+    reward2_ms: int
+    """ Duration of reward pulse #2 in milliseconds. """
+    timestamp_sec: float
+    """ Trial start timestamp, in seconds since start of first trial in experiment session (<0 if unknown). """
+    trial_rvs: List[Union[int, float]]
+    """ List of random variable values, in same order in which random variables are defined in trial protocol. """
+    behavior: Dict[str, np.ndarray]
+    """ Behavioral responses (in deg or deg/sec) for recorded duration of trial, keyed by channel ID. 1KHz rate. """
+    neuronal: Dict[int, np.ndarray]
+    """ Neural unit spike trains during trial - spike times in seconds since trial start. Keyed by unit ID. """

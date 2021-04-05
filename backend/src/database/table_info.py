@@ -26,14 +26,44 @@ from typing import Union, Optional, List, Dict
 from common import DocEnum
 
 
-def table_info_for(table_id: DBTable) -> TableInfo:
+def table_label(table_id: DBTable) -> str:
     """
-    Get information about a specified table in the Lisberger lab database.
-
+    Get a user-facing label for the specified table in the Lisberger lab database.
+    Args:
+        table_id: The database table ID.
+    Returns:
+        The user-facing label for the table.
     Raises:
         KeyError: If table_id is invalid.
     """
-    return _table_info[table_id]
+    return _table_info[table_id].label
+
+
+def table_row_label(table_id: DBTable) -> str:
+    """
+    Get a generic user-facing label for any single row in the specified table in the Lisberger lab database.
+    Args:
+        table_id: The database table ID.
+    Returns:
+        The user-facing label for a table row.
+    Raises:
+        KeyError: If table_id is invalid.
+    """
+    return _table_info[table_id].row_label
+
+
+def allows_form_entry(table_id: DBTable) -> bool:
+    """
+    Can data be entered into the specified table via a web-based form? This will be the case for most database tables,
+    except those that store trial protocols and trial response data.
+    Args:
+        table_id: The database table ID.
+    Returns:
+        True if table is suited to user-interactive, form-based data entry.
+    Raises:
+        KeyError: If table_id is invalid.
+    """
+    return _table_info[table_id].allow_form_entry
 
 
 def has_auto_primary_key(table_id: DBTable) -> bool:
@@ -62,29 +92,38 @@ def auto_primary_key_for(table_id: DBTable) -> Optional[str]:
     return None
 
 
-def attributes_of(table_id: DBTable) -> List[str]:
+def attributes_of(table_id: DBTable, omit_master: bool = True) -> List[str]:
     """
     Get the IDs of the attributes for the specified table in the Lisberger lab database. The list includes an auto-
-    incrementing primary key attribute, if one is defined on the table. However, for part tables, it excludes the
-    primary key attributes that comprise the parent table's primary key.
+    incrementing primary key attribute, if one is defined on the table.
     Args:
         table_id: Database table ID.
+        omit_master: For part tables only, the attributes that comprise the master table's primary key are omitted from
+            the attribute list if this argument is True; else they are included (Default = True)
     Raises:
         KeyError: If table_id is invalid.
     """
-    return [k for k in _table_info[table_id].attributes.keys()]
+    attrs = list() if omit_master or not table_id.is_part_table() \
+        else [k for k in primary_key_of(_table_info[table_id].parent)]
+    attrs.extend([k for k in _table_info[table_id].attributes.keys()])
+    return attrs
 
 
-def primary_key_of(table_id: DBTable) -> List[str]:
+def primary_key_of(table_id: DBTable, omit_master: bool = True) -> List[str]:
     """
     Get the IDs of the attributes comprising the primary key of the specified table in the Lisberger lab database.
     However, for part tables, it excludes the attributes that comprise the parent table's primary key.
     Args:
         table_id: Database table ID
+        omit_master: For part tables only, the attributes that comprise the master table's primary key are omitted from
+            the part table's primary key if this argument is True; else they are included (Default = True)
     Raises:
         KeyError: If table_id is invalid
     """
-    return [k for k, v in _table_info[table_id].attributes.items() if v.pkey]
+    pks = list() if omit_master or not table_id.is_part_table() \
+        else [k for k in primary_key_of(_table_info[table_id].parent)]
+    pks.extend([k for k, v in _table_info[table_id].attributes.items() if v.pkey])
+    return pks
 
 
 def attribute_info(table_id: DBTable, attr_id: str) -> AttrInfo:
@@ -94,6 +133,8 @@ def attribute_info(table_id: DBTable, attr_id: str) -> AttrInfo:
     Raises:
         KeyError: If either argument is invalid.
     """
+    if table_id.is_part_table() and (attr_id in primary_key_of(_table_info[table_id].parent)):
+        return attribute_info(_table_info[table_id].parent, attr_id)
     return _table_info[table_id].attributes[attr_id]
 
 
@@ -242,7 +283,7 @@ class AttrInfo:
 
 
 @dataclass(frozen=True)
-class TableInfo:
+class _TableInfo:
     """
     Information about a table in the Lisberger lab database. The data class has the following fields:
         'label' - A user-facing label for the database table.
@@ -269,8 +310,8 @@ class TableInfo:
     attributes: Dict[str, AttrInfo]
 
 
-_table_info: Dict[DBTable, TableInfo] = {
-    DBTable.USER: TableInfo(
+_table_info: Dict[DBTable, _TableInfo] = {
+    DBTable.USER: _TableInfo(
         'Lab members', 'member', None, False, True,
         attributes={
             'username': AttrInfo(
@@ -291,7 +332,7 @@ _table_info: Dict[DBTable, TableInfo] = {
                 ["Principal Investigator", "Post Doctoral Researcher", "Graduate Student", "Administrator"], '150px')
         }),
 
-    DBTable.SUBJECT: TableInfo(
+    DBTable.SUBJECT: _TableInfo(
         'Experiment subjects', 'subject', None, False, True,
         attributes={
             'subj_id': AttrInfo(
@@ -306,7 +347,7 @@ _table_info: Dict[DBTable, TableInfo] = {
             'sex': AttrInfo(AttrTypeEnum.ENUM, 'Sex', False, None, None, ['M', 'F', '?'], '150px')
         }),
 
-    DBTable.IMPLANT: TableInfo(
+    DBTable.IMPLANT: _TableInfo(
         'Implant history', 'implant record', None, False, True,
         attributes={
             'subj_id': AttrInfo(AttrTypeEnum.FKEY, 'Subject ID', True, DBTable.SUBJECT, 'subj_id'),
@@ -329,7 +370,7 @@ _table_info: Dict[DBTable, TableInfo] = {
                 'Enter cylinder angle relative to medial-dorsal axis, in degrees CCW')
         }),
 
-    DBTable.RIG: TableInfo(
+    DBTable.RIG: _TableInfo(
         'Experiment rigs', 'rig', None, False, True,
         attributes={
             'rig_id': AttrInfo(
@@ -341,7 +382,7 @@ _table_info: Dict[DBTable, TableInfo] = {
                 'Enter rig location (eg, building and room number) [optional, up to 50 chars]')
         }),
 
-    DBTable.BRAIN_AREA: TableInfo(
+    DBTable.BRAIN_AREA: _TableInfo(
         'Brain Regions', 'region', None, False, True,
         attributes={
             'ba_id': AttrInfo(AttrTypeEnum.AUTO, 'ID#', True),
@@ -351,7 +392,7 @@ _table_info: Dict[DBTable, TableInfo] = {
                 'Enter a concise name or abbreviation for brain area (unique, 3-50 characters)')
         }),
 
-    DBTable.NEURON_TYPE: TableInfo(
+    DBTable.NEURON_TYPE: _TableInfo(
         'Neuron Types', 'neuron type', None, False, True,
         attributes={
             'nt_id': AttrInfo(AttrTypeEnum.AUTO, 'ID#', True),
@@ -361,14 +402,14 @@ _table_info: Dict[DBTable, TableInfo] = {
                 'Enter a concise name or abbreviation for neuron cell type (unique, 3-50 characters)')
         }),
 
-    DBTable.BRAIN_AREA_TO_NEURON_TYPE: TableInfo(
+    DBTable.BRAIN_AREA_TO_NEURON_TYPE: _TableInfo(
         '', '', None, True, False,
         attributes={
             'ba_id': AttrInfo(AttrTypeEnum.FKEY, 'Area ID', True, DBTable.BRAIN_AREA, 'ba_id'),
             'nt_id': AttrInfo(AttrTypeEnum.FKEY, 'Type ID', True, DBTable.NEURON_TYPE, 'nt_id')
         }),
 
-    DBTable.STUDY: TableInfo(
+    DBTable.STUDY: _TableInfo(
         'Research projects', 'project', None, False, True,
         attributes={
             'study_id': AttrInfo(AttrTypeEnum.AUTO, 'ID#', True),
@@ -382,7 +423,7 @@ _table_info: Dict[DBTable, TableInfo] = {
                 'Enter a description of the research project (optional, up to 2048 chars)')
         }),
 
-    DBTable.KEYWORD: TableInfo(
+    DBTable.KEYWORD: _TableInfo(
         'Research keywords', 'keyword', None, False, True,
         attributes={
             'kw_id': AttrInfo(AttrTypeEnum.AUTO, 'ID#', True),
@@ -392,7 +433,7 @@ _table_info: Dict[DBTable, TableInfo] = {
                 'Enter new, unique keyword or phrase (3-50 characters)')
         }),
 
-    DBTable.PUB: TableInfo(
+    DBTable.PUB: _TableInfo(
         'Research publications', 'publication', None, False, True,
         attributes={
             'pub_id': AttrInfo(AttrTypeEnum.AUTO, 'ID#', True),
@@ -404,21 +445,21 @@ _table_info: Dict[DBTable, TableInfo] = {
                 "Enter publication's digital object ID (optional; 100 chars max)")
         }),
 
-    DBTable.STUDY_TO_KEY: TableInfo(
+    DBTable.STUDY_TO_KEY: _TableInfo(
         '', '', None, True, False,
         attributes={
             'study_id': AttrInfo(AttrTypeEnum.FKEY, 'Study', True, DBTable.STUDY, 'study_id'),
             'kw_id': AttrInfo(AttrTypeEnum.FKEY, 'Keyword', True, DBTable.KEYWORD, 'kw_id')
         }),
 
-    DBTable.STUDY_TO_PUB: TableInfo(
+    DBTable.STUDY_TO_PUB: _TableInfo(
         '', '', None, True, False,
         attributes={
             'study_id': AttrInfo(AttrTypeEnum.FKEY, 'Study', True, DBTable.STUDY, 'study_id'),
             'pub_id': AttrInfo(AttrTypeEnum.FKEY, 'Publication', True, DBTable.PUB, 'pub_id')
         }),
 
-    DBTable.SESSION: TableInfo(
+    DBTable.SESSION: _TableInfo(
         'Experiment sessions', 'session', None, False, True,
         attributes={
             'experimenter': AttrInfo(AttrTypeEnum.FKEY, 'Experimenter', True, DBTable.USER, 'username'),
@@ -435,7 +476,7 @@ _table_info: Dict[DBTable, TableInfo] = {
                 'Enter any notes about this particular session (optional, up to 2048 chars)')
         }),
 
-    DBTable.SESSION_EPHYS: TableInfo(
+    DBTable.SESSION_EPHYS: _TableInfo(
         'EPhys Recording', 'recording', DBTable.SESSION, False, True,
         attributes={
             'ephys_src': AttrInfo(
@@ -458,7 +499,7 @@ _table_info: Dict[DBTable, TableInfo] = {
             'ba_id': AttrInfo(AttrTypeEnum.FKEY, 'Target Region', False, DBTable.BRAIN_AREA, 'ba_id')
         }),
 
-    DBTable.SESSION_NEURON: TableInfo(
+    DBTable.SESSION_NEURON: _TableInfo(
         'Neural Units', 'unit', DBTable.SESSION, False, False,
         attributes={
             'unit_id': AttrInfo(AttrTypeEnum.INT, 'Unit #', True, None, None, None, '50px'),
@@ -471,7 +512,7 @@ _table_info: Dict[DBTable, TableInfo] = {
 
     # NOTE: The tables below this line do not involve manual user entry and are not displayed in tabular fashion.
 
-    DBTable.TRIAL_PROTOCOL: TableInfo(
+    DBTable.TRIAL_PROTOCOL: _TableInfo(
         'Trial Protocols', 'protocol', None, False, False,
         attributes={
             'proto_hash': AttrInfo(AttrTypeEnum.TEXT, 'MD5 Hash', True),
@@ -481,7 +522,7 @@ _table_info: Dict[DBTable, TableInfo] = {
             'proto_def': AttrInfo(AttrTypeEnum.BLOB, 'Definition', False)
         }),
 
-    DBTable.TRIAL: TableInfo(
+    DBTable.TRIAL: _TableInfo(
         'Session Trials', 'trial', None, False, False,
         attributes={
             'experimenter': AttrInfo(AttrTypeEnum.FKEY, 'Experimenter', True, DBTable.USER, 'username'),
@@ -502,14 +543,14 @@ _table_info: Dict[DBTable, TableInfo] = {
             'trial_rvs': AttrInfo(AttrTypeEnum.BLOB, 'RV', False)
         }),
 
-    DBTable.TRIAL_EVENT: TableInfo(
+    DBTable.TRIAL_EVENT: _TableInfo(
         'Digital Events', 'event', DBTable.TRIAL, False, False,
         attributes={
             'event_ch': AttrInfo(AttrTypeEnum.INT, 'Event Ch#', True),
             'event_times': AttrInfo(AttrTypeEnum.BLOB, 'Event Times (s)', False)
         }),
 
-    DBTable.TRIAL_BEHAVIORAL: TableInfo(
+    DBTable.TRIAL_BEHAVIORAL: _TableInfo(
         'Behavioral Responses', 'response', DBTable.TRIAL, False, False,
         attributes={
             'response_id': AttrInfo(
@@ -517,7 +558,7 @@ _table_info: Dict[DBTable, TableInfo] = {
             'response_trace': AttrInfo(AttrTypeEnum.BLOB, 'Response Trace', False)
         }),
 
-    DBTable.TRIAL_NEURONAL: TableInfo(
+    DBTable.TRIAL_NEURONAL: _TableInfo(
         'Neuronal Responses', 'response', DBTable.TRIAL, False, False,
         attributes={
             'unit_id': AttrInfo(AttrTypeEnum.FKEY, 'Unit #', True, DBTable.SESSION_NEURON, 'unit_id'),

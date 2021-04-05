@@ -25,6 +25,10 @@ import math
 import zipfile
 import hashlib
 import pickle
+import dash_html_components as html
+import dash_bootstrap_components as dbc
+import dash_table as dt
+import numpy as np
 
 from common import DocEnum
 
@@ -1549,7 +1553,7 @@ class Trial(NamedTuple):
                 for i in range(num_targets):
                     self.tgt_on[i] = prev_seg.tgt_on[i]
                     self.tgt_vel_stab_mask[i] = prev_seg.tgt_vel_stab_mask[i]
-                    self.tgt_pos[i].set_point(prev_seg.tgt_pos[i])
+                    self.tgt_pos[i].set(0, 0)
                     self.tgt_vel[i].set_point(prev_seg.tgt_vel[i])
                     self.tgt_acc[i].set_point(prev_seg.tgt_acc[i])
                     self.tgt_pat_vel[i].set_point(prev_seg.tgt_pat_vel[i])
@@ -1599,6 +1603,47 @@ class Trial(NamedTuple):
             elif param_type == SegParamType.TGT_PAT_ACC_V:
                 return self.tgt_pat_acc[tgt].y
             return None
+
+        def set_value_of(self, param_type: SegParamType, tgt: int, value: Union[int, float, bool]) -> None:
+            # NOTE: Avoided dispatch table implementation here b/c I need to be able to pickle Trial object
+            if param_type.is_target_trajectory_parameter() and not (0 <= tgt < self.num_targets()):
+                return
+            elif param_type == SegParamType.DURATION:
+                self.dur = int(value)
+            elif param_type == SegParamType.MARKER:
+                self.pulse_ch = int(value)
+            elif param_type == SegParamType.FIX_TGT1:
+                self.fix1 = int(value)
+            elif param_type == SegParamType.FIX_TGT2:
+                self.fix2 = int(value)
+            elif param_type == SegParamType.XY_UPDATE_INTV:
+                self.xy_update_intv = int(value)
+            elif param_type == SegParamType.TGT_ON_OFF:
+                self.tgt_on[tgt] = bool(value)
+            elif param_type == SegParamType.TGT_REL:
+                self.tgt_rel[tgt] = bool(value)
+            elif param_type == SegParamType.TGT_VSTAB:
+                self.tgt_vel_stab_mask[tgt] = int(value)
+            elif param_type == SegParamType.TGT_POS_H:
+                self.tgt_pos[tgt].x = float(value)
+            elif param_type == SegParamType.TGT_POS_V:
+                self.tgt_pos[tgt].y = float(value)
+            elif param_type == SegParamType.TGT_VEL_H:
+                self.tgt_vel[tgt].x = float(value)
+            elif param_type == SegParamType.TGT_VEL_V:
+                self.tgt_vel[tgt].y = float(value)
+            elif param_type == SegParamType.TGT_ACC_H:
+                self.tgt_acc[tgt].x = float(value)
+            elif param_type == SegParamType.TGT_ACC_V:
+                self.tgt_acc[tgt].y = float(value)
+            elif param_type == SegParamType.TGT_PAT_VEL_H:
+                self.tgt_pat_vel[tgt].x = float(value)
+            elif param_type == SegParamType.TGT_PAT_VEL_V:
+                self.tgt_pat_vel[tgt].y = float(value)
+            elif param_type == SegParamType.TGT_PAT_ACC_H:
+                self.tgt_pat_acc[tgt].x = float(value)
+            elif param_type == SegParamType.TGT_PAT_ACC_V:
+                self.tgt_pat_acc[tgt].y = float(value)
 
         def summary(self) -> Dict[str, Any]:
             """
@@ -2042,8 +2087,8 @@ class Trial(NamedTuple):
 
         Returns:
             Trial path name in the format "set/subset/trial". For trials culled from pre-version 21 data files, the
-            path name is just the trial name itself. Trial subsets are optional; if no subset is specified, the path
-            name has the form "set/trial".
+                path name is just the trial name itself. Trial subsets are optional; if no subset is specified, the path
+                name has the form "set/trial".
         """
 
         if self.set_name is None:
@@ -2064,6 +2109,31 @@ class Trial(NamedTuple):
             if target.hardware_type == CX_XY_TGT:
                 return True
         return False
+
+    def uses_fix1(self) -> bool:
+        """
+        Does this trial designate a participating target as fixation target #1 during any segment of the trial? The
+        target must also be turned on in at least one segment in which it is designated as fixation target #1.
+        """
+        for seg in self.segments:
+            if seg.fix1 >= 0 and seg.tgt_on[seg.fix1]:
+                return True
+        return False
+
+    def uses_fix2(self) -> bool:
+        """
+        Does this trial designate a participating target as fixation target #2 during any segment of the trial? The
+        target must also be turned on in at least one segment in which it is designated as fixation target #2.
+        """
+        for seg in self.segments:
+            if seg.fix2 >= 0 and seg.tgt_on[seg.fix2]:
+                return True
+        return False
+
+    def duration(self) -> int:
+        """ Return the total duration of this trial in milliseconds. This method merely returns the sum of the segment
+        durations as defined in the trial. """
+        return sum([seg.dur for seg in self.segments])
 
     def segment_table_differences(self, other: Trial) -> Optional[List[SegParam]]:
         """
@@ -2163,6 +2233,47 @@ class Trial(NamedTuple):
             Time at which recording of behavioral responses and events began, in milliseconds since trial start.
         """
         return sum(self.segments[i].dur for i in range(self.record_seg))
+
+    def target_trajectories(self) -> List[np.ndarray]:
+        """
+        Compute the position trajectories of all targets participating in this trial.
+
+        This implementation does a basic piecewise integration similar to what happens on the fly in Maestro during a
+        trial. However, it does NOT account for ANY of the following: velocity stabilization, velocity perturbations,
+        the video update rate of the RMVideo and XYScope platforms. Also, it calculates position only, not velocity nor
+        pattern velocity for video targets. Finally, the calculation assumes that targets move even if they are turned
+        off. This has always been the case -- except for XYScope targets prior to Maestro 1.2.1
+
+        Returns:
+            A list of 2D Numpy arrays, where the I-th array is the position trajectory of the I-th participating target.
+                Each array is Nx2, where N is the trial duration and the N-th "row" is the (H,V) position of the target
+                N milliseconds since trial start. Position is in degrees subtended at the eye.
+        """
+        dur = self.duration()
+        num_tgts = len(self.targets)
+        trajectories: List[np.ndarray] = [np.zeros((dur, 2)) for _ in range(num_tgts)]
+        current_pos: List[Point2D] = [Point2D(0, 0)] * num_tgts
+        current_vel: List[Point2D] = [Point2D(0, 0)] * num_tgts
+
+        t = 0
+        delta = 0.001  # in Maestro, one "tick" = 1 millisecond
+        for seg in self.segments:
+            for i in range(num_tgts):
+                if seg.tgt_rel[i]:
+                    current_pos[i].offset_by(seg.tgt_pos[i].x, seg.tgt_pos[i].y)
+                else:
+                    current_pos[i].set_point(seg.tgt_pos[i])
+                current_vel[i].set_point(seg.tgt_vel[i])
+
+            t_start_seg = t
+            while t < (t_start_seg + seg.dur):
+                for i in range(num_tgts):
+                    trajectories[i][t, :] = [current_pos[i].x, current_pos[i].y]
+                    current_pos[i].offset_by(current_vel[i].x * delta, current_vel[i].y * delta)
+                    current_vel[i].offset_by(seg.tgt_acc[i].x * delta, seg.tgt_acc[i].y * delta)
+                t += 1
+
+        return trajectories
 
 
 class SegParamType(DocEnum):
@@ -2331,3 +2442,159 @@ class Protocol(NamedTuple):
                 'sections': [str(section) for section in self.trial.sections],
                 'record_seg': self.trial.record_seg,
                 'segments': [segment.summary() for segment in self.trial.segments]}
+
+    def display_definition(self) -> List[Any]:
+        """
+        Generate an Dash-based presentation of this trial protocol's definition. A Dash Datatable component displays the
+        segment table for the protocol, and an HTML Div component houses a series of Bootstrap badges that display key
+        information like: segment index at which recording begins, the target transform, targets, perturbations, tagged
+        sections, and random variables. Tooltips associated with some of the badges reveal more detailed information
+        like target definitions, perturbation details, and so on.
+
+        Returns:
+            A list of two components, a div and a Dash Datable, which should be embedded as children of an outer div.
+        """
+        proto_summary = self.summary()
+        segments = proto_summary['segments']
+        targets = proto_summary['targets']
+        target_names = [target_desc.split(':')[0] for target_desc in targets]  # THIS IS A HACK
+        perts = proto_summary['perts']
+        sections = proto_summary['sections']
+        diffs = proto_summary['diffs']
+
+        badges = [
+            dbc.Badge(f"Record Seg: {proto_summary['record_seg']}", color="primary", className="mr-3"),
+            dbc.Badge(f"Transform: {proto_summary['transform']}", color="primary", className="mr-3"),
+            dbc.Badge(f"Targets: {len(target_names)}", id="disp_proto_targets", color="primary", className="mr-3"),
+            dbc.Badge(f"Perturbations: {len(perts)}", id="disp_proto_perts", color="primary", className="mr-3"),
+            dbc.Badge(f"Tagged Sections: {len(sections)}", id="disp_proto_sections", color="primary", className="mr-3"),
+            dbc.Badge(f"Random Vars: {len(diffs)}", id="disp_proto_random_vars", color="primary"),
+            dbc.Tooltip([html.Div(f"{str(target)}") for target in targets],
+                        target="disp_proto_targets", style={'max-width': '600px'})
+        ]
+        if len(perts) > 0:
+            badges.append(
+                dbc.Tooltip([html.Div(f"{str(pert)}") for pert in perts],
+                            target="disp_proto_perts", style={'max-width': '600px'})
+            )
+        if len(sections) > 0:
+            badges.append(
+                dbc.Tooltip([html.Div(f"{str(section)}") for section in sections],
+                            target="disp_proto_sections", style={'max-width': '600px'})
+            )
+        if len(diffs) > 0:
+            badges.append(
+                dbc.Tooltip([html.Div(f"{str(diff)}") for diff in diffs],
+                            target="disp_proto_random_vars", style={'max-width': '600px'})
+            )
+
+        columns = [{"name": "", "id": "param"}]
+        columns.extend([{"name": f"Segment {i}", "id": f"seg_{i}"} for i in range(len(segments))])
+
+        duration = {"param": "Duration (ms)"}
+        fix1_tgt = {"param": "Fix Tgt #1"}
+        fix2_tgt = {"param": "Fix Tgt #2"}
+        xy_delta = {"param": "XYScope Intv (ms)"}
+        marker = {"param": "Marker Pulse"}
+        tgt_on = [{"param": name} for name in target_names]
+        tgt_vstab = [{"param": "VStab"} for _ in target_names]
+        tgt_pos = [{"param": "Position (deg)"} for _ in target_names]
+        tgt_vel_acc = [{"param": "Vel (d/s), Acc (d/s^2)"} for _ in target_names]
+        tgt_pat = [{"param": "Pattern Vel, Acc"} for _ in target_names]
+        for i, seg in enumerate(segments):
+            seg_id = f"seg_{i}"
+            duration[seg_id] = seg['dur']
+            fix1_tgt[seg_id] = "NONE" if seg['fix1'] < 0 else target_names[seg['fix1']]
+            fix2_tgt[seg_id] = "NONE" if seg['fix2'] < 0 else target_names[seg['fix2']]
+            xy_delta[seg_id] = seg['xy_update']
+            marker[seg_id] = "NONE" if seg['marker'] < 0 else f"DO{seg['marker']}"
+            for tgt_idx in range(len(target_names)):
+                trajectory = seg['trajectories'][tgt_idx]
+                tgt_on[tgt_idx][seg_id] = "ON" if trajectory['on'] else 'OFF'
+                tgt_vstab[tgt_idx][seg_id] = trajectory['vstab']
+                tgt_pos[tgt_idx][seg_id] = trajectory['pos']
+                tgt_vel_acc[tgt_idx][seg_id] = f"{trajectory['vel']}  {trajectory['acc']}"
+                tgt_pat[tgt_idx][seg_id] = f"{trajectory['patvel']}  {trajectory['patacc']}"
+        rows = [duration, fix1_tgt, fix2_tgt, xy_delta, marker]
+        for i in range(len(target_names)):
+            rows.extend([tgt_on[i], tgt_vstab[i], tgt_pos[i], tgt_vel_acc[i], tgt_pat[i]])
+
+        tgt_name_row_indices = [5 + i*5 for i in range(len(target_names))]
+        segment_table = dt.DataTable(
+            columns=columns,
+            data=rows,
+            style_header={'fontWeight': 'bold', 'textAlign': 'center'},
+            style_cell={'textAlign': 'center', 'whiteSpace': 'normal', 'height': 'auto', 'lineHeight': '18px'},
+            style_cell_conditional=[
+                {'if': {'column_id': 'param'}, 'width': '200px'}
+            ],
+            style_data_conditional=[
+                {'if': {'column_id': 'param'}, 'textAlign': 'right'},
+                {'if': {'column_id': 'param', 'row_index': tgt_name_row_indices},
+                 'textDecoration': 'underline', 'textAlign': 'left'},
+                {'if': {'row_index': tgt_name_row_indices}, 'backgroundColor': 'rgba(218,165,32,128)', 'color': 'black'}
+            ],
+            style_data={'whiteSpace': 'pre-wrap'},
+            style_table={'height': '330px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
+            fixed_rows={'headers': True, 'data': 0},
+            fixed_columns={'headers': True, 'data': 0}
+        )
+        return [html.Div(badges, className='mt-3 mb-1'), segment_table]
+
+    def compute_fixation_target_trajectories(self, trial_rvs: List[Union[int, float]]) -> \
+            Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        Compute the H,V position trajectory of designated fixation targets #1 and #2 over the course of a particular
+        instance of this trial protocol.
+
+        This implementation does a basic piecewise integration similar to what happens on the fly in Maestro during a
+        trial. However, it does NOT account for ANY of the following: velocity stabilization, velocity perturbations,
+        the video update rate of the RMVideo and XYScope platforms. Also, it does not provide window velocity and
+        pattern velocity traces for the fixation targets.
+
+        In most protocols, only "Fix1" is used. In that case, the method will, obviously, not compute the position
+        trajectory for "Fix2". Furthermore, if the designated "Fix1" target is unspecified during any segment of the
+        trial, then its position is reported as "(NaN,NaN)" for each "tick" during that segment. NOTE that the position
+        trajectory does NOT reflect whether or not the target is actually ON.
+
+        Args:
+            trial_rvs: The value of any random variables for the particular trial instance. Length must match the
+                number of RVs defined on the protocol. Ignored if the protocol lacks any random variables.
+        Returns:
+            A 2-tuple (fix1, fix2). The first element is the position trajectory for fixation target #1, and the second
+                is that for fixation target #2. If a fixation target is unused, the corresponding element is None. Else,
+                it is a 2D Numpy array, where the T-th row in the outer array is the (H,V) position of the
+                designated fixation target, in degrees subtended at the eye, T milliseconds since the trial start.
+        Raises:
+            ValueError: If the length of trial_rvs does not match the number of random variables for this protocol.
+        """
+        # if there are any random variables, replace their values in the trial definition with the supplied values. NOTE
+        # that this alters the definition of the internal trial object, but that should not matter because we must
+        # always supply the RV values for a given trial instance!
+        if len(self.diffs) > 0:
+            if len(self.diffs) != len(trial_rvs):
+                raise ValueError("Random-variable value list does not match trial protocol definition!")
+            for i, param in enumerate(self.diffs):
+                self.trial.segments[param.seg_idx].set_value_of(param.type, param.tgt_idx, trial_rvs[i])
+
+        trial_dur = self.trial.duration()
+        tgt_pos_trajectories: List[np.ndarray] = self.trial.target_trajectories()
+        fix1: Optional[np.ndarray] = None
+        if self.trial.uses_fix1():
+            fix1 = np.empty((trial_dur, 2))
+            fix1[:] = np.nan
+            t = 0
+            for seg in self.trial.segments:
+                if seg.fix1 >= 0:
+                    fix1[t:t+seg.dur, :] = tgt_pos_trajectories[seg.fix1][t:t+seg.dur, :].copy()
+                t += seg.dur
+        fix2: Optional[np.ndarray] = None
+        if self.trial.uses_fix2():
+            fix2 = np.empty((trial_dur, 2))
+            fix2[:] = np.nan
+            t = 0
+            for seg in self.trial.segments:
+                if seg.fix2 >= 0:
+                    fix2[t:t+seg.dur, :] = tgt_pos_trajectories[seg.fix2][t:t+seg.dur, :].copy()
+                t += seg.dur
+        return fix1, fix2
