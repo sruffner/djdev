@@ -43,7 +43,7 @@ def display_page(pathname):
     elif pathname == '/commit_session':
         return commit_session.layout
     elif pathname == '/explore':
-        return explore.layout
+        return explore.serve_layout()
     else:
         return home.layout
 

@@ -113,7 +113,6 @@ from __future__ import annotations  # Needed in Python 3.7y to type-hint a metho
 import os
 import pickle
 import re
-import sys
 from copy import deepcopy
 import dash_bootstrap_components as dbc
 from dataclasses import dataclass
@@ -1061,21 +1060,21 @@ class DataBaseManager:
             else:
                 return 1, "", None
 
-    def get_session_info(self, task_id: str) -> Optional[Dict[str, AttributeValue]]:
+    def get_session_info(self, task_id: str) -> Optional[Dict[str, Optional[AttributeValue]]]:
         """
         Get the session information that will be saved in the Session table when the experiment session is eventually
         committed to the lab database. This information is available ONLY during stage 3 of the commit workflow -- after
-        pre-processing and before the final commit stage begins. The session information is initialized with reasonable
-        attribute values during pre-processing. On the client side, the user is expected to review and correct it in
-        stage 3.
+        pre-processing and before the final commit stage begins. Some session parameters may be inferred by the server
+        during pre-processing. On the client side, the user is expected to verify the information and fill in any
+        missing parameter values.
 
         Args:
             task_id: The commit task identifier.
-
         Returns:
             A dictionary containing the attribute values for a proposed session table entry representing the experiment
-                session to be committed, keyed by the attribute IDs. Returns None if the task_id does not
-                identify an in-progress commit task, or that task is not currently in stage 3.
+                session to be committed, keyed by the attribute IDs. If an attribute value is None, the value must be
+                supplied by the user during the stage 3 review. Returns None if the task_id does not identify an
+                in-progress commit task, or that task is not currently in stage 3.
         """
         out: Optional[Dict[str, AttributeValue]] = None
         with self.task_list_lock:
@@ -1085,20 +1084,21 @@ class DataBaseManager:
                     out = deepcopy(worker.session_info)
         return out
 
-    def get_ephys_info(self, task_id: str) -> Optional[Dict[str, AttributeValue]]:
+    def get_ephys_info(self, task_id: str) -> Optional[Dict[str, Optional[AttributeValue]]]:
         """
         Get the information about the experiment's electrophysiological recording that is saved in the Session.EPhys
         part table when the experiment session is eventually committed to the lab database. The information is available
-        ONLY during stage 3 of the commit workflow -- after pre-processing and before the final commit stage begins. The
-        information is initialized with reasonable attribute values during pre-processing. On the client side, the user
-        is expected to review and correct it in stage 3.
+        ONLY during stage 3 of the commit workflow -- after pre-processing and before the final commit stage begins.
+        Some parameters may be inferred by the server during pre-processing.  the client side, the user is expected to
+        verify the information and fill in any missing parameter values.
 
         Args:
             task_id: The commit task identifier.
 
         Returns:
              A dictionary containing the attribute values for a proposed Session.EPhys table entry for the experiment
-                session to be committed, keyed by the Session.EPhys attribute IDs. Returns None if the task_id does not
+                session to be committed, keyed by the Session.EPhys attribute IDs. If an attribute value is None, the
+                value must be supplied by the user during the stage 3 review. Returns None if the task_id does not
                 identify an in-progress commit task, if that task is not currently in stage 3, or if the experiment
                 did not include electrophysiological recordings.
         """
@@ -1110,65 +1110,138 @@ class DataBaseManager:
                     out = deepcopy(worker.ephys_info)
         return out
 
-    def get_trial_protocol_paths(self, task_id: str) -> Optional[Dict[str, str]]:
+    def get_protocol_candidate_names(self, task_id: str) -> Optional[List[str]]:
         """
-        Get the path names and md5 digests for all trial protocols culled during pre-processing of the session data ZIP
-        archive. This information is available ONLY during stage 3 of the commit workflow -- after pre-processing and
-        before the final commit stage begins. The returned list is intended for display in a dropdown-style web
-        component so that the end-user can select a particular protocol for display.
+        Get the path names (in the form 'set/subset/trial_name') of all trial protocol candidates detected during
+        pre-processing of the session data ZIP archive. Strictly speaking, any protocol for which fewer than 3 trial
+        reps were processed -- and which don't match an existing protocol in the database -- are considered "candidates"
+        and require user review and verification.
+
+        This information is available ONLY during stage 3 of the commit workflow -- after pre-processing and before the
+        final commit stage begins.
 
         Args:
             task_id: The commit task identifier.
 
         Returns:
-            A dictionary in which the keys are the md5 digests of the trial protocols and the values are the
-                corresponding protocol path names. Each path name is the concatenation of the trial set name (if
-                available), subset name (if available), and trial name for the protocol (using '/' as a path separator).
-                The dictionary items are sorted in ascending order by pathname. Returns None if the task_id does not
-                identify an in-progress commit task, or that task is not currently in stage 3.
+            The list of protocol candidate path names. The list is not sorted, but indicates the order in which the
+                protocols were detected in the pre-processing stage. It is unlikely, but theoretically possible, that
+                two protocol candidates could have the same path name. Returns None if the task_id does not identify an
+                in-progress commit task or if that task is not currently in stage 3
         """
-        out: Optional[Dict[str, str]] = None
+        out: Optional[List[str]] = None
         with self.task_list_lock:
             if task_id in self.running_tasks:
                 worker = self.running_tasks[task_id]
                 if worker.stage == 3:
-                    out = dict()
-                    for protocol in worker.protocols:
-                        out[protocol.md5_digest] = protocol.trial.path_name()
-
-        # sort alphabetically by protocol path name (the values of the dictionary
-        if out:
-            sorted_tuples = sorted(out.items(), key=lambda item: item[1])
-            out = {k: v for k, v in sorted_tuples}
+                    out = [pc.trial.path_name() for pc in worker.proto_candidates]
         return out
 
-    def get_trial_protocol(self, task_id: str, md5_digest: str) -> Optional[maestro.Protocol]:
+    def get_protocol_candidate(self, task_id: str, index: int) -> Optional[maestro.ProtocolCandidate]:
         """
-        Get the full definition of a trial protocol culled during pre-processing of the session data ZIP archive. This
-        information is available ONLY during stage 3 of the commit workflow -- after pre-processing and before the final
-        commit stage begins.
+        Get the full definition of a trial protocol candidate culled during pre-processing of the session data ZIP
+        archive. This information is available ONLY during stage 3 of the commit workflow -- after pre-processing and
+        before the final commit stage begins.
 
-        This method, in concert with get_trial_protocol_paths(), provides a mechanism by which the client front-end can
-        present a user interface for reviewing the trial protocols.
+        This method, in concert with get_protocol_candidate_names(), provides a mechanism by which the client front-end
+        can present a user interface for reviewing each trial protocol candidate.
 
         Args:
             task_id: The commit task identifier.
-            md5_digest: The MD5 digest uniquely identifying the protocol requested.
-
+            index: The zero-based index of the protocol candidate requested. IMPORTANT: This corresponds to the protocol
+                candidate's ordinal position in the list returned by get_protocol_candidate_names().
         Returns:
-            The requested trial protocol object. Returns None if the task_id does not identify an in-progress commit
-                task, if that task is not currently in stage 3, or if the md5_digest does not identify one of the trial
-                protocols found in the pre-processing step.
+            The requested trial protocol candidate. Returns None if the task_id does not identify an in-progress commit
+                task, if that task is not currently in stage 3, or if 'index' is invalid.
         """
-        out: Optional[maestro.Protocol] = None
+        out: Optional[maestro.ProtocolCandidate] = None
+        with self.task_list_lock:
+            if task_id in self.running_tasks:
+                worker = self.running_tasks[task_id]
+                if worker.stage == 3 and (0 <= index < len(worker.proto_candidates)):
+                    out = worker.proto_candidates[index]
+        return out
+
+    def num_protocol_candidates_needing_validation(self, task_id: str) -> Optional[int]:
+        """
+        Return number of trial protocol candidates culled from the session archive that require validation by the user
+        and have not yet been marked as valid (via validate_protocol_candidate()).
+
+        If a protocol candidate is based on a single rep, it is impossible to know if that protocol has any random
+        variables. If the candidate is based on two reps and cannot be matched to an existing protocol in the database,
+        we are not sufficiently confident we've captured all of the protocol's random variables. In these scenarios, the
+        user must manually validate the protocol definition before the session will be committed.
+
+        This method, available only during stage 3 of the commit workflow, indicates how many protocol candidate require
+        user validation but have not yet been validated.
+
+        Args:
+            task_id: The commit task identifier.
+        Returns:
+            Number of protocol candidates requiring user validation. Returns None if the task_id does not identify an
+            in-progress commit task or if that task is not currently in stage 3.
+        """
+        out: Optional[int] = None
         with self.task_list_lock:
             if task_id in self.running_tasks:
                 worker = self.running_tasks[task_id]
                 if worker.stage == 3:
-                    for protocol in worker.protocols:
-                        if protocol.md5_digest == md5_digest:
-                            out = protocol
-                            break
+                    out = sum([1 for p in worker.proto_candidates if not
+                               (p.user_validated or (p.num_reps > 2) or (p.num_reps == 2 and p.matches_existing))])
+        return out
+
+    def add_random_var_to_protocol_candidate(
+            self, task_id: str, index: int, rv: maestro.SegParam) -> Optional[maestro.ProtocolCandidate]:
+        """
+        Add a random variable to the definition of a trial protocol candidate culled during pre-processing of an
+        experiment session.
+
+        When a protocol candidate's definition is based on fewer than 3 trial reps over the course of a session, AND it
+        does not match an existing trial protocol in the lab database, the user must validate the definition before
+        the protocol and the session can be committed to the database. Part of validation is adding any missing random
+        variables that are part of that definition. When only 1 rep is processed, it is impossible to identify any
+        random variables; with only 2 reps, it's possible we might miss one.
+
+        Args:
+            task_id: The commit task identifier.
+            index: The zero-based index of the protocol candidate to update.
+            rv: The random variable to be added to the protocol definition.
+        Returns:
+            The revised protocol candidate definition. Returns None if the task_id does not identify an in-progress
+                commit task, if that task is not currently in stage 3, or if the change was unsuccessful.
+        """
+        out: Optional[maestro.ProtocolCandidate] = None
+        with self.task_list_lock:
+            if task_id in self.running_tasks:
+                worker = self.running_tasks[task_id]
+                if worker.stage == 3 and (0 <= index < len(worker.proto_candidates)):
+                    if worker.proto_candidates[index].add_random_variable(rv):
+                        out = worker.proto_candidates[index]
+        return out
+
+    def validate_protocol_candidate(self, task_id: str, index: int) -> bool:
+        """
+        Validate the definition of a trial protocol candidate culled during pre-processing of an experiment session.
+
+        When a protocol candidate's definition is based on fewer than 3 trial reps over the course of a session, AND it
+        does not match an existing trial protocol in the lab database, the user must manually add any missing random
+        variables in the protocol definition and mark the protocol candidate as valid before the protocol and the
+        session can be committed to the database.
+
+        Args:
+            task_id: The commit task identifier.
+            index: The zero-based index of the protocol candidate to validate.
+        Returns:
+            True if candidate was marked as validated. Returns False if the task_id does not identify an in-progress
+                commit task, if that task is not currently in stage 3, or if the protocol index is invalid.
+        """
+        out: bool = False
+        with self.task_list_lock:
+            if task_id in self.running_tasks:
+                worker = self.running_tasks[task_id]
+                if worker.stage == 3 and (0 <= index < len(worker.proto_candidates)):
+                    worker.proto_candidates[index].user_validated = True
+                    out = True
         return out
 
     def get_num_neural_units(self, task_id: str) -> Optional[int]:
@@ -1220,8 +1293,9 @@ class DataBaseManager:
     def set_neural_unit_type(self, task_id: str, index: int, neuron_type: int) -> bool:
         """
         Update the neuron type ID assigned to a neural unit identified during pre-processing of the session data
-        archive. During stage 3 of the session commit workflow, the user (via the client front-end) has the opportunity
-        to specify the neuron type for each identified unit. The method has no effect in any other stage.
+        archive. During stage 3 of the session commit workflow, the user (via the client front-end) must specify the
+        neuron type for each identified unit before the session can be committed to the database. The method has no
+        effect in any other stage.
 
         Args:
             task_id: The commit task identifier.
@@ -1260,7 +1334,8 @@ class DataBaseManager:
                 session is behavioral-only (no electrophysiology).
 
         Returns:
-            None if successful, else a human-facing error description: Bad task ID, invalid session or ephys info.
+            None if successful, else a human-facing error description: Bad task ID, invalid or incomplete session
+                metadata (including failure to validate any trial protocol candidates requiring manual validation)
         """
         with self.task_list_lock:
             if task_id in self.running_tasks:
@@ -1273,6 +1348,20 @@ class DataBaseManager:
                         error_msg = DataBaseManager.check_row(DBTable.SESSION, session_info)
                         if ephys_info and not error_msg:
                             error_msg = DataBaseManager.check_row(DBTable.SESSION_EPHYS, ephys_info, True)
+                    # ensure any trial protocol candidates that required validation by user have been validated.
+                    if not error_msg:
+                        for i, proto_candidate in enumerate(worker.proto_candidates):
+                            if (proto_candidate.num_reps < 3) and not \
+                                    (proto_candidate.matches_existing or proto_candidate.user_validated):
+                                error_msg = f"Trial protocol {i+1} ({proto_candidate.trial.path_name()})" \
+                                            f" requires user validation"
+                                break
+                    # ensure a valid neuron type has been specified for each neural unit
+                    if worker.units and (error_msg is None):
+                        for i, unit in enumerate(worker.units):
+                            if unit.neuron_type is None:
+                                error_msg = f"Please select a neuron type for neural unit #{i+1}"
+                                break
                     if not error_msg:
                         for k in worker.session_info.keys():
                             worker.session_info[k] = session_info[k]
@@ -1336,8 +1425,10 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
         error and terminate.
 
         2) Once the upload completes, process all Maestro data files in the session archive (in situ -- the files are
-        NOT extracted from the ZIP file) and generate the list of distinct trial protocols presented over the course of
-        the experiment session. If an error occurs, report the error and terminate.
+        NOT extracted from the ZIP file) and generate a set of "candidate" trial protocols presented over the course of
+        the experiment session. If only 1 or 2 reps of a particular protocol candidate are processed, and there is not
+        an existing protocol in the database that matches it, then user validation of that protocol candidate will be
+        required in stage 3. If an error occurs, report the error and terminate.
 
         3) Load timing information for each trial. The primary purpose of this step is to process the strobed and event
         data in the Omniplex file(s) in the archive in order to align any neural unit responses with the individual
@@ -1348,23 +1439,15 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
         description of this file. For now, we only support neural units recorded on the Omniplex system, and the archive
         must include the relevant PL2 file(s) for each unit specified in the pickle.
 
-        5) Using the processing results and information already stored in the lab database, choose values for metadata
-        attributes that will be stored in the Session table and its part tables, Session.Ephys and Session.Neuron.
+        5) Prepare session metadata for user review.
 
-        6) Store the results as a dictionary {'protocols': ..., 'timings': ..., 'units': ...} in the pickle file
-        'preprocessing.pickle' within the staging directory.
+        6) After pre-processing is complete, the worker enters stage 3, during which the user on the client side reviews
+        the results and may make changes to the session metadata. Trial protocols may also require user validation.
+        The worker is essentially paused in this stage, waiting for the command to enter stage 4. Any changes to the
+        session metadata and trial protocols are validated before the worker can transition to stage 4.
 
-        7) After pre-processing is complete, the worker enters stage 3, during which the user on the client side reviews
-        the results and may make changes to the session metadata. The worker is essentially paused in this stage,
-        waiting for the command to enter stage 4. Any changes to the session metadata are validated before the worker
-        can transition to stage 4.
-
-        8) In stage 4, the worker commits the experiment session to the lab database and raw data repository. First the
-        ZIP archive and any other supporting files are moved from the staging directory to their permanent place in the
-        data repository. Then the database is updated with the new Session object, a Session.EPhys entry and one or more
-        Session.Neuron entries if the session included neural response data, and a TrialProtocol entry for each trial
-        protocol not already in the database. Lastly, the Trial table in the database is populated with a new entry for
-        each Maestro trial presented during the session.
+        7) In stage 4, the worker commits the experiment session to the lab database and raw data repository. See
+        _finish_commit() for the details.
 
     To communicate progress to the main thread, the worker will post a message to a synchronous queue. A message is
     posted whenever there's a significant progress transition. It is incumbent on the thread that launched the worker to
@@ -1394,9 +1477,13 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
         per second to check whether the server has signaled a cancel request."""
         self.stage: int = 2
         """ The current processing stage in the session commit workflow. Set by worker; read-only to server. """
-        self.protocols: Optional[List[maestro.Protocol]] = None
-        """ The list of trial protocols culled from the session data archive during stage 2 pre-processing. Set by
-        worker. Safe for server to access only while worker is paused in stage 3. """
+        self.proto_candidates: Optional[List[maestro.ProtocolCandidate]] = None
+        """ The list of trial protocol candidates culled from the session data archive during stage 2 pre-processing.
+        Set by worker. Safe for server to access only while worker is paused in stage 3. """
+        self._protocols: Optional[List[maestro.Protocol]] = None
+        """ The list of trial protocols generated from the trial protocol candidates. Candidates with fewer than 3 reps
+        must be manually validated by the user in stage 3, so they are not converted into the final trial protocol
+        objects until the session is committed in stage 4. """
         self.trial_info: Optional[Dict[str, _TrialInfo]] = None
         """ Dictionary maps the filename for each Maestro data file in the session archive to timing and trial protocol
         information for the particular trial instance recorded in that file. In particular, this includes the Omniplex
@@ -1407,16 +1494,16 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
         information required to prepare an entry in the Session.Neuron part table for each neural unit. Prepared by
         worker during stage 2 pre-processing. Safe for server to access only while worker is paused in stage 3; during
         that stage, the user will need to assign a neuron type to each neural unit. """
-        self.session_info: Optional[Dict[str, AttributeValue]] = None
-        """ User-supplied information required to add an entry in the Session table in the database, keyed by the 
-        Session table attribute IDs. During pre-processing, the worker thread will initialize this information. The
+        self.session_info: Optional[Dict[str, Optional[AttributeValue]]] = None
+        """ User-supplied information required to add an entry in the Session table in the database, keyed by the table
+        table attribute IDs. During pre-processing, the worker thread may initialize some of this information. The 
         client will provide the user-edited version of the dictionary upon initiating the final commit (stage 4). """
-        self.ephys_info: Optional[Dict[str, AttributeValue]] = None
+        self.ephys_info: Optional[Dict[str, Optional[AttributeValue]]] = None
         """ When a session includes neural unit recordings, this field will contain user-supplied information required
         to add an entry in the Session.EPhys part table in the database, keyed by the attribute IDs in that table. It
         does not include the primary keys that identify the session itself, as these are in self.session_info. During
-        stage 2 pre-processing, the worker thread will initialize this information. The client will provide the user-
-        edited version of the dictionary upon initiating the final commit (stage 4). """
+        stage 2 pre-processing, the worker thread may initialize some of this information. The client will provide the
+        user-edited version of the dictionary upon initiating the final commit (stage 4). """
 
     def run(self):
         cancelled = False
@@ -1565,11 +1652,22 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                     return None
 
                 self.msg_q.put_nowait("Processing archive for trial protocols...")
-                self.protocols, file_to_proto_hash = maestro.Protocol.extract_protocols_from_session_data(archive)
-                if len(self.protocols) == 0:
+                self.proto_candidates, file_to_proto = \
+                    maestro.ProtocolCandidate.extract_protocols_from_session_data(archive)
+                if len(self.proto_candidates) == 0:
                     raise Exception("No trial protocols found in session archive!")
-                for filename, proto_hash in file_to_proto_hash.items():
-                    self.trial_info[filename].proto_hash = proto_hash
+                for filename, proto_index in file_to_proto.items():
+                    self.trial_info[filename].proto_index = proto_index
+                # if any protocol candidate is based on 2 or more reps, compute the protocol's hash and check to see if
+                # that protocol already exists. For any candidate based on a single rep, or on 2 reps but does not match
+                # an existing protocol, the user must manually review and validate the protocol candidate before the
+                # session is committed to the database.
+                proto_hash_map = \
+                    {ph: 1 for ph in DataBaseManager.fetch_attribute_values(DBTable.TRIAL_PROTOCOL, 'proto_hash')}
+                for proto in [p for p in self.proto_candidates if p.num_reps >= 2]:
+                    test_proto = maestro.Protocol.from_candidate(proto)
+                    if test_proto.md5_digest in proto_hash_map:
+                        proto.matches_existing = True
                 if self._cancel_request.is_set():
                     return None
 
@@ -1604,27 +1702,21 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                             raise Exception(f"Missing Omniplex start/stop timestamps for {key}")
 
                 # initialize session metadata. We get the session date from the Maestro trials, and we may get the
-                # subject ID from the ZIP archive file name or a Maestro data file name. If there already exists a
-                # session or session on the same date for the same subject and experimenter, adjust the session suffix
-                # accordingly.
+                # subject ID from the ZIP archive file name or a Maestro data file name. Some metadata must be supplied
+                # by the user.
                 self.session_info = dict()
-                user_choices = DataBaseManager().fetch_attribute_values(DBTable.USER, 'username')
-                self.session_info['experimenter'] = user_choices[0]
+                self.session_info['experimenter'] = None
                 subject_choices = DataBaseManager().fetch_attribute_values(DBTable.SUBJECT, 'subj_id')
                 for choice in subject_choices:
                     if choice.lower() in ','.join([self.zip_path.name.lower(), sample_maestro_file_name.lower()]):
                         self.session_info['subj_id'] = choice
                         break
                 if 'subj_id' not in self.session_info:
-                    self.session_info['subj_id'] = subject_choices[0]
+                    self.session_info['subj_id'] = None
                 self.session_info['session_date'] = session_date
-                restriction = {k: self.session_info[k] for k in ['experimenter', 'subj_id', 'session_date']}
-                session_suffix = DataBaseManager().num_table_rows(DBTable.SESSION, restriction) + 1
-                self.session_info['session_sfx'] = session_suffix if session_suffix < 10 else 1
-                rig_choices = DataBaseManager().fetch_attribute_values(DBTable.RIG, 'rig_id')
-                self.session_info['rig_id'] = rig_choices[0]
-                study_choices = DataBaseManager().fetch_attribute_values(DBTable.STUDY, 'study_id')
-                self.session_info['study_id'] = study_choices[0]
+                self.session_info['session_sfx'] = None
+                self.session_info['rig_id'] = None
+                self.session_info['study_id'] = None
                 self.session_info['session_notes'] = ""
 
                 # if neural units were recorded, initialize metadata about session's electrophysiological recording.
@@ -1636,11 +1728,10 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                     self.ephys_info['ephys_src'] = 'Omniplex'
                     self.ephys_info['probe_type'] = 'single' if len(channel_ids) == 1 else '32-channel'
                     self.ephys_info['sampling_rate'] = len(self.units[0].template) / 0.01
-                    self.ephys_info['probe_x'] = 0
-                    self.ephys_info['probe_y'] = 0
-                    self.ephys_info['probe_depth'] = 0
-                    brain_area_choices = DataBaseManager().fetch_attribute_values(DBTable.BRAIN_AREA, 'ba_id')
-                    self.ephys_info['ba_id'] = brain_area_choices[0]
+                    self.ephys_info['probe_x'] = None
+                    self.ephys_info['probe_y'] = None
+                    self.ephys_info['probe_depth'] = None
+                    self.ephys_info['ba_id'] = None
 
         except Exception as err:
             error_msg = f"Error: {str(err)}"
@@ -1683,6 +1774,13 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
         protocol_table = sgl.TrialProtocol()
         session_pks = ['experimenter', 'subj_id', 'session_date', 'session_sfx']
         try:
+            # convert all trial protocol candidates to the trial protocol objects that are added to the database. Then
+            # update the individual trial info to include the protocol's unique MD5 hexadecimal digest
+            self._protocols = [maestro.Protocol.from_candidate(c) for c in self.proto_candidates]
+            for _, t_info in self.trial_info.items():
+                protocol = self._protocols[t_info.proto_index]
+                t_info.proto_hash = protocol.md5_digest
+
             # IMPORTANT: We access the database tables directly here and do NOT go through DataBaseManager, as we don't
             # want any of the additions logged. A single 'session commit' log entry, along with the files stored in the
             # repository, is sufficient to reproduce everything that happens in this commit job.
@@ -1714,9 +1812,10 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
             if self._cancel_request.is_set():
                 raise Exception("Operation cancelled.")
 
-            existing_proto_keys = [pk['proto_hash'] for pk in protocol_table.fetch('KEY')]
-            for protocol in self.protocols:
-                if protocol.md5_digest not in existing_proto_keys:
+            # only insert new trial protocols -- keep track of what's inserted so we can rollback on failure
+            existing_proto_map = {pk['proto_hash']: 1 for pk in protocol_table.fetch('KEY')}
+            for protocol in self._protocols:
+                if protocol.md5_digest not in existing_proto_map:
                     protocol_entry: Dict[str, Any] = dict()
                     protocol_entry['proto_hash'] = protocol.md5_digest
                     protocol_entry['proto_name'] = protocol.trial.name
@@ -1748,7 +1847,7 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
             if not session_repo_path.is_dir():
                 session_repo_path.mkdir(parents=True)
             self.zip_path.replace(zip_path_in_repo)
-            results = {'protocols': self.protocols, 'trials': self.trial_info, 'units': self.units,
+            results = {'protocols': self._protocols, 'trials': self.trial_info, 'units': self.units,
                        'session': self.session_info, 'ephys': self.ephys_info}
             with open(pickle_path_in_repo, 'wb') as file:
                 pickle.dump(results, file)
@@ -1845,11 +1944,11 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                         trial_entry['trial_ts'] = t_sec - trial1_start_sec
 
                 # for this trial, get the values of the protocol's random variables
-                protocol = next((x for x in self.protocols if x.md5_digest == t_info.proto_hash), None)
+                protocol = next((x for x in self._protocols if x.md5_digest == t_info.proto_hash), None)
                 if not protocol:
                     raise Exception(f"Internal inconsistency: No trial protocol defined for trial in {trial_filename}")
                 rv_values: List[Any] = list()
-                for param in protocol.diffs:
+                for param in protocol.rvs:
                     rv_value = data_file.trial.retrieve_segment_table_parameter_value(param)
                     if not rv_value:
                         raise Exception(f"Internal inconsistency: Invalid RV ({param}) for trial in {trial_filename}")
@@ -2124,14 +2223,7 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                                       f"Omniplex channel {channel_id} ...{100.0*block_idx/num_blocks:.1f}%")
                 t0 = time.time()
 
-        # prepare neural unit objects. Assign a default neuron type to each -- preferably the "unknown" type if it is
-        # defined in database
-        neuron_types = DataBaseManager().fetch_rows(DBTable.NEURON_TYPE)
-        initial_nt_id = neuron_types[0]['nt_id']
-        for nt in neuron_types:
-            if nt['nt_name'].lower() == 'unknown':
-                initial_nt_id = nt['nt_id']
-                break
+        # prepare neural unit objects. The neuron type is initially unassigned.
         noise = np.median(block_medians) * 1.4826
         out: List[OmniplexUnit] = list()
         for i in range(len(spikes)):
@@ -2140,7 +2232,7 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
             snr = (np.max(template[i]) - np.min(template[i])) / (1.96 * noise)
             firing_rate = float(len(spikes[i])) / (spikes[i][-1] - spikes[i][0])
             template[i] *= to_volts * 1.0e6
-            out.append(OmniplexUnit(filename, channel_id, spikes[i], firing_rate, snr, template[i], initial_nt_id))
+            out.append(OmniplexUnit(filename, channel_id, spikes[i], firing_rate, snr, template[i]))
         return out
 
 
@@ -2270,10 +2362,10 @@ def _get_trial_timing_from_pl2_file(fp: IO, info: Optional[Dict[str, Any]] = Non
 class _TrialInfo:
     """
     A data container to accumulate information about each trial presented during an experiment session during the
-    pre-processing phase of the session commit workflow: (1) the MD5 hash digest that uniquely identifies the trial
-    protocol presented (see maestro.Protocol), and (2) timing information used to determine the order in which trials
-    were presented during the experiment and to align spike times of neural units recorded on the Omniplex system with
-    respect to the timeline of the Maestro trials in which behavioral response data is recorded.
+    pre-processing phase of the session commit workflow: (1) identify of the trial protocol to which each trial rep
+    belongs, and (2) timing information used to determine the order in which trials were presented during the experiment
+    and to align spike times of neural units recorded on the Omniplex system with respect to the timeline of the Maestro
+    trials in which behavioral response data is recorded.
 
     Behavior-only experiments have no Omniplex data. For these sessions, we rely only on the internal timestamps to
     determine the trial order. If those timestamps are unavailable, then we rely on the file indices. When the Omniplex
@@ -2293,8 +2385,12 @@ class _TrialInfo:
     omniplex_stop: Optional[float] = None
     """ The Omniplex timestamp for the XS2 pulse delivered at the end of the trial, in seconds since the Omniplex
     recording began. Will be None for behavior-only experiment sessions. """
+    proto_index: Optional[int] = None
+    """ The zero-based index into the list of all trial protocol candidates presented during the session. """
     proto_hash: Optional[str] = None
-    """ The MD5 hash digest identifying the trial protocol presented."""
+    """ The MD5 hexadecimal digest uniquely identifying the trial protocol for this particular trial instance. It is
+    set only after all trial protocol candidates culled from an experiment session have been validated and converted to
+    protocol objects. """
 
 
 @dataclass

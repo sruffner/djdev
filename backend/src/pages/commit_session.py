@@ -29,7 +29,6 @@ import dash
 import dash_html_components as html
 import dash_core_components as dcc
 import dash_bootstrap_components as dbc
-import dash_table as dt
 import dash_uploader as du
 from dash.dependencies import Input, Output, State
 import plotly.express as px
@@ -158,16 +157,18 @@ class _SessionCommitter:
         entry_form = DataBaseManager.entry_form(ti.DBTable.SESSION, None, session_info, None)
         session_info_tab_content = dbc.Card(dbc.CardBody(entry_form), className="mt-3")
 
-        proto_map = session_builder.get_trial_protocol_paths(task_id)
-        first_key = next(iter(proto_map.keys()))
-        initial_protocol: maestro.Protocol = session_builder.get_trial_protocol(task_id, first_key)
-        select_protocol = dbc.Select(
+        proto_names = session_builder.get_protocol_candidate_names(task_id)
+        select_proto = dbc.Select(
             id='stage3_proto_select',
-            options=[{'label': v, 'value': k} for k, v in proto_map.items()],
-            value=first_key
+            options=[{'label': name, 'value': str(i)} for i, name in enumerate(proto_names)],
+            value=str(0)
         )
-        protocol_div = html.Div(_SessionCommitter.stage3_display_protocol(initial_protocol), id="stage3_protocol_div")
-        proto_tab_content = dbc.Card(dbc.CardBody([select_protocol, protocol_div]), className="mt-3")
+        n_unvalidated = session_builder.num_protocol_candidates_needing_validation(task_id)
+        proto_alert = dbc.Alert(f"{n_unvalidated} trial protocols require user review and validation!",
+                                id="stage3_proto_alert", color='danger', is_open=(n_unvalidated > 0))
+        initial_proto = session_builder.get_protocol_candidate(task_id, 0)
+        proto_div = html.Div(_SessionCommitter.stage3_display_protocol(initial_proto), id="stage3_protocol_div")
+        proto_tab_content = dbc.Card(dbc.CardBody([proto_alert, select_proto, proto_div]), className="mt-3")
 
         # note: this tab will be disabled if session does not include neural units recordings
         ephys_info = session_builder.get_ephys_info(task_id)
@@ -201,8 +202,60 @@ class _SessionCommitter:
         return [tabs, alert]
 
     @staticmethod
-    def stage3_display_protocol(protocol: maestro.Protocol) -> List[Any]:
-        return protocol.display_definition()
+    def stage3_display_protocol(proto_candidate: maestro.ProtocolCandidate) -> List[Any]:
+        protocol = maestro.Protocol.from_candidate(proto_candidate)
+        needs_validation = (proto_candidate.num_reps == 1) or \
+                           (proto_candidate.num_reps == 2 and not proto_candidate.matches_existing)
+        needs_validation = needs_validation and not proto_candidate.user_validated
+        valid_btn = dbc.Button("Validate" if needs_validation else "\u2713 Validated", id='stage3_proto_validate',
+                               color='primary', disabled=(not needs_validation), size='sm')
+        tool_tip = dbc.Tooltip(
+            "Any trial protocol based on fewer than 3 reps and not matching an existing protocol in the database must "
+            "be manually verified by the user. Add any missing random variables (eg, a random-duration fixation "
+            "segment) to the definition (if any), then press this button to validate the protocol.",
+            target='stage3_proto_validate')
+        reps_badge = dbc.Badge(
+            f"# reps = {proto_candidate.num_reps} "
+            f"{'; found match' if proto_candidate.matches_existing else ''}",
+            color='info', className='ml-2 mr-5'
+        )
+        add_rv_btn = dbc.Button("Add Random Var:", id='stage3_add_rv', color='primary', size='sm', className='mr-2')
+        n_segs = len(proto_candidate.trial.segments)
+        n_tgts = len(proto_candidate.trial.targets)
+        select_rv_type = dbc.InputGroup([
+            dbc.InputGroupAddon("Type", addon_type='prepend'),
+            dbc.Select(
+                id='stage3_rv_type_select',
+                options=[{'label': t.name, 'value': str(t.value)} for t in maestro.SegParamType if
+                         t.can_vary_randomly()],
+                value=str(maestro.SegParamType.DURATION.value)
+            )
+        ], size='sm', className='mr-2')
+        seg_select = dbc.InputGroup([
+            dbc.InputGroupAddon("Segment", addon_type='prepend'),
+            dbc.Select(
+                id='stage3_rv_seg_select',
+                options=[{'label': str(i), 'value': str(i)} for i in range(n_segs)],
+                value='0'
+            )
+        ], size='sm', className='mr-2')
+        tgt_select = dbc.InputGroup([
+            dbc.InputGroupAddon("Target", addon_type='prepend'),
+            dbc.Select(
+                id='stage3_rv_tgt_select',
+                options=[{'label': proto_candidate.trial.targets[i].name, 'value': str(i)} for i in range(n_tgts)],
+                value='0'
+            )
+        ], size='sm')
+        validate_form = dbc.Form([
+            valid_btn, reps_badge, tool_tip,
+            dbc.FormGroup([add_rv_btn, select_rv_type, seg_select, tgt_select], id='stage3_rv_group',
+                          style={} if needs_validation else {'display': 'none'})
+        ], inline=True, className='mt-3')
+
+        cmpt_list = protocol.display_definition()
+        cmpt_list.insert(0, validate_form)
+        return cmpt_list
 
     @staticmethod
     def stage3_display_unit(unit: OmniplexUnit) -> List[Any]:
@@ -368,15 +421,46 @@ class _SessionCommitter:
                 next_state = {'stage': 3, 'task_id': task_id}
             return dash.no_update if (next_state is None) else json.dumps(next_state)
 
-        @dash_app.callback(Output('stage3_protocol_div', 'children'), [Input('stage3_proto_select', 'value')],
-                           [State('commit_state', 'data')])
-        def on_stage3_proto_select(proto_key, client_state):
+        @dash_app.callback(Output('stage3_protocol_div', 'children'),
+                           [Input('stage3_proto_select', 'value'), Input('stage3_add_rv', 'n_clicks')],
+                           [State('commit_state', 'data'), State('stage3_proto_select', 'value'),
+                            State('stage3_rv_type_select', 'value'),
+                            State('stage3_rv_seg_select', 'value'), State('stage3_rv_tgt_select', 'value')])
+        def on_stage3_update_proto(*args):
+            ctx = dash.callback_context
+            if not ctx.triggered:
+                raise dash.exceptions.PreventUpdate
+            task_id = args[2]['task_id']
             session_builder = DataBaseManager()
-            task_id = client_state['task_id']
-            protocol = session_builder.get_trial_protocol(task_id, proto_key)
-            if protocol:
-                return _SessionCommitter.stage3_display_protocol(protocol)
+            trigger = ctx.triggered[0]['prop_id'].split('.')[0]
+            if trigger == 'stage3_proto_select':
+                proto_candidate = session_builder.get_protocol_candidate(task_id, int(args[0]))
+                if proto_candidate:
+                    return _SessionCommitter.stage3_display_protocol(proto_candidate)
+            elif trigger == 'stage3_add_rv':
+                proto_index = int(args[3])
+                # noinspection PyArgumentList
+                rv: maestro.SegParam = maestro.SegParam(
+                    maestro.SegParamType(int(args[4])), int(args[5]), int(args[6]))
+                proto_candidate = session_builder.add_random_var_to_protocol_candidate(task_id, proto_index, rv)
+                if proto_candidate:
+                    return _SessionCommitter.stage3_display_protocol(proto_candidate)
             return dash.no_update
+
+        @dash_app.callback([Output('stage3_proto_validate', 'children'), Output('stage3_proto_validate', 'disabled'),
+                            Output('stage3_rv_group', 'style'), Output('stage3_proto_alert', 'children'),
+                            Output('stage3_proto_alert', 'is_open')], [Input('stage3_proto_validate', 'n_clicks')],
+                           [State('commit_state', 'data'), State('stage3_proto_select', 'value')])
+        def on_stage3_validate_proto(*args):
+            if args[0] is None:
+                raise dash.exceptions.PreventUpdate
+            session_builder = DataBaseManager()
+            task_id = args[1]['task_id']
+            if not session_builder.validate_protocol_candidate(task_id, int(args[2])):
+                raise dash.exceptions.PreventUpdate
+            n_unvalidated = session_builder.num_protocol_candidates_needing_validation(task_id)
+            alert_msg = f"{n_unvalidated} trial protocols require user review and validation!"
+            return "\u2713 Validated", True, {'display': 'none'}, alert_msg, (n_unvalidated > 0)
 
         @dash_app.callback(Output('stage3_unit_div', 'children'), [Input('stage3_unit_select', 'value')],
                            [State('commit_state', 'data')])
@@ -394,9 +478,11 @@ class _SessionCommitter:
                            [State('stage3_unit_select', 'value'), State('commit_state', 'data')])
         def on_stage3_neuron_type_select(type_str, unit_idx_str, client_state):
             unit_idx = int(unit_idx_str) if isinstance(unit_idx_str, str) else -1
-            session_builder = DataBaseManager()
-            task_id = client_state['task_id']
-            session_builder.set_neural_unit_type(task_id, unit_idx, int(type_str))
+            nt_id = int(type_str) if isinstance(type_str, str) else -1
+            if (unit_idx > -1) and (nt_id > -1):
+                session_builder = DataBaseManager()
+                task_id = client_state['task_id']
+                session_builder.set_neural_unit_type(task_id, unit_idx, nt_id)
             return dash.no_update
 
         state_vector = [State(f"{attr_id}_input", "value") for attr_id in ti.attributes_of(ti.DBTable.SESSION)]

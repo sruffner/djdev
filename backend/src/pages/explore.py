@@ -8,7 +8,6 @@ database content.
 @author: sruffner
 @created: 22mar2021
 """
-import sys
 from datetime import date
 from typing import List, Dict, Any, Optional
 
@@ -21,7 +20,6 @@ from dash.dependencies import Input, Output, State
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 from app import app
 import database.table_info as ti
@@ -316,8 +314,8 @@ def _trial_figure(trial_data: TrialData) -> dcc.Graph:
     )
 
     if (len(trial_data.protocol.trial.segments) > 1) and (len(trial_data.trial_rvs) == 1) and \
-            (trial_data.protocol.diffs[0].type == maestro.SegParamType.DURATION) and \
-            (trial_data.protocol.diffs[0].seg_idx == 0):
+            (trial_data.protocol.rvs[0].type == maestro.SegParamType.DURATION) and \
+            (trial_data.protocol.rvs[0].seg_idx == 0):
         fig.add_vrect(x0=0, x1=trial_data.trial_rvs[0], fillcolor="red", opacity=0.2)
 
     return dcc.Graph(figure=fig)
@@ -331,23 +329,26 @@ _COLLAPSE_ID: str = "unit_collapse_id"
 """ ID of Dash Bootstrap Collapse element wrapping the tabbed panel displaying details for a selected neuron. The
 element is hidden when no neuron is selected. """
 
-_detail_panel = dbc.Tabs(
-    [
-        dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_SUMMARY_TAB_ID), className='mt-2'), label="Summary"),
-        dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_RESPONSE_TAB_ID), className='mt-2'), label="Trial Responses")
-    ]
-)
-""" Rendering of a tabbed panel in which a selected neuron's summary and response data are displayed. """
 
-layout = html.Div([
-    dbc.Container([
-        dbc.Row(dbc.Col(html.H3("Explore neuron recordings in the laboratory database", className="text-center")),
-                className="mb-3 mt-3"),
-        dbc.Row(dbc.Col(html.Div(id=_NEURON_TABLE_DIV_ID, children=_table_of_neurons())), className="mb-3"),
-        _filter_group(),
-        dbc.Row(dbc.Col(dbc.Collapse(_detail_panel, id=_COLLAPSE_ID)))
+def serve_layout() -> html.Div:
+    detail_panel = dbc.Tabs(
+        [
+            dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_SUMMARY_TAB_ID), className='mt-2'), label="Summary"),
+            dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_RESPONSE_TAB_ID), className='mt-2'), label="Trial Responses")
+        ]
+    )
+    """ Rendering of a tabbed panel in which a selected neuron's summary and response data are displayed. """
+
+    layout = html.Div([
+        dbc.Container([
+            dbc.Row(dbc.Col(html.H3("Explore neuron recordings in the laboratory database", className="text-center")),
+                    className="mb-3 mt-3"),
+            dbc.Row(dbc.Col(html.Div(id=_NEURON_TABLE_DIV_ID, children=_table_of_neurons())), className="mb-3"),
+            _filter_group(),
+            dbc.Row(dbc.Col(dbc.Collapse(detail_panel, id=_COLLAPSE_ID)))
+        ])
     ])
-])
+    return layout
 
 
 @app.callback([Output(_COLLAPSE_ID, "is_open"), Output(_SUMMARY_TAB_ID, "children"),

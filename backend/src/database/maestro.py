@@ -17,7 +17,7 @@ from __future__ import annotations  # Needed in Python 3.7y to type-hint a metho
 
 import sys
 import traceback
-from typing import NamedTuple, List, Optional, Dict, Any, Tuple, Union
+from typing import NamedTuple, List, Optional, Dict, Any, Tuple, Union, Set
 from datetime import date
 import struct
 import re
@@ -2252,8 +2252,8 @@ class Trial(NamedTuple):
         dur = self.duration()
         num_tgts = len(self.targets)
         trajectories: List[np.ndarray] = [np.zeros((dur, 2)) for _ in range(num_tgts)]
-        current_pos: List[Point2D] = [Point2D(0, 0)] * num_tgts
-        current_vel: List[Point2D] = [Point2D(0, 0)] * num_tgts
+        current_pos: List[Point2D] = [Point2D(0, 0) for _ in range(num_tgts)]
+        current_vel: List[Point2D] = [Point2D(0, 0) for _ in range(num_tgts)]
 
         t = 0
         delta = 0.001  # in Maestro, one "tick" = 1 millisecond
@@ -2301,7 +2301,7 @@ class SegParamType(DocEnum):
 
     def is_target_trajectory_parameter(self) -> bool:
         """
-        Is this SegParamType identify a target trajectory parameter within a Maestro trial's segment table?
+        Does this SegParamType identify a target trajectory parameter within a Maestro trial's segment table?
         """
         return self not in [SegParamType.DURATION, SegParamType.MARKER, SegParamType.FIX_TGT1, SegParamType.FIX_TGT2,
                             SegParamType.XY_UPDATE_INTV]
@@ -2352,7 +2352,7 @@ class Protocol(NamedTuple):
     The attributes of the Protocol include:
         trial (Trial) - The trial definition (targets, segment table, and so on).
 
-        diffs (List[SegParam]) - Identifies all segment table parameters that vary randomly over repeated instances of
+        rvs (List[SegParam]) - Identifies all segment table parameters that vary randomly over repeated instances of
         the protocol. Typically, this will contain zero or just a single parameter.
 
         md5_digest (str) - The hexadecimal character digest of the MD5 hash for the protocol object. It is 32 characters
@@ -2363,64 +2363,32 @@ class Protocol(NamedTuple):
         variables' in the trial protocol.
     """
     trial: Trial
-    diffs: List[SegParam]
+    rvs: List[SegParam]
     md5_digest: str
 
     @staticmethod
-    def extract_protocols_from_session_data(archive: zipfile.ZipFile) -> Tuple[List[Protocol], Dict[str, str]]:
-        """
-        Examine all Maestro data files contained in the ZIP archive specified and return the list of trial protocols
-        culled from those files. This is an important task when committing an experiment session's worth of data to
-        the lab database.
+    def from_candidate(candidate: ProtocolCandidate) -> Protocol:
+        # calculating the (hopefully unique!) MD5 hash digest for the protocol. Note that all segment table parameters
+        # are included EXCEPT those that are protocol RVs.
+        hash_attrs = [candidate.trial.path_name(), candidate.trial.record_seg, hash(candidate.trial.global_transform),
+                      [hash(tgt) for tgt in candidate.trial.targets],
+                      [hash(pert) for pert in candidate.trial.perts],
+                      [hash(section) for section in candidate.trial.sections]]
+        for seg_idx, segment in enumerate(candidate.trial.segments):
+            seg_params = list()
+            num_targets = segment.num_targets()
+            for param_type in SegParamType:
+                if param_type.is_target_trajectory_parameter():
+                    for tgt_idx in range(num_targets):
+                        if not (SegParam(param_type, seg_idx, tgt_idx) in candidate.rvs):
+                            seg_params.append(segment.value_of(param_type, tgt_idx))
+                elif not (SegParam(param_type, seg_idx, -1) in candidate.rvs):
+                    seg_params.append(segment.value_of(param_type, -1))
+            hash_attrs.append(seg_params)
 
-        Args:
-            archive: An open ZIP archive containing the Maestro data files collected during an experiment session. Must
-            be open for reading and is NOT closed on return.
-
-        Returns:
-            A 2-tuple: a list of all Maestro trial protocols culled from the session data, and a dictionary that maps
-            the filename of each trial data file to the protocol hash digest identifying the trial protocol presented
-            when that file was recorded.
-
-        Raises:
-            DataFileError if a problem occurs while reading the ZIP archive and processing the data files therein.
-        """
-        try:
-            archive_list = archive.infolist()
-            data_file_name_pattern = re.compile('.[0-9][0-9][0-9][0-9]+$')
-            trial_protocols: List[Protocol] = list()
-            filename_to_protocol: Dict[str, str] = dict()
-            for info in archive_list:
-                if data_file_name_pattern.search(info.filename) is not None:
-                    try:
-                        trial = DataFile.load_trial(archive.read(info), info.filename)
-                        found = False
-                        for protocol in trial_protocols:
-                            if protocol.trial.is_similar_to(trial):
-                                found = True
-                                diffs = protocol.trial.segment_table_differences(trial)
-                                for diff in diffs:
-                                    if not (diff in protocol.diffs):
-                                        protocol.diffs.append(diff)
-                                filename_to_protocol[info.filename] = protocol.md5_digest
-                                break
-                        if not found:
-                            hash_attrs = [trial.path_name(), len(trial.segments), trial.targets, trial.perts,
-                                          trial.sections, trial.record_seg, trial.global_transform]
-                            digester = hashlib.md5()
-                            digester.update(pickle.dumps(hash_attrs))
-                            protocol = Protocol._make([trial, list(), digester.hexdigest()])
-                            trial_protocols.append(protocol)
-                            filename_to_protocol[info.filename] = protocol.md5_digest
-                    except DataFileError as err:
-                        msg = f"===> Error: Failed loading file {info.filename}: {str(err)}"
-                        raise DataFileError(msg)
-            return trial_protocols, filename_to_protocol
-        except DataFileError:
-            raise
-        except Exception as err:
-            msg = f"Unexpected error while extracting trial protocols from session data: {str(err)}"
-            raise DataFileError(msg)
+        digester = hashlib.md5()
+        digester.update(pickle.dumps(hash_attrs))
+        return Protocol._make([candidate.trial, list(candidate.rvs), digester.hexdigest()])
 
     def summary(self) -> Dict[str, Any]:
         """
@@ -2436,7 +2404,7 @@ class Protocol(NamedTuple):
         """
         return {'digest': self.md5_digest, 'path_name': self.trial.path_name(),
                 'transform': str(self.trial.global_transform),
-                'diffs': [str(diff) for diff in self.diffs],
+                'rvs': [str(rv) for rv in self.rvs],
                 'targets': [str(target) for target in self.trial.targets],
                 'perts': [str(pert) for pert in self.trial.perts],
                 'sections': [str(section) for section in self.trial.sections],
@@ -2460,7 +2428,7 @@ class Protocol(NamedTuple):
         target_names = [target_desc.split(':')[0] for target_desc in targets]  # THIS IS A HACK
         perts = proto_summary['perts']
         sections = proto_summary['sections']
-        diffs = proto_summary['diffs']
+        rvs = proto_summary['rvs']
 
         badges = [
             dbc.Badge(f"Record Seg: {proto_summary['record_seg']}", color="primary", className="mr-3"),
@@ -2468,7 +2436,7 @@ class Protocol(NamedTuple):
             dbc.Badge(f"Targets: {len(target_names)}", id="disp_proto_targets", color="primary", className="mr-3"),
             dbc.Badge(f"Perturbations: {len(perts)}", id="disp_proto_perts", color="primary", className="mr-3"),
             dbc.Badge(f"Tagged Sections: {len(sections)}", id="disp_proto_sections", color="primary", className="mr-3"),
-            dbc.Badge(f"Random Vars: {len(diffs)}", id="disp_proto_random_vars", color="primary"),
+            dbc.Badge(f"Random Vars: {len(rvs)}", id="disp_proto_random_vars", color="primary"),
             dbc.Tooltip([html.Div(f"{str(target)}") for target in targets],
                         target="disp_proto_targets", style={'max-width': '600px'})
         ]
@@ -2482,9 +2450,9 @@ class Protocol(NamedTuple):
                 dbc.Tooltip([html.Div(f"{str(section)}") for section in sections],
                             target="disp_proto_sections", style={'max-width': '600px'})
             )
-        if len(diffs) > 0:
+        if len(rvs) > 0:
             badges.append(
-                dbc.Tooltip([html.Div(f"{str(diff)}") for diff in diffs],
+                dbc.Tooltip([html.Div(f"{str(rv)}") for rv in rvs],
                             target="disp_proto_random_vars", style={'max-width': '600px'})
             )
 
@@ -2571,10 +2539,10 @@ class Protocol(NamedTuple):
         # if there are any random variables, replace their values in the trial definition with the supplied values. NOTE
         # that this alters the definition of the internal trial object, but that should not matter because we must
         # always supply the RV values for a given trial instance!
-        if len(self.diffs) > 0:
-            if len(self.diffs) != len(trial_rvs):
+        if len(self.rvs) > 0:
+            if len(self.rvs) != len(trial_rvs):
                 raise ValueError("Random-variable value list does not match trial protocol definition!")
-            for i, param in enumerate(self.diffs):
+            for i, param in enumerate(self.rvs):
                 self.trial.segments[param.seg_idx].set_value_of(param.type, param.tgt_idx, trial_rvs[i])
 
         trial_dur = self.trial.duration()
@@ -2598,3 +2566,109 @@ class Protocol(NamedTuple):
                     fix2[t:t+seg.dur, :] = tgt_pos_trajectories[seg.fix2][t:t+seg.dur, :].copy()
                 t += seg.dur
         return fix1, fix2
+
+
+class ProtocolCandidate:
+    """
+    A candidate for a Maestro trial protocol, as extracted from a single experimental session.
+
+    A typical Maestro experiment usually involves the repeated presentation of a set or sets of Maestro trials, with the
+    results from each trial presentation stored in a data file. That file includes the sequence of trial codes defining
+    the trial, as well as the definitions of participating targets. The definition of the trial as it appears in Maestro
+    is the "trial protocol", as distinguished from a particular presentation of that protocol -- a "trial rep". Part of
+    the workflow in committing an experiment to the lab database is to detect all of the distinct trial protocols
+    presented during the session. The difficulty lies in the fact that a typical protocol will often include a "random
+    variable" -- a segment table parameter that varies randomly from one trial rep to the next; the most typical example
+    of this is an initial "fixation" segment with random duration.
+
+    In order to "detect" a unique protocol, we need to process at least 2 reps of that protocol in order to identify
+    any random variables; the more reps processed, the better the chances of identifying all random variables defined in
+    the protocol. If only one rep is encountered, then the user must validate the protocol definition and identify any
+    and all random variables in it.
+
+    For these reasons, we distinguish a protocol "candidate" from a confirmed trial protocol. Protocol candidates are
+    extracted while processing the trial data files, then validated in one of several ways:
+        1) If only one trial rep was processed, user validation is required -- unless there is an existing protocol
+        in the lab database that matches the protocol candidate.
+
+        2) If two trial reps were processed, user validation is recommended -- again unless there is an existing
+        protocol matching the candidate protocol.
+
+        3) If 3+ trial reps were processed, it is assumed that the trial protocol candidate definition is accurate and
+        user validation is not required.
+    """
+    def __init__(self, trial: Trial):
+        self.trial = trial
+        """ The trial defining this trial protocol candidate, excluding any random variables. """
+        self.rvs: Set[SegParam] = set()
+        """ The protocol candidate's set of random variables, i.e., those segment table parameters that vary randomly
+        over repeated presentations of the protocol. """
+        self.num_reps = 1
+        """ The number of trial reps that were processed to identify this trial protocol candidate. """
+        self.matches_existing = False
+        """ Flag set if protocol candidate matches an existing trial protocol in the lab database -- in which case
+        user validation is not required. """
+        self.user_validated = False
+        """ Flag set if protocol candidate definition has been marked valid via user interaction."""
+
+    def add_random_variable(self, rv: SegParam) -> bool:
+        """
+        Add a random variable to the definition of this Maestro trial protocol candidate.
+
+        Args:
+            rv: The random variable
+        Returns:
+            False only if specified random variable is invalid (bad parameter type, segment index, or target index).
+        """
+        if rv.type.can_vary_randomly() and (0 <= rv.seg_idx < len(self.trial.segments)) and \
+                ((not rv.type.is_target_trajectory_parameter()) or (0 <= rv.tgt_idx < len(self.trial.targets))):
+            self.rvs.add(rv)
+            return True
+        return False
+
+    @staticmethod
+    def extract_protocols_from_session_data(archive: zipfile.ZipFile) -> Tuple[List[ProtocolCandidate], Dict[str, int]]:
+        """
+        Examine all Maestro data files contained in the ZIP archive specified and return the list of trial protocol
+        candidates culled from those files. This is an important task when committing an experiment session's worth of
+        data to the lab database.
+
+        Args:
+            archive: An open ZIP archive containing the Maestro data files collected during an experiment session. Must
+            be open for reading and is NOT closed on return.
+        Returns:
+            A 2-tuple: a list of all trial protocol candidates culled from the session data, and a dictionary that maps
+            the filename of each trial data file to the list index identifying the trial protocol candidate presented
+            when that file was recorded.
+        Raises:
+            DataFileError: If a problem occurs while reading the ZIP archive and processing the data files therein.
+        """
+        try:
+            archive_list = archive.infolist()
+            data_file_name_pattern = re.compile('.[0-9][0-9][0-9][0-9]+$')
+            proto_candidates: List[ProtocolCandidate] = list()
+            filename_to_protocol: Dict[str, int] = dict()
+            for info in archive_list:
+                if data_file_name_pattern.search(info.filename) is not None:
+                    try:
+                        trial = DataFile.load_trial(archive.read(info), info.filename)
+                        found = False
+                        for i, proto in enumerate(proto_candidates):
+                            if proto.trial.is_similar_to(trial):
+                                found = True
+                                proto.rvs.update(proto.trial.segment_table_differences(trial))
+                                filename_to_protocol[info.filename] = i
+                                proto.num_reps += 1
+                                break
+                        if not found:
+                            proto_candidates.append(ProtocolCandidate(trial))
+                            filename_to_protocol[info.filename] = len(proto_candidates) - 1
+                    except DataFileError as err:
+                        msg = f"===> Error: Failed loading file {info.filename}: {str(err)}"
+                        raise DataFileError(msg)
+            return proto_candidates, filename_to_protocol
+        except DataFileError:
+            raise
+        except Exception as err:
+            msg = f"Unexpected error while extracting trial protocols from session data: {str(err)}"
+            raise DataFileError(msg)
