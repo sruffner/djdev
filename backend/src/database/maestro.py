@@ -2390,6 +2390,18 @@ class Protocol(NamedTuple):
         digester.update(pickle.dumps(hash_attrs))
         return Protocol._make([candidate.trial, list(candidate.rvs), digester.hexdigest()])
 
+    def can_aggregate_responses(self) -> bool:
+        """
+        Can the behavioral and neural responses to repeated presentations of this trial protocol be aggregated in some
+        fashion, typically by averaging? By convention, the protocol must have AT MOST one defined random variable, and
+        that random variable can only be the duration of the first segment of the trial protocol.
+
+        Returns:
+            True if protocol is amenable to averaging response data, as described; else False.
+        """
+        return (len(self.rvs) == 0) or \
+               ((len(self.rvs) == 1) and (self.rvs[0].type == SegParamType.DURATION) and (self.rvs[0].seg_idx == 0))
+
     def summary(self) -> Dict[str, Any]:
         """
         Generate a summary of this Maestro trial protocol for display purposes only. Returns a dictionary with the

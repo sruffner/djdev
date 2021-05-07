@@ -164,7 +164,8 @@ class _SessionCommitter:
             value=str(0)
         )
         n_unvalidated = session_builder.num_protocol_candidates_needing_validation(task_id)
-        proto_alert = dbc.Alert(f"{n_unvalidated} trial protocols require user review and validation!",
+        proto_alert = dbc.Alert(f"{n_unvalidated} trial protocols require user review and validation! These are "
+                                f"marked by '**' in the dropdown menu below.",
                                 id="stage3_proto_alert", color='danger', is_open=(n_unvalidated > 0))
         initial_proto = session_builder.get_protocol_candidate(task_id, 0)
         proto_div = html.Div(_SessionCommitter.stage3_display_protocol(initial_proto), id="stage3_protocol_div")
@@ -449,7 +450,8 @@ class _SessionCommitter:
 
         @dash_app.callback([Output('stage3_proto_validate', 'children'), Output('stage3_proto_validate', 'disabled'),
                             Output('stage3_rv_group', 'style'), Output('stage3_proto_alert', 'children'),
-                            Output('stage3_proto_alert', 'is_open')], [Input('stage3_proto_validate', 'n_clicks')],
+                            Output('stage3_proto_alert', 'is_open'), Output('stage3_proto_select', 'options')],
+                           [Input('stage3_proto_validate', 'n_clicks')],
                            [State('commit_state', 'data'), State('stage3_proto_select', 'value')])
         def on_stage3_validate_proto(*args):
             if args[0] is None:
@@ -458,9 +460,12 @@ class _SessionCommitter:
             task_id = args[1]['task_id']
             if not session_builder.validate_protocol_candidate(task_id, int(args[2])):
                 raise dash.exceptions.PreventUpdate
+            options = [{'label': name, 'value': str(i)} for i, name in
+                       enumerate(session_builder.get_protocol_candidate_names(task_id))]
             n_unvalidated = session_builder.num_protocol_candidates_needing_validation(task_id)
-            alert_msg = f"{n_unvalidated} trial protocols require user review and validation!"
-            return "\u2713 Validated", True, {'display': 'none'}, alert_msg, (n_unvalidated > 0)
+            alert_msg = f"{n_unvalidated} trial protocols require user review and validation! These are " \
+                        f"marked by '**' in the dropdown menu below."
+            return "\u2713 Validated", True, {'display': 'none'}, alert_msg, (n_unvalidated > 0), options
 
         @dash_app.callback(Output('stage3_unit_div', 'children'), [Input('stage3_unit_select', 'value')],
                            [State('commit_state', 'data')])

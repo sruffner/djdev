@@ -113,6 +113,8 @@ from __future__ import annotations  # Needed in Python 3.7y to type-hint a metho
 import os
 import pickle
 import re
+import sys
+import traceback
 from copy import deepcopy
 import dash_bootstrap_components as dbc
 from dataclasses import dataclass
@@ -449,7 +451,7 @@ class DataBaseManager:
                              key=lambda n_type: n_type['nt_name'])
             return [] if len(n_types) == 0 else [(n_type['ba_name'], n_type['ba_id']) for n_type in n_types]
 
-        fkey_values = sorted(DataBaseManager().fetch_attribute_values(attr_info.fkey_table, attr_info.fkey_id))
+        fkey_values = sorted(DataBaseManager.fetch_attribute_values(attr_info.fkey_table, attr_info.fkey_id))
         return [(v, v) for v in fkey_values]
 
     @staticmethod
@@ -475,7 +477,10 @@ class DataBaseManager:
             query = (table & restriction) if isinstance(restriction, dict) else \
                 ((table & dj.AndList(restriction)) if isinstance(restriction, list) else table)
             n = len(query)
-        except Exception:
+        except Exception as err:
+            traceback.print_exc(file=sys.stdout)   # TODO: DEBUG
+            print(f"====> T={time.time():.6f}: Got exception in num_table_rows: {str(err)}",
+                  file=sys.stdout, flush=True)
             n = 0
         return n
 
@@ -829,32 +834,51 @@ class DataBaseManager:
         return error_msg
 
     @staticmethod
-    def trial_protocols_for_neuron(neuron_key: Dict[str, AttributeValue]) -> Optional[Dict[str, str]]:
+    def trial_protocols_for_neuron(neuron_key: Dict[str, AttributeValue], aggregate: bool = False) \
+            -> Optional[Dict[str, str]]:
         """
         Get all trial protocols presented to the specified neural unit.
 
         Args:
             neuron_key: At a minimum, this dictionary must uniquely identify a recorded neural unit in the database.
+            aggregate: If True, include ONLY those trial protocols for which the average neural response can be
+                computed. By convention, there must be at least 3 reps of the trial protocol for which the neural
+                response was recorded, AND the protocol itself either must have NO random variables OR an initial
+                fixation segment of random duration. Default = False.
         Returns:
             A dictionary containing the user-friendly pathname ("set/subset/name") of each trial protocol presented
-                while recording the response of the neural unit, keyed by the protocol's MD5 hash digest. The dictionary
-                items are ordered by pathname. Returns None if an error occurs while retrieving the information.
+                while recording the response of the neural unit, keyed by the protocol's MD5 hash digest. If aggregate
+                is True, any protocols for which the average neural response CANNOT be computed are excluded; in this
+                case, it is possible that the dictionary is empty. The dictionary items are ordered by pathname.
+                Returns None if an error occurs.
         """
         try:
             proto_table: dj.Table = _table_map[DBTable.TRIAL_PROTOCOL]
-            # protocols = proto_table.proj('proto_name', 'proto_set', 'proto_subset').fetch(as_dict=True)
-            # proto_to_path = {p['proto_hash']: f"{p['proto_set']}/{p['proto_subset']}/{p['proto_name']}"
-            #                 for p in protocols}
             trial_table: dj.Table = _table_map[DBTable.TRIAL]
             response_table: dj.Table = _table_map[DBTable.TRIAL_NEURONAL]
             neuron_pk = {k: neuron_key[k] for k in ti.primary_key_of(DBTable.SESSION_NEURON, False)}
             results = (trial_table & (response_table & neuron_pk)).proj(..., '-trial_header').fetch(as_dict=True)
-            restriction = [f"proto_hash = '{r['proto_hash']}'" for r in results]
-            protocols = (proto_table & restriction).proj('proto_name', 'proto_set', 'proto_subset').fetch(as_dict=True)
-            out = {p['proto_hash']: f"{p['proto_set']}/{p['proto_subset']}/{p['proto_name']}" for p in protocols}
+            proto_hashes = {r['proto_hash'] for r in results}
+            if aggregate:
+                all_reps = [r['proto_hash'] for r in results]
+                out = dict()
+                for h in proto_hashes:
+                    if all_reps.count(h) > 2:
+                        proto = DataBaseManager.get_trial_protocol_definition(h)
+                        if proto is None:
+                            return None
+                        elif proto.can_aggregate_responses():
+                            out[h] = proto.trial.path_name()
+            else:
+                restriction = [f"proto_hash = '{h}'" for h in proto_hashes]
+                protocols = (proto_table & restriction).\
+                    proj('proto_name', 'proto_set', 'proto_subset').fetch(as_dict=True)
+                out = {p['proto_hash']: f"{p['proto_set']}/{p['proto_subset']}/{p['proto_name']}" for p in protocols}
             sorted_tuples = sorted(out.items(), key=lambda item: item[1])
             return {k: v for k, v in sorted_tuples}
-        except Exception:
+        except Exception as err:
+            traceback.print_exc(file=sys.stdout)  # TODO: TESTING
+            traceback.print_stack(file=sys.stdout)
             return None
 
     @staticmethod
@@ -895,11 +919,15 @@ class DataBaseManager:
             response_table: dj.Table = _table_map[DBTable.TRIAL_NEURONAL]
             neuron_pk = {k: neuron_key[k] for k in ti.primary_key_of(DBTable.SESSION_NEURON, False)}
             query = (trial_table & (response_table & neuron_pk)).proj('proto_hash')
-            if isinstance(proto_hash, str):
-                query = query & f"proto_hash = '{proto_hash}'"
             relevant_trials = query.fetch(as_dict=True)
-            return [t['trial_idx'] for t in relevant_trials]
-        except Exception:
+            if isinstance(proto_hash, str):
+                return [t['trial_idx'] for t in relevant_trials if t['proto_hash'] == proto_hash]
+            else:
+                return [t['trial_idx'] for t in relevant_trials]
+        except Exception as err:
+            traceback.print_exc(file=sys.stdout)  # TODO: DEBUG
+            print(f"====> T={time.time():.6f}: Got exception in trials_for_neuron: {str(err)}",
+                  file=sys.stdout, flush=True)
             return None
 
     @staticmethod
@@ -960,6 +988,7 @@ class DataBaseManager:
             )
             return trial_data
         except Exception:
+            traceback.print_exc(file=sys.stdout)  # TODO: DEBUG
             return None
 
     def initiate_session_commit(self) -> Tuple[bool, str]:
@@ -1126,7 +1155,8 @@ class DataBaseManager:
         Returns:
             The list of protocol candidate path names. The list is not sorted, but indicates the order in which the
                 protocols were detected in the pre-processing stage. It is unlikely, but theoretically possible, that
-                two protocol candidates could have the same path name. Returns None if the task_id does not identify an
+                two protocol candidates could have the same path name. A protocol's pathname is prepended with '**' if
+                that protocol requires manual user validation. Returns None if the task_id does not identify an
                 in-progress commit task or if that task is not currently in stage 3
         """
         out: Optional[List[str]] = None
@@ -1134,7 +1164,10 @@ class DataBaseManager:
             if task_id in self.running_tasks:
                 worker = self.running_tasks[task_id]
                 if worker.stage == 3:
-                    out = [pc.trial.path_name() for pc in worker.proto_candidates]
+                    out = [(p.trial.path_name()
+                            if (p.user_validated or (p.num_reps > 2) or (p.num_reps == 2 and p.matches_existing))
+                            else f"** {p.trial.path_name()}")
+                           for p in worker.proto_candidates]
         return out
 
     def get_protocol_candidate(self, task_id: str, index: int) -> Optional[maestro.ProtocolCandidate]:
@@ -2459,3 +2492,56 @@ class TrialData:
     """ Behavioral responses (in deg or deg/sec) for recorded duration of trial, keyed by channel ID. 1KHz rate. """
     neuronal: Dict[int, np.ndarray]
     """ Neural unit spike trains during trial - spike times in seconds since trial start. Keyed by unit ID. """
+
+    def instantaneous_firing_rate(self, unit_id: int, smooth: bool = False) -> np.ndarray:
+        """
+        Compute the instantaneous firing rate for a specified neural unit over the course of the trial timeline,
+        optionally smoothed with a Gaussian kernel.
+
+        Firing rate R is computed as the reciprocal of inter-spike interval following Lisberger & Pavelko (1986). Let
+        the spike times during the trial be [T(1) .. T(N)]. For each t (delta = 1ms) in the interval [T(i)..T(i+1)],
+        R(t) = 1/(T(i) - T(i-1)) if t - T(i) < T(i) - T(i-1); else R(t) = 1/(T(i+1) - T(i)). For t < T(1), R(t) = 0.
+        For t in [T(N), T(N) + T(N) - T(N-1)], R = 1/(T(N) - T(N-1)). For t > 2*T(N) - T(N-1), R = 0.
+
+        The firing rate trace is optionally smoothed by convolving it with a Gaussian kernel with a width of 2.5ms.
+
+        Args:
+            unit_id: Neural unit ID
+            smooth: If True, the instantaneous firing rate is smoothed (default = False).
+        Returns:
+            Instantaneous firing rate per millisecond during trial, in Hz.
+        Raises:
+            KeyError: If the unit ID is invalid.
+        """
+        # spike times in seconds, and converted to integer milliseconds (trial timeline DT is 1ms)
+        spike_times = self.neuronal[unit_id]
+        spikes_ms = np.floor(spike_times*1000.0).astype(int)
+        num_spikes = len(spike_times)
+        firing_rate = np.zeros(self.duration_ms)
+        if num_spikes < 2:
+            return firing_rate   # not enough spikes to compute firing rate
+
+        for i in range(num_spikes):
+            t = spikes_ms[i]
+            if i == 0:
+                t_plus = spikes_ms[i+1]
+                firing_rate[t:t_plus] = 1.0 / (spike_times[i+1] - spike_times[i])
+            elif i == num_spikes - 1:
+                t_minus = spikes_ms[i-1]
+                t_last = min(2*t - t_minus, self.duration_ms - 1)
+                firing_rate[t:t_last+1] = 1.0 / (spike_times[i] - spike_times[i-1])
+            else:
+                t_minus = spikes_ms[i-1]
+                t_plus = spikes_ms[i+1]
+                firing_rate[t:t_plus] = 1.0 / (spike_times[i] - spike_times[i-1])
+                if 2*t - t_minus < t_plus:
+                    firing_rate[2*t - t_minus:t_plus] = 1.0 / (spike_times[i+1] - spike_times[i])
+
+        if smooth:
+            width = 2.5  # in milliseconds  -- could make this a parameter to method
+            x = np.arange(-10 * width, 10 * width)
+            kernel = np.exp(-x**2/2.0) / (width * np.sqrt(2*np.pi))
+            kernel = kernel / sum(kernel)
+            firing_rate = np.convolve(firing_rate, kernel, mode='same')
+
+        return firing_rate
