@@ -154,7 +154,7 @@ class _SessionCommitter:
     def stage3_body(task_id: str) -> Any:
         session_builder = DataBaseManager()
         session_info = session_builder.get_session_info(task_id)
-        entry_form = DataBaseManager.entry_form(ti.DBTable.SESSION, None, session_info, None)
+        entry_form = session_builder.entry_form(ti.DBTable.SESSION, None, session_info, None)
         session_info_tab_content = dbc.Card(dbc.CardBody(entry_form), className="mt-3")
 
         proto_names = session_builder.get_protocol_candidate_names(task_id)
@@ -173,7 +173,7 @@ class _SessionCommitter:
 
         # note: this tab will be disabled if session does not include neural units recordings
         ephys_info = session_builder.get_ephys_info(task_id)
-        ephys_form = DataBaseManager.entry_form(ti.DBTable.SESSION_EPHYS, None, ephys_info, None)
+        ephys_form = session_builder.entry_form(ti.DBTable.SESSION_EPHYS, None, ephys_info, None)
         ephys_info_tab_content = dbc.Card(dbc.CardBody(ephys_form), className="mt-3")
 
         num_units = session_builder.get_num_neural_units(task_id)
@@ -261,7 +261,7 @@ class _SessionCommitter:
     @staticmethod
     def stage3_display_unit(unit: OmniplexUnit) -> List[Any]:
         # dropdown lets user assign neuron type to the unit
-        neuron_types = DataBaseManager.fetch_rows(ti.DBTable.NEURON_TYPE)
+        neuron_types = DataBaseManager().fetch_rows(ti.DBTable.NEURON_TYPE)
         initial_selection = str(unit.neuron_type) if unit.neuron_type in [nt['nt_id'] for nt in neuron_types] else None
         select_type = dbc.InputGroup(
             [

@@ -248,8 +248,8 @@ class _BasePanel:
         Returns:
             A Dash Bootstrap Form component.
         """
-        return DataBaseManager.entry_form(self._table_id, self._attributes_exposed(), None,
-                                          f"{self._prefix}_entry_alert")
+        return DataBaseManager().entry_form(self._table_id, self._attributes_exposed(), None,
+                                            f"{self._prefix}_entry_alert")
 
     def _data_table(self) -> dt.DataTable:
         """
@@ -440,9 +440,10 @@ class _BasePanel:
         """
         try:
             # this call will remove auto-incrementing PK from argument, if present.
-            error_msg = DataBaseManager.check_row(self._table_id, row)
+            db_mgr = DataBaseManager()
+            error_msg = db_mgr.check_row(self._table_id, row)
             if not error_msg:
-                error_msg = DataBaseManager().insert_into_table(self._table_id, row)
+                error_msg = db_mgr.insert_into_table(self._table_id, row)
             if error_msg:
                 raise Exception(error_msg)
         except Exception as err:
@@ -819,7 +820,7 @@ class _MappingSubPanel(_BasePanel):
                 appear in this dictionary. Each _RowAlias list is sorted alphabetically IAW the alias's label field. The
                 dictionary will be empty if there are no current mappings or if a database access error occurs.
         """
-        map_rows = DataBaseManager.fetch_rows(self._map_table_id)
+        map_rows = DataBaseManager().fetch_rows(self._map_table_id)
         dst_map = {row[self._dst_pk]: self._to_row_alias(row) for row in self._rows()}
         src_to_dst: Dict[int, List[_RowAlias]] = dict()
         for row in map_rows:
@@ -915,7 +916,7 @@ class SubjectImplantPanel(_BasePanel):
                 will be emptied.
         """
         self._curr_subj = None
-        if isinstance(subj_id, str) and DataBaseManager.attribute_exists(ti.DBTable.SUBJECT, 'subj_id', subj_id):
+        if isinstance(subj_id, str) and DataBaseManager().attribute_exists(ti.DBTable.SUBJECT, 'subj_id', subj_id):
             self._curr_subj = subj_id
 
     def _attributes_exposed(self) -> List[str]:
@@ -947,7 +948,7 @@ class SubjectImplantPanel(_BasePanel):
         Overridden to only return implants for the currently selected subject. If there is no selected subject,
         then an empty list is returned.
         """
-        return DataBaseManager.fetch_rows(self._table_id, {'subj_id': self._curr_subj}) if self._curr_subj else list()
+        return DataBaseManager().fetch_rows(self._table_id, {'subj_id': self._curr_subj}) if self._curr_subj else list()
 
     def _add_row(self, row: Dict[str, ti.AttributeValue]) -> str:
         """

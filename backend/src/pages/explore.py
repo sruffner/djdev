@@ -8,10 +8,7 @@ database content.
 @author: sruffner
 @created: 22mar2021
 """
-import sys
-import time
 from datetime import date
-from threading import Lock
 from typing import List, Dict, Any, Optional, Union
 
 import dash_html_components as html
@@ -56,10 +53,11 @@ _NEURON_TABLE_DIV_ID: str = "nt_div"
 
 
 def _fetch_neurons(restriction: Optional[List[str]]) -> List[Dict[str, ti.AttributeValue]]:
-    rows = DataBaseManager.fetch_proj(DBTable.SESSION_NEURON, _NEURON_TABLE_ATTRS, restriction)
+    db_mgr = DataBaseManager()
+    rows = db_mgr.fetch_proj(DBTable.SESSION_NEURON, _NEURON_TABLE_ATTRS, restriction)
     # prepare values in "composed" columns
-    neuron_type_map = {r['nt_id']: r['nt_name'] for r in DataBaseManager.fetch_rows(DBTable.NEURON_TYPE)}
-    user_map = {r['username']: r['full_name'] for r in DataBaseManager.fetch_rows(DBTable.USER)}
+    neuron_type_map = {r['nt_id']: r['nt_name'] for r in db_mgr.fetch_rows(DBTable.NEURON_TYPE)}
+    user_map = {r['username']: r['full_name'] for r in db_mgr.fetch_rows(DBTable.USER)}
     for row in rows:
         row['nt_name'] = neuron_type_map[row['unit_type']]
         row['full_name'] = user_map[row['experimenter']]
@@ -109,18 +107,19 @@ def _filter_group() -> dbc.Row:
     Returns:
         A Bootstrap Row container holding the "Filter Results" button and filter widgets embedded in a Popover.
     """
-    experimenters = list(DataBaseManager.fetch_proj(DBTable.USER, ['username', 'full_name']))
+    db_mgr = DataBaseManager()
+    experimenters = list(db_mgr.fetch_proj(DBTable.USER, ['username', 'full_name']))
     experimenters.sort(key=lambda x: x['full_name'])
     experimenters.insert(0, {'username': _FILTER_UNUSED, 'full_name': _FILTER_UNUSED})
-    subjects = DataBaseManager.fetch_attribute_values(DBTable.SUBJECT, "subj_id")
+    subjects = db_mgr.fetch_attribute_values(DBTable.SUBJECT, "subj_id")
     subjects.sort()
     subjects.insert(0, _FILTER_UNUSED)
-    neuron_types = list(DataBaseManager.fetch_rows(DBTable.NEURON_TYPE))
+    neuron_types = list(db_mgr.fetch_rows(DBTable.NEURON_TYPE))
     neuron_types.sort(key=lambda x: x['nt_name'])
     neuron_types.insert(0, {'nt_id': _FILTER_UNUSED, 'nt_name': _FILTER_UNUSED})
     date_choices = [_FILTER_UNUSED, 'on', 'before', 'after']
 
-    num_neurons = DataBaseManager.num_table_rows(DBTable.SESSION_NEURON)
+    num_neurons = db_mgr.num_table_rows(DBTable.SESSION_NEURON)
 
     experimenter_row = dbc.Row(dbc.InputGroup([
         dbc.InputGroupAddon("Experimenter =", addon_type="prepend"),
@@ -166,9 +165,10 @@ def _filter_group() -> dbc.Row:
 def _unit_summary(row_selected: Dict[str, Any]) -> html.Div:
     # retrieve the sampling rate for the neural recording, then retrieve the full unit record
     try:
+        db_mgr = DataBaseManager()
         primary_key = {k: row_selected[k] for k in ti.primary_key_of(DBTable.SESSION_NEURON, False)}
-        sampling_rate = DataBaseManager.fetch_attribute_values(DBTable.SESSION_EPHYS, 'sampling_rate', primary_key)[0]
-        unit = DataBaseManager.fetch_rows(DBTable.SESSION_NEURON, primary_key)[0]
+        sampling_rate = db_mgr.fetch_attribute_values(DBTable.SESSION_EPHYS, 'sampling_rate', primary_key)[0]
+        unit = db_mgr.fetch_rows(DBTable.SESSION_NEURON, primary_key)[0]
     except Exception:
         return html.Div(dbc.Alert("Failed to retrieve information on selected neuron from the database", is_open=True))
 
@@ -223,7 +223,7 @@ _RESP_TRIAL_VIEW_ID: str = "resp_trial_view"
 
 
 def _trials_panel(row_selected: Dict[str, Any]) -> html.Div:
-    proto_map = DataBaseManager.trial_protocols_for_neuron(row_selected, aggregate=True)
+    proto_map = DataBaseManager().trial_protocols_for_neuron(row_selected)
     if proto_map is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial information for neuron (internal error).", is_open=True))
 
@@ -274,10 +274,12 @@ _BEHAVIOR_TRACE_STYLE_MAP = {
 
 def _trial_figure(trial_data: TrialData) -> dcc.Graph:
     fig = make_subplots(rows=2, cols=1, specs=[[{"secondary_y": True}], [{"secondary_y": True}]])
+    hevel, vevel = trial_data.eye_velocity_saccades_removed()
     for response_id, trace in trial_data.behavior.items():
+        adj_trace = hevel if response_id == 'HEVEL' else (vevel if response_id == 'VEVEL' else trace)
         fig.add_trace(
-            go.Scatter(x=[i for i in range(len(trace))], y=trace, name=response_id, mode='lines',
-                       line=_BEHAVIOR_TRACE_STYLE_MAP[response_id],
+            go.Scatter(x=[i for i in range(len(adj_trace))], y=adj_trace, name=response_id, mode='lines',
+                       line=_BEHAVIOR_TRACE_STYLE_MAP[response_id], connectgaps=False,
                        yaxis='y2' if response_id.find('VEL') > -1 else None),
             row=1, col=1, secondary_y=(response_id.find('VEL') > -1)
         )
@@ -356,7 +358,7 @@ _AVG_VIEW_ID: str = "avg_view"
 
 
 def _average_responses_panel(row_selected: Dict[str, Any]) -> html.Div:
-    proto_map = DataBaseManager.trial_protocols_for_neuron(row_selected, aggregate=True)
+    proto_map = DataBaseManager().trial_protocols_for_neuron(row_selected, aggregate=True)
     if proto_map is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial information for neuron (internal error).", is_open=True))
     if len(proto_map.keys()) == 0:
@@ -398,30 +400,22 @@ def _average_responses_panel(row_selected: Dict[str, Any]) -> html.Div:
     return html.Div([markdown, nav_row, avg_response_view])
 
 
-_test_lock = Lock()
-
-
 def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union[html.Div, dcc.Graph]:
     # retrieve the data for all trial reps of the selected protocol for the selected neuron
-    print(f"===> T={time.time():.6f}: In _average_response_figure... proto_hash={proto_hash}", file=sys.stdout,
-          flush=True)   # TODO: DEBUG
-    with _test_lock:
-        trial_indices = DataBaseManager.trials_for_neuron(unit_key, proto_hash=proto_hash)
-        ok = not (trial_indices is None)
-        trial_data: List[TrialData] = list()
-        trial_pk = unit_key.copy()
-        if ok:
-            for trial_idx in trial_indices:
-                trial_pk['trial_idx'] = trial_idx
-                td = DataBaseManager.data_for_trial(trial_pk,
-                                                    behavior=['HEVEL', 'VEVEL'], unit_ids=[unit_key['unit_id']])
-                if td is None:
-                    ok = False
-                    break
-                trial_data.append(td)
+    db_mgr = DataBaseManager()
+    trial_indices = db_mgr.trials_for_neuron(unit_key, proto_hash=proto_hash)
+    ok = not (trial_indices is None)
+    trial_data: List[TrialData] = list()
+    trial_pk = unit_key.copy()
+    if ok:
+        for trial_idx in trial_indices:
+            trial_pk['trial_idx'] = trial_idx
+            td = db_mgr.data_for_trial(trial_pk, unit_ids=[unit_key['unit_id']])
+            if td is None:
+                ok = False
+                break
+            trial_data.append(td)
     if not ok:
-        print(f"====> T={time.time():.6f}: Exiting _average_response_figure ON ERROR...",
-              file=sys.stdout, flush=True)  # TODO
         return html.Div(dbc.Alert(f"Failed to retrieve trial data for neuron (internal error).", is_open=True))
     elif len(trial_data) < 3:
         return html.Div(dbc.Alert(f"Fewer than 3 trial reps ({len(trial_data)} found for selected protocol",
@@ -430,9 +424,15 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
     unit_id = unit_key['unit_id']
     protocol = trial_data[0].protocol
     prelude = 0
+    hevel_list = list()
+    vevel_list = list()
+    for td in trial_data:
+        h, v = td.eye_velocity_saccades_removed()
+        hevel_list.append(h)
+        vevel_list.append(v)
     if len(protocol.rvs) == 0:
-        hevel = np.nanmean([td.behavior['HEVEL'] for td in trial_data], axis=0)
-        vevel = np.nanmean([td.behavior['VEVEL'] for td in trial_data], axis=0)
+        hevel = np.nanmean(hevel_list, axis=0)
+        vevel = np.nanmean(vevel_list, axis=0)
         firing_rate = np.nanmean([td.instantaneous_firing_rate(unit_id, smooth=True) for td in trial_data], axis=0)
         std_fr = np.nanstd([td.instantaneous_firing_rate(unit_id, smooth=True) for td in trial_data], axis=0)
         fix1_pos, fix2_pos = protocol.compute_fixation_target_trajectories([])
@@ -441,8 +441,8 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
         # assumption: the RV is the duration of segment 0. Prelude P is the minimum seg 0 duration across trial reps.
         # We average responses starting P ticks before the end of segment 0.
         prelude = int(min([td.trial_rvs[0] for td in trial_data]))
-        hevel = np.nanmean([td.behavior['HEVEL'][td.trial_rvs[0]-prelude:] for td in trial_data], axis=0)
-        vevel = np.nanmean([td.behavior['VEVEL'][td.trial_rvs[0]-prelude:] for td in trial_data], axis=0)
+        hevel = np.nanmean([hevel_list[i][td.trial_rvs[0]-prelude:] for i, td in enumerate(trial_data)], axis=0)
+        vevel = np.nanmean([vevel_list[i][td.trial_rvs[0]-prelude:] for i, td in enumerate(trial_data)], axis=0)
         firing_rate = np.nanmean([td.instantaneous_firing_rate(unit_id, smooth=True)[td.trial_rvs[0]-prelude:]
                                   for td in trial_data], axis=0)
         std_fr = np.nanstd([td.instantaneous_firing_rate(unit_id, smooth=True)[td.trial_rvs[0]-prelude:]
@@ -513,9 +513,6 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
     if prelude > 0:
         fig.add_vrect(x0=-prelude, x1=0, fillcolor="red", opacity=0.2)
 
-    print(f"====> T={time.time():.6f}: Exiting _average_response_figure ON SUCCESS...",
-          file=sys.stdout, flush=True)  # TODO
-
     return dcc.Graph(figure=fig)
 
 
@@ -556,13 +553,11 @@ def serve_layout() -> html.Div:
                Output(_TRIALS_TAB_ID, "children"), Output(_AVG_TAB_ID, "children")],
               [Input(_NEURON_TABLE_ID, "selected_rows")], [State(_NEURON_TABLE_ID, "data")])
 def show_hide_detail_pane(selected_rows, rows):
-    print(f"====> T={time.time():.6f}: In show_hide_detail_pane...", file=sys.stdout, flush=True)   # TODO
     idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
     selected_row = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
     summary_tab = _unit_summary(selected_row) if selected_row else html.Div("Not available.")
     trials_tab = _trials_panel(selected_row) if selected_row else html.Div("Not available.")
     avg_tab = _average_responses_panel(selected_row) if selected_row else html.Div("Not available.")
-    print(f"====> T={time.time():.6f}: Exiting show_hide_detail_pane...", file=sys.stdout, flush=True)  # TODO
     return selected_row is not None, summary_tab, trials_tab, avg_tab
 
 
@@ -570,21 +565,17 @@ def show_hide_detail_pane(selected_rows, rows):
               [Input(_RESP_PROTO_SELECT_ID, "value")],
               [State(_NEURON_TABLE_ID, "selected_rows"), State(_NEURON_TABLE_ID, "data")])
 def on_trials_panel_proto_select(proto_hash_value, selected_rows, rows):
-    print(f"====> T={time.time():.6f}: In on_trials_panel_proto_select...", file=sys.stdout, flush=True)  # TODO
     idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
     selected_row = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
     if (proto_hash_value is None) or (selected_rows is None):
         raise dash.exceptions.PreventUpdate
-    with _test_lock:
-        trial_indices = DataBaseManager.trials_for_neuron(selected_row, proto_hash_value)
-        session_pk = {'experimenter': selected_row['experimenter'], 'subj_id': selected_row['subj_id'],
-                      'session_date': selected_row['session_date'], 'session_sfx': selected_row['session_sfx']}
-        total_trials = DataBaseManager.num_table_rows(DBTable.TRIAL, session_pk)
-    print(f"=====> T={time.time():.6f}: In on_trials_panel_proto_select, num_table_rows() = {total_trials}",
-          file=sys.stdout, flush=True)   # TODO
+    db_mgr = DataBaseManager()
+    trial_indices = db_mgr.trials_for_neuron(selected_row, proto_hash_value)
+    session_pk = {'experimenter': selected_row['experimenter'], 'subj_id': selected_row['subj_id'],
+                  'session_date': selected_row['session_date'], 'session_sfx': selected_row['session_sfx']}
+    total_trials = db_mgr.num_table_rows(DBTable.TRIAL, session_pk)
     options = [{'label': f"Trial {k} of {total_trials}", 'value': str(k)} for k in trial_indices]
     sel_value = str(trial_indices[0]) if trial_indices and (len(trial_indices) > 0) else None
-    print(f"====> T={time.time():.6f}: Exiting on_trials_panel_proto_select...", file=sys.stdout, flush=True)   # TODO
     return options, sel_value
 
 
@@ -592,7 +583,6 @@ def on_trials_panel_proto_select(proto_hash_value, selected_rows, rows):
               [Input(_RESP_TRIAL_SELECT_ID, "value")],
               [State(_NEURON_TABLE_ID, "selected_rows"), State(_NEURON_TABLE_ID, "data")])
 def on_trial_select(trial_idx_value, selected_rows, rows):
-    print(f"====> T={time.time():.6f}: In on_trial_select...", file=sys.stdout, flush=True)  # TODO
     idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
     selected_row = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
     try:
@@ -605,9 +595,7 @@ def on_trial_select(trial_idx_value, selected_rows, rows):
     trial_pk = {'experimenter': selected_row['experimenter'], 'subj_id': selected_row['subj_id'],
                 'session_date': selected_row['session_date'], 'session_sfx': selected_row['session_sfx'],
                 'trial_idx': trial_idx}
-    with _test_lock:
-        trial_data = DataBaseManager.data_for_trial(trial_pk, unit_ids=[selected_row['unit_id']])
-    print(f"====> T={time.time():.6f}: Exiting on_trial_select...", file=sys.stdout, flush=True)  # TODO
+    trial_data = DataBaseManager().data_for_trial(trial_pk, unit_ids=[selected_row['unit_id']])
     if trial_data is None:
         return html.Div(f"Failed to retrieve trial data for trial index {trial_idx}")
     else:
@@ -624,7 +612,7 @@ def on_trials_panel_show_hide_protocol_definition(*args):
     if trigger_id == _RESP_PROTO_VIEW_CLOSE_ID:
         return False, dash.no_update
     elif trigger_id == _RESP_PROTO_VIEW_OPEN_ID:
-        protocol = DataBaseManager.get_trial_protocol_definition(args[2])
+        protocol = DataBaseManager().get_trial_protocol_definition(args[2])
         if protocol:
             return True, protocol.display_definition()
     return False, dash.no_update
@@ -640,7 +628,7 @@ def on_mean_response_panel_show_hide_protocol_definition(*args):
     if trigger_id == _AVG_PROTO_VIEW_CLOSE_ID:
         return False, dash.no_update
     elif trigger_id == _AVG_PROTO_VIEW_OPEN_ID:
-        protocol = DataBaseManager.get_trial_protocol_definition(args[2])
+        protocol = DataBaseManager().get_trial_protocol_definition(args[2])
         if protocol:
             return True, protocol.display_definition()
     return False, dash.no_update
@@ -650,15 +638,11 @@ def on_mean_response_panel_show_hide_protocol_definition(*args):
               [Input(_AVG_PROTO_SELECT_ID, "value")],
               [State(_NEURON_TABLE_ID, "selected_rows"), State(_NEURON_TABLE_ID, "data")])
 def on_mean_response_panel_proto_select(proto_hash_value, selected_rows, rows):
-    print(f"====> T={time.time():.6f}: In on_mean_response_panel_proto_select...", file=sys.stdout, flush=True)  # TODO
     idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
     selected_row = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
     if (proto_hash_value is None) or (selected_rows is None):
         raise dash.exceptions.PreventUpdate
-    out = _average_response_figure(selected_row, proto_hash_value)
-    print(f"====> T={time.time():.6f}: Exiting on_mean_response_panel_proto_select...",
-          file=sys.stdout, flush=True)  # TODO
-    return out
+    return _average_response_figure(selected_row, proto_hash_value)
 
 
 def _filter_restrictions(username: str, subj_id: str, nt_id: str, date_op: str, date_iso: str) -> Optional[List[str]]:

@@ -9,6 +9,16 @@ adding or removing rows from any database table, uploading and committing an exp
 database, recording all changes in log file(s) in the backing repository so that the database can be reconstructed in
 the event of a catastrophic failure.
 
+IMPORTANT: Multiple threads will access DataBaseManager methods (the app server uses multiple threads to handle
+multiple client requests, even multiple requests from the same client). That means multiple threads could try to
+access the DataJoint-administered database at the same time. Experience has shown that the DataJoint framework with
+the underlying MySQL database is NOT thread-safe. Multiple threads calling into the same DataBaseManager method resulted
+in internal packet communication errors within the PYMYSQL package. For this reason, I've added a Lock to guard any
+DataBaseManager code that queries or modifies the database via DataJoint.
+
+TODO: The ProcessArchiveThread does a bunch of database inserts during the actual session commit without going through
+    DataBaseManager. These inserts are wrapped in a transaction -- hopefully that's OK
+
 ==> Session commits.
 
 Committing an experiment session to the database requires a multi-stage, user-interactive procedure. Multiple clients
@@ -113,8 +123,6 @@ from __future__ import annotations  # Needed in Python 3.7y to type-hint a metho
 import os
 import pickle
 import re
-import sys
-import traceback
 from copy import deepcopy
 import dash_bootstrap_components as dbc
 from dataclasses import dataclass
@@ -190,6 +198,8 @@ class DataBaseManager:
             """ Lock object guarding access to the set of running session commit jobs. """
             self._log_lock: threading.Lock = threading.Lock()
             """ Lock object guarding access to the database updates log file. """
+            self._db_lock: threading.Lock = threading.Lock()
+            """ Lock object guarding access to the database itself. """
 
     def on_startup(self) -> Optional[str]:
         """
@@ -306,8 +316,7 @@ class DataBaseManager:
             error_msg = f"Failed to post 'session' entry to database update log: {str(err)}"
         return error_msg
 
-    @staticmethod
-    def entry_form(table_id: DBTable, include_attrs: Optional[List[str]] = None,
+    def entry_form(self, table_id: DBTable, include_attrs: Optional[List[str]] = None,
                    initial_entry: Optional[Dict[str, AttributeValue]] = None,
                    alert_id: Optional[str] = None) -> dbc.Form:
         """
@@ -373,7 +382,7 @@ class DataBaseManager:
                 entry_widget = dbc.Select(
                     id=f"{attr_id}_input",
                     options=[{"label": opt[0], "value": opt[1]}
-                             for opt in DataBaseManager.foreign_key_choices(table_id, attr_id)],
+                             for opt in self.foreign_key_choices(table_id, attr_id)],
                     value=initial_entry[attr_id] if initial_entry else None
                 )
             elif (attr_info.type == AttrTypeEnum.TEXT) and attr_info.textrange and (attr_info.textrange[1] > 100):
@@ -414,8 +423,7 @@ class DataBaseManager:
 
         return dbc.Form(form_groups)
 
-    @staticmethod
-    def foreign_key_choices(table_id: DBTable, fkey_id: str) -> List[Tuple[str, AttributeValue]]:
+    def foreign_key_choices(self, table_id: DBTable, fkey_id: str) -> List[Tuple[str, AttributeValue]]:
         """
         Retrieve the list of available choices for the specified foreign key attribute in the specified table. To
         support using this list in a user-facing dropdown or list widget, each "choice" is represented by 2-tuple
@@ -439,23 +447,22 @@ class DataBaseManager:
 
         # for select parent tables, we sort on a user-facing attribute rather than the primary key
         if attr_info.fkey_table == DBTable.STUDY:
-            studies = sorted(DataBaseManager.fetch_proj(DBTable.STUDY, ['study_id', 'study_title']),
+            studies = sorted(self.fetch_proj(DBTable.STUDY, ['study_id', 'study_title']),
                              key=lambda study: study['study_title'])
             return [] if len(studies) == 0 else [(study['study_title'], study['study_id']) for study in studies]
         elif attr_info.fkey_table == DBTable.BRAIN_AREA:
-            regions = sorted(DataBaseManager.fetch_proj(DBTable.BRAIN_AREA, ['ba_id', 'ba_name']),
+            regions = sorted(self.fetch_proj(DBTable.BRAIN_AREA, ['ba_id', 'ba_name']),
                              key=lambda region: region['ba_name'])
             return [] if len(regions) == 0 else [(region['ba_name'], region['ba_id']) for region in regions]
         elif attr_info.fkey_table == DBTable.NEURON_TYPE:
-            n_types = sorted(DataBaseManager.fetch_proj(DBTable.NEURON_TYPE, ['nt_id', 'nt_name']),
+            n_types = sorted(self.fetch_proj(DBTable.NEURON_TYPE, ['nt_id', 'nt_name']),
                              key=lambda n_type: n_type['nt_name'])
             return [] if len(n_types) == 0 else [(n_type['ba_name'], n_type['ba_id']) for n_type in n_types]
 
-        fkey_values = sorted(DataBaseManager.fetch_attribute_values(attr_info.fkey_table, attr_info.fkey_id))
+        fkey_values = sorted(self.fetch_attribute_values(attr_info.fkey_table, attr_info.fkey_id))
         return [(v, v) for v in fkey_values]
 
-    @staticmethod
-    def num_table_rows(table_id: DBTable,
+    def num_table_rows(self, table_id: DBTable,
                        restriction: Optional[List[str], Dict[str, AttributeValue]] = None) -> int:
         """
         Get the current number of entities in the specified database table.
@@ -476,16 +483,13 @@ class DataBaseManager:
             table: dj.Table = _table_map[table_id]
             query = (table & restriction) if isinstance(restriction, dict) else \
                 ((table & dj.AndList(restriction)) if isinstance(restriction, list) else table)
-            n = len(query)
-        except Exception as err:
-            traceback.print_exc(file=sys.stdout)   # TODO: DEBUG
-            print(f"====> T={time.time():.6f}: Got exception in num_table_rows: {str(err)}",
-                  file=sys.stdout, flush=True)
+            with self._db_lock:
+                n = len(query)
+        except Exception:
             n = 0
         return n
 
-    @staticmethod
-    def attribute_exists(table_id: DBTable, attr_id: str, attr_value: AttributeValue) -> bool:
+    def attribute_exists(self, table_id: DBTable, attr_id: str, attr_value: AttributeValue) -> bool:
         """
         Does the specified attribute have the specified value in any row in the specified table?
         Args:
@@ -496,11 +500,10 @@ class DataBaseManager:
         Returns:
             False if attribute value not found in table (or if an error occurs).
         """
-        existing_values = DataBaseManager.fetch_attribute_values(table_id, attr_id)
+        existing_values = self.fetch_attribute_values(table_id, attr_id)
         return attr_value in existing_values
 
-    @staticmethod
-    def fetch_attribute_values(table_id: DBTable, attr_id: str,
+    def fetch_attribute_values(self, table_id: DBTable, attr_id: str,
                                restriction: Optional[Dict[str, AttributeValue]] = None) -> List[AttributeValue]:
         """
         Fetch all existing values of the specified attribute within the specified database table, optionally restricted
@@ -522,13 +525,13 @@ class DataBaseManager:
             _restriction = None if not restriction else \
                 {attr: restriction[attr] for attr in ti.attributes_of(table_id, False) if attr in restriction}
             query = (table & _restriction) if _restriction else table
-            attr_values = list(query.fetch(attr_id))
+            with self._db_lock:
+                attr_values = list(query.fetch(attr_id))
         except Exception:
             attr_values = []
         return attr_values
 
-    @staticmethod
-    def fetch_proj(table_id: DBTable, attributes: List[str], restriction:
+    def fetch_proj(self, table_id: DBTable, attributes: List[str], restriction:
                    Optional[List[str], Dict[str, AttributeValue]] = None) -> List[Dict[str, AttributeValue]]:
         """
         Fetch selected attributes (aka, columns) from the specified table.
@@ -550,13 +553,13 @@ class DataBaseManager:
             table: dj.Table = _table_map[table_id]
             query = (table & restriction) if isinstance(restriction, dict) else \
                 ((table & dj.AndList(restriction)) if isinstance(restriction, list) else table)
-            rows = query.proj(*attributes).fetch(as_dict=True)
+            with self._db_lock:
+                rows = query.proj(*attributes).fetch(as_dict=True)
         except Exception:
             rows = []
         return rows
 
-    @staticmethod
-    def fetch_rows(table_id: DBTable, restriction: Optional[Dict[str, AttributeValue]] = None) -> \
+    def fetch_rows(self, table_id: DBTable, restriction: Optional[Dict[str, AttributeValue]] = None) -> \
             List[Dict[str, AttributeValue]]:
         """
         Fetch all or a subset of the rows in the specified database table.
@@ -574,7 +577,8 @@ class DataBaseManager:
         try:
             table: dj.Table = _table_map[table_id]
             query = (table & restriction) if restriction else table
-            rows = query.fetch(as_dict=True)
+            with self._db_lock:
+                rows = query.fetch(as_dict=True)
         except Exception:
             rows = []
         return rows
@@ -598,7 +602,7 @@ class DataBaseManager:
             return f"Unrecognized database table ID: {str(table_id)}"
         try:
             table: dj.Table = _table_map[table_id]
-            with table.connection.transaction:
+            with self._db_lock, table.connection.transaction:
                 table.insert1(row, replace=False)
                 if log:
                     err_msg = self._log_add_table_row(table_id, row)
@@ -628,7 +632,7 @@ class DataBaseManager:
             return f"Unrecognized database table ID: {str(table_id)}"
         try:
             table: dj.Table = _table_map[table_id]
-            with table.connection.transaction:
+            with self._db_lock, table.connection.transaction:
                 query = (table & restriction) if restriction else table
                 query.delete(verbose=False)
                 if log:
@@ -639,8 +643,7 @@ class DataBaseManager:
             return f"Delete failed: table={str(table_id)}, restrict={restriction} ===> {str(e)}"
         return None
 
-    @staticmethod
-    def row_exists(table_id: DBTable, row_pk: Dict[str, AttributeValue]) -> bool:
+    def row_exists(self, table_id: DBTable, row_pk: Dict[str, AttributeValue]) -> bool:
         """
         Does the specified entry/row currently exist in the specified table?
 
@@ -658,13 +661,12 @@ class DataBaseManager:
         table_pk = ti.primary_key_of(table_id, False)
         try:
             restriction = {key: row_pk[key] for key in table_pk}
-            exists = (DataBaseManager.num_table_rows(table_id, restriction) == 1)
+            exists = (self.num_table_rows(table_id, restriction) == 1)
         except KeyError:
             raise ValueError("Incomplete primary key")
         return exists
 
-    @staticmethod
-    def check_row(table_id: DBTable, row: Dict[str, AttributeValue], omit_master: bool = False) -> Optional[str]:
+    def check_row(self, table_id: DBTable, row: Dict[str, AttributeValue], omit_master: bool = False) -> Optional[str]:
         """
         Check whether or not the proposed row entry is valid and does not yet exist in the specified database table.
 
@@ -682,13 +684,12 @@ class DataBaseManager:
         """
         err_msg = None
         try:
-            DataBaseManager._validate_row(table_id, row, omit_master)
+            self._validate_row(table_id, row, omit_master)
         except (Exception, ValueError) as err:
             err_msg = f"Invalid entry: {str(err)}"
         return err_msg
 
-    @staticmethod
-    def _validate_row(table_id: DBTable, row: Dict[str, AttributeValue], omit_master: bool = False) -> None:
+    def _validate_row(self, table_id: DBTable, row: Dict[str, AttributeValue], omit_master: bool = False) -> None:
         """
         Validate an entry (aka, row) that is to be inserted into the database table specified.
 
@@ -707,19 +708,18 @@ class DataBaseManager:
         """
         # we never check existence when the table uses an auto-incrementing PK!
         if not (ti.has_auto_primary_key(table_id) or omit_master):
-            if DataBaseManager.row_exists(table_id, row):
+            if self.row_exists(table_id, row):
                 raise Exception("Attempt to add a new entry with an existing primary key")
         for attr_id in ti.attributes_of(table_id, omit_master):
             attr_info = ti.attribute_info(table_id, attr_id)
             if attr_info.type != AttrTypeEnum.AUTO:
                 if attr_id not in row:
                     raise Exception(f"Missing attribute: {attr_id}")
-                DataBaseManager._validate_attribute_value(table_id, attr_id, row[attr_id])
+                self._validate_attribute_value(table_id, attr_id, row[attr_id])
             elif attr_id in row:
                 row.pop(attr_id, None)
 
-    @staticmethod
-    def _validate_attribute_value(table_id: DBTable, attr_id: str, attr_value: AttributeValue) -> None:
+    def _validate_attribute_value(self, table_id: DBTable, attr_id: str, attr_value: AttributeValue) -> None:
         """Validate the proposed value for an attribute in the underlying table.
 
         Validation of the attribute value depends on the attribute type, AttrTypeEnum:
@@ -756,7 +756,7 @@ class DataBaseManager:
             if isinstance(attr_value, str) and (attr_value == ""):
                 raise ValueError(f"Missing value for primary key attribute: '{attr_info.label}'")
         if attr_info.type == AttrTypeEnum.FKEY:
-            if not DataBaseManager.attribute_exists(attr_info.fkey_table, attr_info.fkey_id, attr_value):
+            if not self.attribute_exists(attr_info.fkey_table, attr_info.fkey_id, attr_value):
                 raise ValueError(f"Missing foreign key: '{attr_info.label}' = '{str(attr_value)}'")
         elif attr_info.type == AttrTypeEnum.ENUM:
             if not (attr_value in attr_info.options):
@@ -821,7 +821,7 @@ class DataBaseManager:
             src_pk = map_table_id.source_key_for_mapping_table()
             dst_pk = map_table_id.destination_key_for_mapping_table()
             xref_rows = [{src_pk: src_pk_val, dst_pk: value} for value in map_set]
-            with map_table.connection.transaction:
+            with self._db_lock, map_table.connection.transaction:
                 (map_table & {src_pk: src_pk_val}).delete(verbose=False)
                 if len(xref_rows) > 0:
                     map_table.insert(xref_rows)
@@ -833,8 +833,7 @@ class DataBaseManager:
             error_msg = f"Failed to update cross-reference table {str(map_table_id)}: {str(err)}"
         return error_msg
 
-    @staticmethod
-    def trial_protocols_for_neuron(neuron_key: Dict[str, AttributeValue], aggregate: bool = False) \
+    def trial_protocols_for_neuron(self, neuron_key: Dict[str, AttributeValue], aggregate: bool = False) \
             -> Optional[Dict[str, str]]:
         """
         Get all trial protocols presented to the specified neural unit.
@@ -857,32 +856,31 @@ class DataBaseManager:
             trial_table: dj.Table = _table_map[DBTable.TRIAL]
             response_table: dj.Table = _table_map[DBTable.TRIAL_NEURONAL]
             neuron_pk = {k: neuron_key[k] for k in ti.primary_key_of(DBTable.SESSION_NEURON, False)}
-            results = (trial_table & (response_table & neuron_pk)).proj(..., '-trial_header').fetch(as_dict=True)
+            with self._db_lock:
+                results = (trial_table & (response_table & neuron_pk)).proj(..., '-trial_header').fetch(as_dict=True)
             proto_hashes = {r['proto_hash'] for r in results}
             if aggregate:
                 all_reps = [r['proto_hash'] for r in results]
                 out = dict()
                 for h in proto_hashes:
                     if all_reps.count(h) > 2:
-                        proto = DataBaseManager.get_trial_protocol_definition(h)
+                        proto = self.get_trial_protocol_definition(h)
                         if proto is None:
                             return None
                         elif proto.can_aggregate_responses():
                             out[h] = proto.trial.path_name()
             else:
                 restriction = [f"proto_hash = '{h}'" for h in proto_hashes]
-                protocols = (proto_table & restriction).\
-                    proj('proto_name', 'proto_set', 'proto_subset').fetch(as_dict=True)
+                with self._db_lock:
+                    protocols = (proto_table & restriction).\
+                        proj('proto_name', 'proto_set', 'proto_subset').fetch(as_dict=True)
                 out = {p['proto_hash']: f"{p['proto_set']}/{p['proto_subset']}/{p['proto_name']}" for p in protocols}
             sorted_tuples = sorted(out.items(), key=lambda item: item[1])
             return {k: v for k, v in sorted_tuples}
-        except Exception as err:
-            traceback.print_exc(file=sys.stdout)  # TODO: TESTING
-            traceback.print_stack(file=sys.stdout)
+        except Exception:
             return None
 
-    @staticmethod
-    def get_trial_protocol_definition(proto_hash: str) -> Optional[maestro.Protocol]:
+    def get_trial_protocol_definition(self, proto_hash: str) -> Optional[maestro.Protocol]:
         """
         Retrieve the definition of the specified Maestro trial protocol definition from the lab database.
 
@@ -893,14 +891,14 @@ class DataBaseManager:
         """
         try:
             proto_table: dj.Table = _table_map[DBTable.TRIAL_PROTOCOL]
-            protocol_entry = (proto_table & {'proto_hash': proto_hash}).fetch1()
+            with self._db_lock:
+                protocol_entry = (proto_table & {'proto_hash': proto_hash}).fetch1()
             return pickle.loads(protocol_entry['proto_def'])
         except Exception:
             return None
 
-    @staticmethod
-    def trials_for_neuron(
-            neuron_key: Dict[str, AttributeValue], proto_hash: Optional[str] = None) -> Optional[List[int]]:
+    def trials_for_neuron(self, neuron_key: Dict[str, AttributeValue],
+                          proto_hash: Optional[str] = None) -> Optional[List[int]]:
         """
         Get the indices of all trials, or a subset thereof, presented to the specified neural unit.
 
@@ -919,27 +917,22 @@ class DataBaseManager:
             response_table: dj.Table = _table_map[DBTable.TRIAL_NEURONAL]
             neuron_pk = {k: neuron_key[k] for k in ti.primary_key_of(DBTable.SESSION_NEURON, False)}
             query = (trial_table & (response_table & neuron_pk)).proj('proto_hash')
-            relevant_trials = query.fetch(as_dict=True)
+            with self._db_lock:
+                relevant_trials = query.fetch(as_dict=True)
             if isinstance(proto_hash, str):
                 return [t['trial_idx'] for t in relevant_trials if t['proto_hash'] == proto_hash]
             else:
                 return [t['trial_idx'] for t in relevant_trials]
-        except Exception as err:
-            traceback.print_exc(file=sys.stdout)  # TODO: DEBUG
-            print(f"====> T={time.time():.6f}: Got exception in trials_for_neuron: {str(err)}",
-                  file=sys.stdout, flush=True)
+        except Exception:
             return None
 
-    @staticmethod
-    def data_for_trial(trial_key: Dict[str, AttributeValue], behavior: Optional[List[str]] = None,
+    def data_for_trial(self, trial_key: Dict[str, AttributeValue],
                        unit_ids: Optional[List[int]] = None) -> Optional[TrialData]:
         """
         Retrieve data recorded for a specified trial in the Lisberger lab database.
 
         Args:
             trial_key: At a minimum, this dictionary must uniquely identify a single trial record in the database.
-            behavior: Use this argument to request only selected behavioral responses ("HEPOS", "VEPOS", "HEVEL",
-                "VEVEL", "HDVEL") from the trial record. If None, all recorded behavioral responses are retrieved.
             unit_ids: Use this argument to request the responses of only selected neural units (identified by their
                 integer unit ID). If None, all recorded neural unit responses are retrieved.
         Returns:
@@ -949,22 +942,23 @@ class DataBaseManager:
         try:
             trial_table: dj.Table = _table_map[DBTable.TRIAL]
             trial_pk = {k: trial_key[k] for k in ti.primary_key_of(DBTable.TRIAL)}
-            trial_info = (trial_table & trial_pk).fetch1()
             trial_behavior: dj.Table = _table_map[DBTable.TRIAL_BEHAVIORAL]
-            results = (trial_behavior & trial_pk).fetch(as_dict=True)
-            behavioral_field: Dict[str, np.ndarray] = dict()
-            behaviors_wanted = behavior if behavior else maestro.BEHAVIOR_TO_CHANNEL.keys()
-            for response in results:
-                if response['response_id'] in behaviors_wanted:
-                    behavioral_field[response['response_id']] = response['response_trace']
             trial_neuronal: dj.Table = _table_map[DBTable.TRIAL_NEURONAL]
-            results = (trial_neuronal & trial_pk).fetch(as_dict=True)
+
+            with self._db_lock:
+                trial_info = (trial_table & trial_pk).fetch1()
+                behavioral_responses = (trial_behavior & trial_pk).fetch(as_dict=True)
+                neuronal_responses = (trial_neuronal & trial_pk).fetch(as_dict=True)
+                protocol_table: dj.Table = _table_map[DBTable.TRIAL_PROTOCOL]
+                proto_info = (protocol_table & {'proto_hash': trial_info['proto_hash']}).fetch1()
+
+            behavioral_field: Dict[str, np.ndarray] = dict()
+            for response in behavioral_responses:
+                behavioral_field[response['response_id']] = response['response_trace']
             neuronal_field: Dict[int, np.ndarray] = dict()
-            for response in results:
+            for response in neuronal_responses:
                 if (not unit_ids) or (response['unit_id'] in unit_ids):
                     neuronal_field[response['unit_id']] = response['spike_times']
-            protocol_table: dj.Table = _table_map[DBTable.TRIAL_PROTOCOL]
-            proto_info = (protocol_table & {'proto_hash': trial_info['proto_hash']}).fetch1()
             proto_def: maestro.Protocol = pickle.loads(proto_info['proto_def'])
 
             trial_data: TrialData = TrialData(
@@ -988,7 +982,6 @@ class DataBaseManager:
             )
             return trial_data
         except Exception:
-            traceback.print_exc(file=sys.stdout)  # TODO: DEBUG
             return None
 
     def initiate_session_commit(self) -> Tuple[bool, str]:
@@ -1378,9 +1371,9 @@ class DataBaseManager:
                     if worker.ephys_info and not ephys_info:
                         error_msg = "Missing electrophysiology metadata for session."
                     else:
-                        error_msg = DataBaseManager.check_row(DBTable.SESSION, session_info)
+                        error_msg = self.check_row(DBTable.SESSION, session_info)
                         if ephys_info and not error_msg:
-                            error_msg = DataBaseManager.check_row(DBTable.SESSION_EPHYS, ephys_info, True)
+                            error_msg = self.check_row(DBTable.SESSION_EPHYS, ephys_info, True)
                     # ensure any trial protocol candidates that required validation by user have been validated.
                     if not error_msg:
                         for i, proto_candidate in enumerate(worker.proto_candidates):
@@ -1695,8 +1688,9 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                 # that protocol already exists. For any candidate based on a single rep, or on 2 reps but does not match
                 # an existing protocol, the user must manually review and validate the protocol candidate before the
                 # session is committed to the database.
+                db_mgr = DataBaseManager()
                 proto_hash_map = \
-                    {ph: 1 for ph in DataBaseManager.fetch_attribute_values(DBTable.TRIAL_PROTOCOL, 'proto_hash')}
+                    {ph: 1 for ph in db_mgr.fetch_attribute_values(DBTable.TRIAL_PROTOCOL, 'proto_hash')}
                 for proto in [p for p in self.proto_candidates if p.num_reps >= 2]:
                     test_proto = maestro.Protocol.from_candidate(proto)
                     if test_proto.md5_digest in proto_hash_map:
@@ -1739,7 +1733,7 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                 # by the user.
                 self.session_info = dict()
                 self.session_info['experimenter'] = None
-                subject_choices = DataBaseManager().fetch_attribute_values(DBTable.SUBJECT, 'subj_id')
+                subject_choices = db_mgr.fetch_attribute_values(DBTable.SUBJECT, 'subj_id')
                 for choice in subject_choices:
                     if choice.lower() in ','.join([self.zip_path.name.lower(), sample_maestro_file_name.lower()]):
                         self.session_info['subj_id'] = choice
@@ -1846,7 +1840,8 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                 raise Exception("Operation cancelled.")
 
             # only insert new trial protocols -- keep track of what's inserted so we can rollback on failure
-            existing_proto_map = {pk['proto_hash']: 1 for pk in protocol_table.fetch('KEY')}
+            existing_proto_map = {pk['proto_hash']: 1
+                                  for pk in DataBaseManager().fetch_proj(DBTable.TRIAL_PROTOCOL, ['proto_hash'])}
             for protocol in self._protocols:
                 if protocol.md5_digest not in existing_proto_map:
                     protocol_entry: Dict[str, Any] = dict()
@@ -1858,8 +1853,9 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                     protocol_entry['proto_def'] = pickle.dumps(protocol)
                     protocols_to_add.append(protocol_entry)
             if len(protocols_to_add) > 0:
-                protocol_table.insert(protocols_to_add, replace=False)
-                protocols_added = True
+                with protocol_table.connection.transaction:
+                    protocol_table.insert(protocols_to_add, replace=False)
+                    protocols_added = True
 
             if self._cancel_request.is_set():
                 raise Exception("Operation cancelled.")
@@ -1935,6 +1931,10 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
         self.msg_q.put_nowait(f"Inserting trials into database... {num_inserted} of {num_trials}")
         t0 = time.time()
         trial1_start_sec: float = 0
+        trial_table = sgl.Trial()
+        behavioral_table = sgl.Trial.BehavioralResponse()
+        neuronal_table = sgl.Trial.NeuronalResponse()
+        event_table = sgl.Trial.Event()
         with zipfile.ZipFile(self.zip_path, 'r') as archive:
             for trial_filename in sorted_filenames:
                 data_file = maestro.DataFile.load(archive.read(trial_filename), trial_filename)
@@ -1988,7 +1988,7 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                     rv_values.append(rv_value)
                 trial_entry['trial_rvs'] = pickle.dumps(rv_values)
 
-                sgl.Trial().insert1(trial_entry, replace=False)
+                trial_table.insert1(trial_entry, replace=False)
 
                 # insert recorded behavioral responses into part table Trial.BehavioralResponse
                 for response_id in maestro.BEHAVIOR_TO_CHANNEL.keys():
@@ -2002,18 +2002,19 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                             response_id=response_id,
                             response_trace=response
                         )
-                        sgl.Trial.BehavioralResponse().insert1(response_entry, replace=False)
+                        behavioral_table.insert1(response_entry, replace=False)
 
                 # insert neural unit responses, if any, into Trial.NeuronalResponse. A neural unit may not fire any
-                # spikes during a trial, but that could be a valid response. Only exclude a unit if the last spike time
-                # is before trial start or the first spike time is after trial end!
+                # spikes during a trial, but that could be a valid response. Only exclude a unit if the last spike
+                # time is before trial start or the first spike time is after trial end!
                 if self.units is not None:
                     for i, unit in enumerate(self.units):
                         spikes = unit.spike_times
                         if (spikes[-1] < t_info.omniplex_start) or (spikes[0] > t_info.omniplex_stop):
                             continue
 
-                        spikes_in_trial = spikes[(spikes >= t_info.omniplex_start) & (spikes <= t_info.omniplex_stop)]
+                        spikes_in_trial = \
+                            spikes[(spikes >= t_info.omniplex_start) & (spikes <= t_info.omniplex_stop)]
                         spikes_in_trial = (spikes_in_trial - t_info.omniplex_start) * maestro_omniplex_time_scaling
                         response_entry = dict(
                             session_key,
@@ -2021,20 +2022,20 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                             unit_id=(i + 1),
                             spike_times=spikes_in_trial
                         )
-                        sgl.Trial.NeuronalResponse().insert1(response_entry, replace=False)
+                        neuronal_table.insert1(response_entry, replace=False)
 
-                # insert any recorded marker pulse events into Trial.Event (recorded in Maestro file, not by Omniplex).
+                # insert any recorded marker events into Trial.Event (recorded in Maestro file, not by Omniplex).
                 if data_file.events is not None:
                     for di_channel in data_file.events:
                         # convert event times from ms to sec and offset if event recording started after trial began
-                        event_times = np.array(data_file.events[di_channel]) * 0.001 + data_file.trial.record_start()
+                        event_times = np.array(data_file.events[di_channel])*0.001 + data_file.trial.record_start()
                         event_entry = dict(
                             session_key,
                             trial_idx=(num_inserted + 1),
                             event_ch=di_channel,
                             event_times=event_times
                         )
-                        sgl.Trial.Event().insert1(event_entry, replace=False)
+                        event_table.insert1(event_entry, replace=False)
 
                 num_inserted += 1
                 if (time.time() - t0) > 1:
@@ -2545,3 +2546,102 @@ class TrialData:
             firing_rate = np.convolve(firing_rate, kernel, mode='same')
 
         return firing_rate
+
+    def eye_velocity_saccades_removed(
+            self, offset: bool = True, t_vel: float = 20, t_vel_max: float = 50, t_acc: float = 1250,
+            t_acc_max: float = 2000, pre_ticks: int = 2, post_ticks: int = 5) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Return the horizontal and vertical eye velocity traces for this trial with any saccade epochs replaced by NaN
+        samples. This method ASSUMES a sampling rate of 1KHz!
+
+        Args:
+            offset: If True, the eye velocity traces are adjusted for DC offset, if possible. Default = True.
+            t_vel: Velocity threshold for a saccade. Default = 20 deg/sec
+            t_vel_max: Max velocity threshold for a saccade regardless the current acceleration. Default = 50 deg/sec.
+            t_acc: Acceleration threshold for a saccade. Default = 1250 deg/sec^2
+            t_acc_max: Max acceleration threshold for a saccade regardless the current velocity. Default = 2000.
+            pre_ticks: Number of samples before a detected saccade epoch that are included in that epoch. Default = 2.
+            post_ticks: # of samples after a detected saccade epoch that are included in that epoch. Default = 5.
+        Returns:
+            A 2-tuple (H, V) -- COPIES of the horizontal and vertical eye velocity traces in which any samples falling
+                within a detected saccade epoch are replaced with NaN. If either velocity trace was not recorded, it is
+                assumed to be 0 for the entire duration of the trial.
+        """
+        # handle edge cases: only H, only V, or no eye velocity trace available
+        if not (('HEVEL' in self.behavior) and ('VEVEL' in self.behavior)):
+            return np.zeros(self.duration_ms, dtype=np.float32), np.zeros(self.duration_ms, dtype=np.float32)
+        if 'HEVEL' in self.behavior:
+            hevel = np.copy(self.behavior['HEVEL'])
+            if offset:
+                hevel = hevel - self.estimate_velocity_baseline_offset('HEVEL')
+        else:
+            hevel = np.zeros(self.duration_ms, dtype=np.float32)
+        if 'VEVEL' in self.behavior:
+            vevel = np.copy(self.behavior['VEVEL'])
+            if offset:
+                vevel = vevel - self.estimate_velocity_baseline_offset('VEVEL')
+        else:
+            vevel = np.zeros(self.duration_ms, dtype=np.float32)
+        speed = np.sqrt(hevel ** 2 + vevel ** 2)
+        acceleration = np.diff(speed) / 0.001   # sampling rate = 1KHz!!
+        acceleration = np.append(acceleration, np.nan)
+        acceleration = np.abs(acceleration)
+        state = "not_saccading"
+        onset_indices = []
+        offset_indices = []
+        stopping_index = 0
+        for i in range(len(speed)):
+            if (state == "not_saccading") and (((speed[i] > t_vel) and (acceleration[i] > t_acc)) or
+                                               (acceleration[i] > t_acc_max) or (speed[i] > t_vel_max)):
+                state = "saccading"
+                onset_indices.append(max(0, i - pre_ticks))
+            elif (state == "saccading") and ((speed[i] < t_vel) or (acceleration[i] < t_acc)):
+                stopping_index = i + post_ticks
+                state = "stopping"
+            elif (state == "stopping") and (speed[i] > t_vel) and (acceleration[i] > t_acc):
+                state = "saccading"
+            if (state == "stopping") and (i >= stopping_index):
+                state = "not_saccading"
+                offset_indices.append(i)
+        # Make sure we have the same number of samples
+        if len(offset_indices) < len(onset_indices):
+            offset_indices.append(len(speed))
+
+        for i in range(len(offset_indices)):
+            hevel[onset_indices[i]:offset_indices[i]] = np.nan
+            vevel[onset_indices[i]:offset_indices[i]] = np.nan
+
+        return hevel, vevel
+
+    def estimate_velocity_baseline_offset(self, response_id: str) -> float:
+        """
+        Estimate the baseline offset for an eye velocity trace from this trial. This method examines the corresponding
+        position traces and looks for a contiguous segment spanning 100 samples (100ms) in which the position varies
+        by 0.1 degrees or less AND the velocity varies by 2 deg/s or less -- in which case eye velocity should be close
+        to 0 (and not in the tail of a saccade!). If it finds such a segment, the baseline offset in the velocity trace
+        is the mean value over the same segment in the original eye velocity trace.
+
+        Args:
+            response_id: Must be 'HEVEL', 'VEVEL', or 'HDVEL'.
+
+        Returns:
+            Estimated baseline offset in the specified behavioral trace. If the specified behavioral signal, or its
+                position counterpart, was not recorded, the offset cannot be estimated and 0 is returned.
+        """
+        if (response_id.find('VEL') == -1) or not (response_id in self.behavior):
+            return 0
+        pos_id = 'HEPOS' if response_id.find('H') > -1 else 'VEPOS'
+        if not (pos_id in self.behavior):
+            return 0
+        pos = self.behavior[pos_id]
+        vel = self.behavior[response_id]
+        start = 0
+        delta = 100
+        while start + delta <= len(pos):
+            chunk_pos = pos[start:start+delta]
+            chunk_vel = vel[start:start+delta]
+            if (np.nanmax(chunk_pos) - np.nanmin(chunk_pos) <= 0.1) and \
+                    (np.nanmax(chunk_vel) - np.nanmin(chunk_vel) <= 2):
+                return np.nanmean(chunk_vel)
+            start += 1
+        return 0

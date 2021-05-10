@@ -155,7 +155,7 @@ def load_analog_channel(fp: IO, channel: int, info: Dict[str, Any] = None,
         results[start:stop] = values
 
     if scale:
-        results = results.astype(np.float)
+        results = results.astype(np.float32)
         results *= info["analog_channels"][channel]["coeff_to_convert_to_units"] * 1000  # to mV
     return results
 
@@ -257,7 +257,7 @@ def load_event_channel(fp: IO, channel: int, info: Dict[str, Any] = None,
         results["strobed"][start:stop] = _read(fp, "<{:d}H".format(num_items))
 
     if scale:
-        results["timestamps"] = results["timestamps"].astype(np.float)
+        results["timestamps"] = results["timestamps"].astype(np.float32)
         results["timestamps"] /= info["timestamp_frequency"]
     return results
 
@@ -298,6 +298,7 @@ def load_spike_channel(fp: IO, channel: int, info: Dict[str, Any] = None, scale:
         return None
 
     # Attempt to load the results
+    # noinspection PyUnresolvedReferences
     total_items = np.sum(info["spike_channels"][channel]["block_num_items"])
     results = dict()
     results["num_points"] = info["spike_channels"][channel]["samples_per_spike"]
@@ -338,9 +339,9 @@ def load_spike_channel(fp: IO, channel: int, info: Dict[str, Any] = None, scale:
         results["spikes"] = results["spikes"][select, :]
         results["assignments"] = results["assignments"][select]
     if scale:
-        results["timestamps"] = results["timestamps"].astype(np.float)
+        results["timestamps"] = results["timestamps"].astype(np.float32)
         results["timestamps"] /= info["timestamp_frequency"]
-        results["spikes"] = results["spikes"].astype(np.float)
+        results["spikes"] = results["spikes"].astype(np.float32)
         results["spikes"] *= info["spike_channels"][channel]["coeff_to_convert_to_units"] * 1000  # to mV
     return results
 
