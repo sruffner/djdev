@@ -25,6 +25,7 @@ from plotly.subplots import make_subplots
 from app import app
 import database.table_info as ti
 from common import check_date
+from database import stats
 from database.manager import DataBaseManager, TrialData
 from database.table_info import DBTable
 import database.maestro as maestro
@@ -207,22 +208,23 @@ def _unit_summary(row_selected: Dict[str, Any]) -> html.Div:
 
 
 _RESP_PROTO_SELECT_ID: str = 'resp_proto_select'
-""" ID of dropdown that selects the trial protocol to view in the 'Trials' panel. """
-_RESP_TRIAL_SELECT_ID: str = 'resp_trial_select'
-""" ID of dropdown in 'Trials' panel that selects a particular trial rep for the selected trial protocol. """
+""" ID of dropdown that selects the trial protocol to view in the 'Response Data' panel. """
+_RESP_RESP_SELECT_ID: str = 'resp_response_select'
+""" ID of dropdown in 'Response Data' panel that selects the type of response displayed (response to a single trial,
+mean firing rate across all trial reps, or discharge statistics). """
 _RESP_PROTO_VIEW_OPEN_ID: str = 'resp_proto_view_open'
-""" ID of button on 'Trials' panel that raises the protocol definition modal window. """
+""" ID of button on 'Response Data' panel that raises the protocol definition modal window. """
 _RESP_PROTO_VIEW_MODAL_ID: str = 'resp_proto_view_modal'
-""" ID of Bootstrap Modal component in 'Trials' panel on which a protocol definition is displayed. """
+""" ID of Bootstrap Modal component in 'Response Data' panel on which a protocol definition is displayed. """
 _RESP_PROTO_VIEW_BODY_ID: str = 'resp_proto_view_content'
-""" ID of the Bootstrap ModalBody ('Trials' panel) in which the protocol definition is embedded. """
+""" ID of the Bootstrap ModalBody ('Response Data' panel) in which the protocol definition is embedded. """
 _RESP_PROTO_VIEW_CLOSE_ID: str = 'resp_proto_view_close'
-""" ID of button that extinguishes the Bootstrap Modal window ('Trials' panel) in which a protocol is displayed. """
-_RESP_TRIAL_VIEW_ID: str = "resp_trial_view"
-""" ID of HTML Div in the 'Trials' panel in which the response data for a single trial is displayed. """
+""" ID of button that extinguishes the Bootstrap Modal window in which a protocol is displayed. """
+_RESP_RESP_VIEW_ID: str = "resp_resp_view"
+""" ID of HTML Div in the 'Response Data' panel in which the selected response data is displayed. """
 
 
-def _trials_panel(row_selected: Dict[str, Any]) -> html.Div:
+def _response_panel(row_selected: Dict[str, Any]) -> html.Div:
     proto_map = DataBaseManager().trial_protocols_for_neuron(row_selected)
     if proto_map is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial information for neuron (internal error).", is_open=True))
@@ -248,15 +250,22 @@ def _trials_panel(row_selected: Dict[str, Any]) -> html.Div:
     )
 
     # These get populated via chained callbacks.
-    select_trial = dbc.Select(id=_RESP_TRIAL_SELECT_ID)
-    trial_view = html.Div(id=_RESP_TRIAL_VIEW_ID, children=[])
+    select_response = dbc.Select(id=_RESP_RESP_SELECT_ID)
+    figure_view = html.Div(id=_RESP_RESP_VIEW_ID, children=[])
+
+    markdown = dcc.Markdown(
+        '''Select a trial protocol, then select an individual trial response or an aggregate response statistic. 
+        *Aggregate response data is available only for those trial protocols for which 3 or more trial reps were 
+        recorded. In addition, the trial protocol can have no random variables, or a single random-duration segment at
+        the start of the trial.*'''
+    )
 
     nav_row = dbc.Row([
         dbc.Col(select_protocol, width=6),
         dbc.Col([view_btn, proto_modal]),
-        dbc.Col(select_trial, width=3, className='mr-1')
+        dbc.Col(select_response, width=3, className='mr-1')
     ])
-    return html.Div([nav_row, trial_view])
+    return html.Div([markdown, nav_row, figure_view])
 
 
 _BEHAVIOR_TRACE_STYLE_MAP = {
@@ -272,7 +281,14 @@ _BEHAVIOR_TRACE_STYLE_MAP = {
 }
 
 
-def _trial_figure(trial_data: TrialData) -> dcc.Graph:
+def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> Union[html.Div, dcc.Graph]:
+    trial_pk = {'experimenter': unit_key['experimenter'], 'subj_id': unit_key['subj_id'],
+                'session_date': unit_key['session_date'], 'session_sfx': unit_key['session_sfx'],
+                'trial_idx': trial_idx}
+    trial_data = DataBaseManager().data_for_trial(trial_pk, unit_ids=[unit_key['unit_id']])
+    if trial_data is None:
+        return html.Div(f"Failed to retrieve trial data for trial index {trial_idx}")
+
     fig = make_subplots(rows=2, cols=1, specs=[[{"secondary_y": True}], [{"secondary_y": True}]])
     hevel, vevel = trial_data.eye_velocity_saccades_removed()
     for response_id, trace in trial_data.behavior.items():
@@ -341,63 +357,6 @@ def _trial_figure(trial_data: TrialData) -> dcc.Graph:
         fig.add_vrect(x0=0, x1=trial_data.trial_rvs[0], fillcolor="red", opacity=0.2)
 
     return dcc.Graph(figure=fig)
-
-
-_AVG_PROTO_SELECT_ID: str = 'avg_proto_select'
-""" ID of dropdown that selects the trial protocol to view in the 'Mean Response' panel. """
-_AVG_PROTO_VIEW_OPEN_ID: str = 'avg_proto_view_open'
-""" ID of button on 'Mean Response' panel that raises the protocol definition modal window. """
-_AVG_PROTO_VIEW_MODAL_ID: str = 'avg_proto_view_modal'
-""" ID of Bootstrap Modal component in 'Mean Response' panel on which a protocol definition is displayed. """
-_AVG_PROTO_VIEW_BODY_ID: str = 'avg_proto_view_content'
-""" ID of the Bootstrap ModalBody ('Mean Response' panel) in which the protocol definition is embedded. """
-_AVG_PROTO_VIEW_CLOSE_ID: str = 'avg_proto_view_close'
-""" ID of button that extinguishes the Bootstrap Modal ('Mean Response' panel) in which a protocol is displayed. """
-_AVG_VIEW_ID: str = "avg_view"
-""" ID of HTML Div in the 'Mean Response' panel in which the mean response for a selected protocol is displayed. """
-
-
-def _average_responses_panel(row_selected: Dict[str, Any]) -> html.Div:
-    proto_map = DataBaseManager().trial_protocols_for_neuron(row_selected, aggregate=True)
-    if proto_map is None:
-        return html.Div(dbc.Alert(f"Failed to retrieve trial information for neuron (internal error).", is_open=True))
-    if len(proto_map.keys()) == 0:
-        return html.Div(dbc.Alert(f"No aggregate response data is available for this neuron.", is_open=True))
-
-    first_proto_key = next(iter(proto_map.keys()))
-    select_protocol = dbc.Select(
-        id=_AVG_PROTO_SELECT_ID,
-        options=[{'label': v, 'value': k} for k, v in proto_map.items()],
-        value=first_proto_key,
-        className="mb-2"
-    )
-    view_btn = dbc.Button("View details", id=_AVG_PROTO_VIEW_OPEN_ID, color='primary')
-    proto_modal = dbc.Modal(
-        [
-            dbc.ModalBody(id=_AVG_PROTO_VIEW_BODY_ID),
-            dbc.ModalFooter(
-                dbc.Row([
-                    dbc.Button("Close", id=_AVG_PROTO_VIEW_CLOSE_ID, color="primary")
-                ])
-            )
-        ],
-        id=_AVG_PROTO_VIEW_MODAL_ID, backdrop="static", size="xl", centered=True
-    )
-
-    # this is populated via a chained callback.
-    avg_response_view = html.Div(id=_AVG_VIEW_ID, children=[])
-
-    markdown = dcc.Markdown(
-        '''*Aggregate response data is available only for those trial protocols for which 3 or more trial reps were 
-        recorded. In addition, the trial protocol can have no random variables, or a single random-duration segment at
-        the start of the trial.*'''
-    )
-    nav_row = dbc.Row([
-        dbc.Col(select_protocol, width=6),
-        dbc.Col([view_btn, proto_modal]),
-        dbc.Col("", width=3, className='mr-1')
-    ])
-    return html.Div([markdown, nav_row, avg_response_view])
 
 
 def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union[html.Div, dcc.Graph]:
@@ -516,12 +475,104 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
     return dcc.Graph(figure=fig)
 
 
+def _discharge_statistics_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union[html.Div, dcc.Graph]:
+    # retrieve the data for all trial reps of the selected protocol for the selected neuron
+    db_mgr = DataBaseManager()
+    trial_indices = db_mgr.trials_for_neuron(unit_key, proto_hash=proto_hash)
+    ok = not (trial_indices is None)
+    trial_data: List[TrialData] = list()
+    trial_pk = unit_key.copy()
+    if ok:
+        for trial_idx in trial_indices:
+            trial_pk['trial_idx'] = trial_idx
+            td = db_mgr.data_for_trial(trial_pk, unit_ids=[unit_key['unit_id']])
+            if td is None:
+                ok = False
+                break
+            trial_data.append(td)
+    if not ok:
+        return html.Div(dbc.Alert(f"Failed to retrieve trial data for neuron (internal error).", is_open=True))
+    elif len(trial_data) < 3:
+        return html.Div(dbc.Alert(f"Fewer than 3 trial reps ({len(trial_data)} found for selected protocol",
+                                  is_open=True))
+
+    unit_id = unit_key['unit_id']
+    protocol = trial_data[0].protocol
+    # since we only compute aggregate response data for trial protocols with no RVs or a single random-duration segment
+    # at the start of trial, this prelude calcluation is valid
+    prelude_ms = 0 if len(protocol.rvs) == 0 else int(min([td.trial_rvs[0] for td in trial_data]))
+    fix1_pos, fix2_pos = protocol.compute_fixation_target_trajectories(trial_data[0].trial_rvs)
+    if (fix1_pos is not None) and (prelude_ms > 0):
+        fix1_pos = fix1_pos[trial_data[0].trial_rvs[0] - prelude_ms:, :]
+    if (fix2_pos is not None) and (prelude_ms > 0):
+        fix2_pos = fix2_pos[trial_data[0].trial_rvs[0] - prelude_ms:, :]
+    t_vec_proto = [i-prelude_ms for i in range(len(fix1_pos))] if (fix1_pos is not None) else None
+
+    isi: Optional[np.ndarray] = None
+    acg: Optional[np.ndarray] = None
+    num_spikes_in_acg = 0
+    for td in trial_data:
+        spike_times = td.neuronal[unit_id]
+        if prelude_ms > 0:
+            spike_times = spike_times[spike_times >= 1e-3*(td.trial_rvs[0]-prelude_ms)]
+        isi_for_trial = stats.generate_isi_histogram(spike_times)
+        isi = isi_for_trial if isi is None else (isi + isi_for_trial)
+        acg_for_trial, n = stats.generate_cross_correlogram(spike_times, spike_times)
+        acg = acg_for_trial if acg is None else (acg + acg_for_trial)
+        num_spikes_in_acg += n
+
+    proto_plot = None
+    if fix1_pos is not None:
+        proto_plot = go.Figure()
+        proto_plot.add_trace(
+            go.Scatter(x=t_vec_proto, y=fix1_pos[:, 0], name='FIX1_HPOS', mode='lines',
+                       line=_BEHAVIOR_TRACE_STYLE_MAP['FIX1_HPOS'], connectgaps=False))
+        proto_plot.add_trace(
+            go.Scatter(x=t_vec_proto, y=fix1_pos[:, 1], name='FIX1_VPOS', mode='lines',
+                       line=_BEHAVIOR_TRACE_STYLE_MAP['FIX1_VPOS'], connectgaps=False))
+        if fix2_pos is not None:
+            proto_plot.add_trace(
+                go.Scatter(x=t_vec_proto, y=fix2_pos[:, 0], name='FIX2_HPOS', mode='lines',
+                           line=_BEHAVIOR_TRACE_STYLE_MAP['FIX2_HPOS'], connectgaps=False))
+            proto_plot.add_trace(
+                go.Scatter(x=t_vec_proto, y=fix2_pos[:, 1], name='FIX2_VPOS', mode='lines',
+                           line=_BEHAVIOR_TRACE_STYLE_MAP['FIX2_VPOS'], connectgaps=False))
+        proto_plot.update_layout(
+            margin=dict(l=20, r=20, t=30, b=20),
+            xaxis=dict(title='time (milliseconds)'),
+            yaxis=dict(title='position (degrees)'),
+            showlegend=False
+        )
+
+    ds_plot = make_subplots(rows=1, cols=2, subplot_titles=('Autocorrelogram', 'Inter-spike Interval Histogram'))
+    ds_plot.add_trace(
+        go.Scatter(x=[i for i in range(-100, 101)], y=acg, mode='lines', connectgaps=False),
+        row=1, col=1)
+    ds_plot.add_trace(
+        go.Scatter(x=[i for i in range(0, 101)], y=isi, mode='lines', xaxis='x2', yaxis='y2'),
+        row=1, col=2)
+    ds_plot.update_layout(
+        margin=dict(l=20, r=20, t=30, b=20),
+        xaxis=dict(title='lag (milliseconds)'),
+        yaxis=dict(title='counts per bin'),
+        xaxis2=dict(title='ISI (ms)'),
+        yaxis2=dict(title='counts per bin'),
+        showlegend=False
+    )
+
+    if proto_plot is not None:
+        return html.Div([
+            dcc.Graph(figure=proto_plot, config=dict(staticPlot=True)),
+            dcc.Graph(figure=ds_plot, config=dict(staticPlot=True))
+        ])
+    else:
+        return dcc.Graph(figure=ds_plot, config=dict(staticPlot=True))
+
+
 _SUMMARY_TAB_ID: str = "unit_summary_tab"
 """ ID of 'Summary' tab panel in which the selected neuron's summary information is displayed. """
-_TRIALS_TAB_ID: str = "unit_trials_tab"
-""" ID of 'Trials' tab panel in which the selected neuron's response to any individual trial is displayed. """
-_AVG_TAB_ID: str = "unit_mean_response_tab"
-""" ID of 'Mean Response' tab panel displaying selected neuron's average response to a chose trial protocol. """
+_RESPONSE_TAB_ID: str = "unit_response_tab"
+""" ID of 'Trial Response Data' tab panel in which the selected neuron's response data is displayed. """
 _COLLAPSE_ID: str = "unit_collapse_id"
 """ ID of Dash Bootstrap Collapse element wrapping the tabbed panel displaying details for a selected neuron. The
 element is hidden when no neuron is selected. """
@@ -531,8 +582,7 @@ def serve_layout() -> html.Div:
     detail_panel = dbc.Tabs(
         [
             dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_SUMMARY_TAB_ID), className='mt-2'), label="Summary"),
-            dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_TRIALS_TAB_ID), className='mt-2'), label="Trials"),
-            dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_AVG_TAB_ID), className='mt-2'), label="Mean Response")
+            dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_RESPONSE_TAB_ID), className='mt-2'), label="Response Data")
         ]
     )
     """ Rendering of a tabbed panel in which a selected neuron's summary and response data are displayed. """
@@ -550,21 +600,20 @@ def serve_layout() -> html.Div:
 
 
 @app.callback([Output(_COLLAPSE_ID, "is_open"), Output(_SUMMARY_TAB_ID, "children"),
-               Output(_TRIALS_TAB_ID, "children"), Output(_AVG_TAB_ID, "children")],
+               Output(_RESPONSE_TAB_ID, "children")],
               [Input(_NEURON_TABLE_ID, "selected_rows")], [State(_NEURON_TABLE_ID, "data")])
 def show_hide_detail_pane(selected_rows, rows):
     idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
     selected_row = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
     summary_tab = _unit_summary(selected_row) if selected_row else html.Div("Not available.")
-    trials_tab = _trials_panel(selected_row) if selected_row else html.Div("Not available.")
-    avg_tab = _average_responses_panel(selected_row) if selected_row else html.Div("Not available.")
-    return selected_row is not None, summary_tab, trials_tab, avg_tab
+    response_tab = _response_panel(selected_row) if selected_row else html.Div("Not available.")
+    return selected_row is not None, summary_tab, response_tab
 
 
-@app.callback([Output(_RESP_TRIAL_SELECT_ID, "options"), Output(_RESP_TRIAL_SELECT_ID, "value")],
+@app.callback([Output(_RESP_RESP_SELECT_ID, "options"), Output(_RESP_RESP_SELECT_ID, "value")],
               [Input(_RESP_PROTO_SELECT_ID, "value")],
               [State(_NEURON_TABLE_ID, "selected_rows"), State(_NEURON_TABLE_ID, "data")])
-def on_trials_panel_proto_select(proto_hash_value, selected_rows, rows):
+def on_response_panel_proto_select(proto_hash_value, selected_rows, rows):
     idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
     selected_row = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
     if (proto_hash_value is None) or (selected_rows is None):
@@ -575,37 +624,41 @@ def on_trials_panel_proto_select(proto_hash_value, selected_rows, rows):
                   'session_date': selected_row['session_date'], 'session_sfx': selected_row['session_sfx']}
     total_trials = db_mgr.num_table_rows(DBTable.TRIAL, session_pk)
     options = [{'label': f"Trial {k} of {total_trials}", 'value': str(k)} for k in trial_indices]
-    sel_value = str(trial_indices[0]) if trial_indices and (len(trial_indices) > 0) else None
+    can_aggregate = (proto_hash_value in DataBaseManager().trial_protocols_for_neuron(selected_row, aggregate=True))
+    options.append({'label': "Mean firing rate", 'value': 'mfr', 'disabled': not can_aggregate})
+    options.append({'label': "Discharge statistics", 'value': 'ds', 'disabled': not can_aggregate})
+    sel_value = 'mfr' if can_aggregate else \
+        (str(trial_indices[0]) if trial_indices and (len(trial_indices) > 0) else None)
     return options, sel_value
 
 
-@app.callback(Output(_RESP_TRIAL_VIEW_ID, "children"),
-              [Input(_RESP_TRIAL_SELECT_ID, "value")],
-              [State(_NEURON_TABLE_ID, "selected_rows"), State(_NEURON_TABLE_ID, "data")])
-def on_trial_select(trial_idx_value, selected_rows, rows):
+@app.callback(Output(_RESP_RESP_VIEW_ID, "children"), [Input(_RESP_RESP_SELECT_ID, "value")],
+              [State(_NEURON_TABLE_ID, "selected_rows"), State(_NEURON_TABLE_ID, "data"),
+               State(_RESP_PROTO_SELECT_ID, "value")])
+def on_response_panel_response_select(resp_sel_value, selected_rows, rows, proto_hash_value):
+    # resp_sel_value is trial index OR 'mfr' (mean firing rate) OR 'ds' (discharge statistics)
     idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
-    selected_row = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
-    try:
-        trial_idx = int(trial_idx_value) if isinstance(trial_idx_value, str) else -1
-    except Exception:
-        trial_idx = -1
-    if (trial_idx < 0) or (selected_rows is None):
-        raise dash.exceptions.PreventUpdate
-
-    trial_pk = {'experimenter': selected_row['experimenter'], 'subj_id': selected_row['subj_id'],
-                'session_date': selected_row['session_date'], 'session_sfx': selected_row['session_sfx'],
-                'trial_idx': trial_idx}
-    trial_data = DataBaseManager().data_for_trial(trial_pk, unit_ids=[selected_row['unit_id']])
-    if trial_data is None:
-        return html.Div(f"Failed to retrieve trial data for trial index {trial_idx}")
-    else:
-        return _trial_figure(trial_data)
+    selected_unit = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
+    out = dash.no_update
+    if not ((selected_unit is None) or (proto_hash_value is None)):
+        if resp_sel_value == 'mfr':
+            out = _average_response_figure(selected_unit, proto_hash_value)
+        elif resp_sel_value == 'ds':
+            out = _discharge_statistics_figure(selected_unit, proto_hash_value)
+        else:
+            try:
+                trial_idx = int(resp_sel_value) if isinstance(resp_sel_value, str) else -1
+                if trial_idx >= 0:
+                    out = _single_trial_response_figure(selected_unit, trial_idx)
+            except Exception:
+                pass
+    return out
 
 
 @app.callback([Output(_RESP_PROTO_VIEW_MODAL_ID, "is_open"), Output(_RESP_PROTO_VIEW_BODY_ID, "children")],
               [Input(_RESP_PROTO_VIEW_OPEN_ID, "n_clicks"), Input(_RESP_PROTO_VIEW_CLOSE_ID, "n_clicks")],
               [State(_RESP_PROTO_SELECT_ID, "value")])
-def on_trials_panel_show_hide_protocol_definition(*args):
+def on_response_panel_show_hide_protocol_definition(*args):
     ctx = dash.callback_context
 
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ""
@@ -616,33 +669,6 @@ def on_trials_panel_show_hide_protocol_definition(*args):
         if protocol:
             return True, protocol.display_definition()
     return False, dash.no_update
-
-
-@app.callback([Output(_AVG_PROTO_VIEW_MODAL_ID, "is_open"), Output(_AVG_PROTO_VIEW_BODY_ID, "children")],
-              [Input(_AVG_PROTO_VIEW_OPEN_ID, "n_clicks"), Input(_AVG_PROTO_VIEW_CLOSE_ID, "n_clicks")],
-              [State(_AVG_PROTO_SELECT_ID, "value")])
-def on_mean_response_panel_show_hide_protocol_definition(*args):
-    ctx = dash.callback_context
-
-    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ""
-    if trigger_id == _AVG_PROTO_VIEW_CLOSE_ID:
-        return False, dash.no_update
-    elif trigger_id == _AVG_PROTO_VIEW_OPEN_ID:
-        protocol = DataBaseManager().get_trial_protocol_definition(args[2])
-        if protocol:
-            return True, protocol.display_definition()
-    return False, dash.no_update
-
-
-@app.callback(Output(_AVG_VIEW_ID, "children"),
-              [Input(_AVG_PROTO_SELECT_ID, "value")],
-              [State(_NEURON_TABLE_ID, "selected_rows"), State(_NEURON_TABLE_ID, "data")])
-def on_mean_response_panel_proto_select(proto_hash_value, selected_rows, rows):
-    idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
-    selected_row = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
-    if (proto_hash_value is None) or (selected_rows is None):
-        raise dash.exceptions.PreventUpdate
-    return _average_response_figure(selected_row, proto_hash_value)
 
 
 def _filter_restrictions(username: str, subj_id: str, nt_id: str, date_op: str, date_iso: str) -> Optional[List[str]]:
