@@ -359,8 +359,18 @@ def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> U
     return dcc.Graph(figure=fig)
 
 
-def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union[html.Div, dcc.Graph]:
-    # retrieve the data for all trial reps of the selected protocol for the selected neuron
+def _retrieve_trial_data(unit_key: Dict[str, Any], proto_hash: str) -> Optional[List[TrialData]]:
+    """
+    Retrieve the data for all trial reps of the selected protocol for the selected neuron.
+
+    Args:
+        unit_key: Dictionary that includes the primary key of a selected neural unit in the database.
+        proto_hash: The selected trial protocol's MD5 hash digest (the primary key in protocol database table).
+
+    Returns:
+        A list of trial data objects, one for each rep of the specified trial protocol during which specified neuron
+            was recorded. Returns None if an error occurs while retrieving the dat.
+    """
     db_mgr = DataBaseManager()
     trial_indices = db_mgr.trials_for_neuron(unit_key, proto_hash=proto_hash)
     ok = not (trial_indices is None)
@@ -374,7 +384,12 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
                 ok = False
                 break
             trial_data.append(td)
-    if not ok:
+    return trial_data if ok else None
+
+
+def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union[html.Div, dcc.Graph]:
+    trial_data = _retrieve_trial_data(unit_key, proto_hash)
+    if trial_data is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial data for neuron (internal error).", is_open=True))
     elif len(trial_data) < 3:
         return html.Div(dbc.Alert(f"Fewer than 3 trial reps ({len(trial_data)} found for selected protocol",
@@ -475,28 +490,20 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
     return dcc.Graph(figure=fig)
 
 
-def _discharge_statistics_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union[html.Div, dcc.Graph]:
-    # retrieve the data for all trial reps of the selected protocol for the selected neuron
-    db_mgr = DataBaseManager()
-    trial_indices = db_mgr.trials_for_neuron(unit_key, proto_hash=proto_hash)
-    ok = not (trial_indices is None)
-    trial_data: List[TrialData] = list()
-    trial_pk = unit_key.copy()
-    if ok:
-        for trial_idx in trial_indices:
-            trial_pk['trial_idx'] = trial_idx
-            td = db_mgr.data_for_trial(trial_pk, unit_ids=[unit_key['unit_id']])
-            if td is None:
-                ok = False
-                break
-            trial_data.append(td)
-    if not ok:
+_RESP_DS_RANGE_ID: str = 'resp_ds_range_slider'
+""" ID of widget selecting the trial interval over which the discharge statistics are computed. """
+_RESP_DS_GRAPH_ID: str = 'resp_ds_graph'
+""" ID of dcc.Graph in which discharge statistics are plotted. """
+
+
+def _discharge_statistics_panel(unit_key: Dict[str, Any], proto_hash: str) -> html.Div:
+    trial_data = _retrieve_trial_data(unit_key, proto_hash)
+    if trial_data is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial data for neuron (internal error).", is_open=True))
     elif len(trial_data) < 3:
         return html.Div(dbc.Alert(f"Fewer than 3 trial reps ({len(trial_data)} found for selected protocol",
                                   is_open=True))
 
-    unit_id = unit_key['unit_id']
     protocol = trial_data[0].protocol
     # since we only compute aggregate response data for trial protocols with no RVs or a single random-duration segment
     # at the start of trial, this prelude calcluation is valid
@@ -507,19 +514,6 @@ def _discharge_statistics_figure(unit_key: Dict[str, Any], proto_hash: str) -> U
     if (fix2_pos is not None) and (prelude_ms > 0):
         fix2_pos = fix2_pos[trial_data[0].trial_rvs[0] - prelude_ms:, :]
     t_vec_proto = [i-prelude_ms for i in range(len(fix1_pos))] if (fix1_pos is not None) else None
-
-    isi: Optional[np.ndarray] = None
-    acg: Optional[np.ndarray] = None
-    num_spikes_in_acg = 0
-    for td in trial_data:
-        spike_times = td.neuronal[unit_id]
-        if prelude_ms > 0:
-            spike_times = spike_times[spike_times >= 1e-3*(td.trial_rvs[0]-prelude_ms)]
-        isi_for_trial = stats.generate_isi_histogram(spike_times)
-        isi = isi_for_trial if isi is None else (isi + isi_for_trial)
-        acg_for_trial, n = stats.generate_cross_correlogram(spike_times, spike_times)
-        acg = acg_for_trial if acg is None else (acg + acg_for_trial)
-        num_spikes_in_acg += n
 
     proto_plot = None
     if fix1_pos is not None:
@@ -539,18 +533,83 @@ def _discharge_statistics_figure(unit_key: Dict[str, Any], proto_hash: str) -> U
                            line=_BEHAVIOR_TRACE_STYLE_MAP['FIX2_VPOS'], connectgaps=False))
         proto_plot.update_layout(
             margin=dict(l=20, r=20, t=30, b=20),
+            height=300,
             xaxis=dict(title='time (milliseconds)'),
             yaxis=dict(title='position (degrees)'),
             showlegend=False
         )
 
-    ds_plot = make_subplots(rows=1, cols=2, subplot_titles=('Autocorrelogram', 'Inter-spike Interval Histogram'))
-    ds_plot.add_trace(
-        go.Scatter(x=[i for i in range(-100, 101)], y=acg, mode='lines', connectgaps=False),
-        row=1, col=1)
-    ds_plot.add_trace(
-        go.Scatter(x=[i for i in range(0, 101)], y=isi, mode='lines', xaxis='x2', yaxis='y2'),
-        row=1, col=2)
+    # range slider selects the interval for the computation. Initially set to the entire trial timeline that is
+    # shared by all reps (in case seg 0 has random duration).
+    if prelude_ms == 0:
+        range_min = 0
+        range_max = protocol.trial.duration()
+        range_marks = {0: {"label": "0"}, range_max: {"label": f"{range_max}"}}
+    else:
+        range_min = -prelude_ms
+        range_max = protocol.trial.duration() - protocol.trial.segments[0].dur
+        range_marks = {range_min: {"label": f"{range_min}"}, 0: {"label": "0"}, range_max: {"label": f"{range_max}"}}
+
+    slider = dcc.RangeSlider(
+        id=_RESP_DS_RANGE_ID,
+        min=range_min, max=range_max, step=1,
+        value=[range_min, range_max],
+        marks=range_marks, allowCross=False,
+        pushable=100,  # at least 100ms range
+        tooltip={'always_visible': False, 'placement': 'bottom'}
+    )
+    instruction = dcc.Markdown('''**Select trial interval over which discharge statistics are computed:**''')
+    slider_row = html.Div([instruction, slider])
+
+    # note: the dcc.Graph displaying discharge statistics is populated by a chained callback
+    if proto_plot is not None:
+        return html.Div([
+            dcc.Graph(figure=proto_plot, config=dict(staticPlot=True)),
+            slider_row,
+            dcc.Graph(id=_RESP_DS_GRAPH_ID, config=dict(staticPlot=True))
+        ])
+    else:
+        return html.Div([slider_row, dcc.Graph(id=_RESP_DS_GRAPH_ID, config=dict(staticPlot=True))])
+
+
+def _discharge_statistics_figure(
+        unit_id: int, trial_data: List[TrialData], range_ms: Optional[List[int]] = None) -> go.Figure:
+    isi: Optional[np.ndarray] = None
+    acg: Optional[np.ndarray] = None
+    num_spikes_in_acg = 0
+    try:
+        protocol = trial_data[0].protocol
+        prelude_ms = 0 if len(protocol.rvs) == 0 else int(min([td.trial_rvs[0] for td in trial_data]))
+        for td in trial_data:
+            spike_times = td.neuronal[unit_id]
+            if range_ms is None:
+                if prelude_ms > 0:
+                    spike_times = spike_times[spike_times >= 1e-3*(td.trial_rvs[0]-prelude_ms)]
+            else:
+                start = td.trial_rvs[0] + range_ms[0] if prelude_ms > 0 else range_ms[0]
+                end = start + (range_ms[1] - range_ms[0])
+                spike_times = spike_times[np.logical_and(spike_times >= 1e-3*start, spike_times < 1e-3*end)]
+            if len(spike_times) < 2:
+                continue
+            isi_for_trial = stats.generate_isi_histogram(spike_times)
+            isi = isi_for_trial if isi is None else (isi + isi_for_trial)
+            acg_for_trial, n = stats.generate_cross_correlogram(spike_times, spike_times)
+            acg = acg_for_trial if acg is None else (acg + acg_for_trial)
+            num_spikes_in_acg += n
+    except Exception:
+        isi = None
+        acg = None
+        num_spikes_in_acg = 0
+
+    ds_plot = make_subplots(
+        rows=1, cols=2, subplot_titles=(f"Autocorrelogram (N={num_spikes_in_acg})", 'Inter-spike Interval Histogram')
+    )
+    if not (acg is None):
+        ds_plot.add_trace(go.Scatter(x=[i for i in range(-100, 101)], y=acg, mode='lines', connectgaps=False),
+                          row=1, col=1)
+    if not (isi is None):
+        ds_plot.add_trace(go.Scatter(x=[i for i in range(0, 101)], y=isi, mode='lines', xaxis='x2', yaxis='y2'),
+                          row=1, col=2)
     ds_plot.update_layout(
         margin=dict(l=20, r=20, t=30, b=20),
         xaxis=dict(title='lag (milliseconds)'),
@@ -560,13 +619,7 @@ def _discharge_statistics_figure(unit_key: Dict[str, Any], proto_hash: str) -> U
         showlegend=False
     )
 
-    if proto_plot is not None:
-        return html.Div([
-            dcc.Graph(figure=proto_plot, config=dict(staticPlot=True)),
-            dcc.Graph(figure=ds_plot, config=dict(staticPlot=True))
-        ])
-    else:
-        return dcc.Graph(figure=ds_plot, config=dict(staticPlot=True))
+    return ds_plot
 
 
 _SUMMARY_TAB_ID: str = "unit_summary_tab"
@@ -644,7 +697,7 @@ def on_response_panel_response_select(resp_sel_value, selected_rows, rows, proto
         if resp_sel_value == 'mfr':
             out = _average_response_figure(selected_unit, proto_hash_value)
         elif resp_sel_value == 'ds':
-            out = _discharge_statistics_figure(selected_unit, proto_hash_value)
+            out = _discharge_statistics_panel(selected_unit, proto_hash_value)
         else:
             try:
                 trial_idx = int(resp_sel_value) if isinstance(resp_sel_value, str) else -1
@@ -653,6 +706,17 @@ def on_response_panel_response_select(resp_sel_value, selected_rows, rows, proto
             except Exception:
                 pass
     return out
+
+
+@app.callback(Output(_RESP_DS_GRAPH_ID, "figure"), [Input(_RESP_DS_RANGE_ID, "value")],
+              [State(_NEURON_TABLE_ID, "selected_rows"), State(_NEURON_TABLE_ID, "data"),
+               State(_RESP_PROTO_SELECT_ID, "value")])
+def on_response_panel_ds_range(range_value, selected_rows, rows, proto_hash_value):
+    idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
+    selected_unit = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
+    ok = isinstance(range_value, list) and not ((selected_unit is None) or (proto_hash_value is None))
+    return dash.no_update if not ok else _discharge_statistics_figure(
+        selected_unit['unit_id'], _retrieve_trial_data(selected_unit, proto_hash_value), range_value)
 
 
 @app.callback([Output(_RESP_PROTO_VIEW_MODAL_ID, "is_open"), Output(_RESP_PROTO_VIEW_BODY_ID, "children")],
