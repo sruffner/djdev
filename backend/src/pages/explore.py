@@ -54,6 +54,16 @@ _NEURON_TABLE_DIV_ID: str = "nt_div"
 
 
 def _fetch_neurons(restriction: Optional[List[str]]) -> List[Dict[str, ti.AttributeValue]]:
+    """
+    Fetch information about some or all neural units stored in the lab database.
+
+    Args:
+        restriction: A list of string conditions (in DataJoint syntax) that all retrieved neural units must satisfy. If
+            None, the method retrieves all neural units in the database.
+    Returns:
+        A list of dictionaries, one for each neural unit retrieved. Each dictionary includes the unit attributes that
+            are displayed in the table of neurons -- see _NEURON_TABLE_COLS.
+    """
     db_mgr = DataBaseManager()
     rows = db_mgr.fetch_proj(DBTable.SESSION_NEURON, _NEURON_TABLE_ATTRS, restriction)
     # prepare values in "composed" columns
@@ -67,6 +77,9 @@ def _fetch_neurons(restriction: Optional[List[str]]) -> List[Dict[str, ti.Attrib
 
 
 def _table_of_neurons() -> dt.DataTable:
+    """
+    Prepare the Dash DataTable displaying information on all neural units stored in the lab database.
+    """
     rows = _fetch_neurons(None)
     data_table = dt.DataTable(
         id=_NEURON_TABLE_ID,
@@ -89,14 +102,23 @@ def _table_of_neurons() -> dt.DataTable:
 _FILTER_UNUSED: str = "<none>"
 """ Pseudo-value in any filter select widget indicating that filter is unused. """
 _FILTER_RAISE_ID: str = "filter_raise"
+""" ID of button widget that raises the Bootstrap Popover element in which the filter controls are arranged. """
 _FILTER_POPOVER_ID: str = "filter_popover"
+""" ID of Bootstrap Popover element in which the filter controls are arranged. """
 _FILTER_EXP_ID: str = "filter_exp"
+""" ID of Bootstrap Select element to filter neuron table by the experimenter. """
 _FILTER_SUBJ_ID: str = "filter_subj"
+""" ID of Bootstrap Select element to filter neuron table by the experiment subject. """
 _FILTER_TYPE_ID: str = "filter_type"
+""" ID of Bootstrap Select element to filter neuron table by the neuron type. """
 _FILTER_DATE_ID: str = "filter_date"
+""" ID of Bootstrap Select element to choose how neuron table is filtered by a specified date. """
 _DATE_PICKER_ID: str = "filter_date_picker"
+""" ID of Dash date picker widget that specifies the date for filtering the neuron table content. """
 _FILTER_CLEAR_ID: str = "filter_clear"
+""" ID of button widget that resets all filter controls. """
 _FILTER_COUNT_ID: str = "filter_count"
+""" ID of label that reflects how many neural units were found given the current state of the filter controls. """
 
 
 def _filter_group() -> dbc.Row:
@@ -105,6 +127,7 @@ def _filter_group() -> dbc.Row:
     control filtering of the neural units displayed in the main table on this panel. The Popover is raised when the
     mouse hovers over the "Filter Results" button. The control group lets the user filter the results by experimenter,
     neuron type, subject, and date recorded.
+
     Returns:
         A Bootstrap Row container holding the "Filter Results" button and filter widgets embedded in a Popover.
     """
@@ -164,6 +187,16 @@ def _filter_group() -> dbc.Row:
 
 
 def _unit_summary(row_selected: Dict[str, Any]) -> html.Div:
+    """
+    Helper method retrieves summary information on a selected neuron in the neuron table and prepares the content of the
+    "Summary" tab in the detail panel that appears below the neuron table.
+
+    Args:
+        row_selected: The row selected in the neuron table. This dictionary includes the primary key-value pairs that
+            uniquely identify a neuron in the database.
+    Returns:
+        An HTML Div that renders the contents of the "Summary" tab in the neuron detail panel.
+    """
     # retrieve the sampling rate for the neural recording, then retrieve the full unit record
     try:
         db_mgr = DataBaseManager()
@@ -225,6 +258,18 @@ _RESP_RESP_VIEW_ID: str = "resp_resp_view"
 
 
 def _response_panel(row_selected: Dict[str, Any]) -> html.Div:
+    """
+    Helper method generates the HTML Div element that renders the content of the "Response Data" tab in the neuron
+    detail panel. The actual neuron-specific content is populated by chained callbacks tied to the dropdowns that
+    select a trial protocol and a response type.
+
+    Args:
+        row_selected: The row selected in the neuron table. This dictionary includes the primary key-value pairs that
+            uniquely identify a neuron in the database.
+    Returns:
+        An HTML Div that renders the contents of the "Response Data" tab in the neuron detail panel.
+    """
+
     proto_map = DataBaseManager().trial_protocols_for_neuron(row_selected)
     if proto_map is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial information for neuron (internal error).", is_open=True))
@@ -282,12 +327,25 @@ _BEHAVIOR_TRACE_STYLE_MAP = {
 
 
 def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> Union[html.Div, dcc.Graph]:
+    """
+    Helper method prepares a two-figure plot displaying the specified neuron's response during the specified trial. The
+    top figure shows the position trajectory of the target designated as "Fixation Target #1" and the recorded position
+    and velocity trajectories of the eye. The bottom figure shows the neuron's recorded spike train and the derived
+    firing rate as a function of time.
+
+    Args:
+        unit_key: Dictionary containing the primary key-value pairs that uniquely identify a neuron in the database.
+        trial_idx: The index of the specified trial.
+    Returns:
+        A Dash Graph component containing the behavioral and neuronal responses during the specified trial. If an error
+            occurs while retrieving response data, the method instead returns an HTML Div with an error message.
+    """
     trial_pk = {'experimenter': unit_key['experimenter'], 'subj_id': unit_key['subj_id'],
                 'session_date': unit_key['session_date'], 'session_sfx': unit_key['session_sfx'],
                 'trial_idx': trial_idx}
     trial_data = DataBaseManager().data_for_trial(trial_pk, unit_ids=[unit_key['unit_id']])
     if trial_data is None:
-        return html.Div(f"Failed to retrieve trial data for trial index {trial_idx}")
+        return html.Div(dbc.Alert(f"Failed to retrieve trial data for trial index {trial_idx}", is_open=True))
 
     fig = make_subplots(rows=2, cols=1, specs=[[{"secondary_y": True}], [{"secondary_y": True}]])
     hevel, vevel = trial_data.eye_velocity_saccades_removed()
@@ -388,6 +446,26 @@ def _retrieve_trial_data(unit_key: Dict[str, Any], proto_hash: str) -> Optional[
 
 
 def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union[html.Div, dcc.Graph]:
+    """
+    Helper method prepares a two-figure plot displaying the mean behavioral and neuronal response across all recorded
+    reps of the specified trial protocol. The top figure shows the position trajectory of the target designated as
+    "Fixation Target #1", along with the average eye velocity trajectory. The bottom figure shows the specified neuron's
+    mean firing rate during the trial, with a +/-1 STD band. The timeline in both figures is that portion of the trial
+    protocol that is shared across all reps -- if a protocol includes an initial random-duration segment, then each rep
+    will have a different duration overall.
+
+    Note that the average response figure is only generated if: (1) there are at least 3 reps of the given protocol
+    during the experiment session; (2) the protocol definition is conducive to averaging (no random variables, or a
+    single random-duration segment at the start of the trial protocol).
+
+    Args:
+        unit_key: Dictionary containing the primary key-value pairs that uniquely identify a neuron in the database.
+        proto_hash: The MD5 hash digest that uniquely identifies the trial protocol in the lab database.
+    Returns:
+        A Dash Graph component containing the mean behavioral and neuronal responses over all recorded reps of the
+            specified trial protocol. If an error occurs while retrieving or processing response data, the method
+            instead returns an HTML Div with an error message.
+    """
     trial_data = _retrieve_trial_data(unit_key, proto_hash)
     if trial_data is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial data for neuron (internal error).", is_open=True))
@@ -497,6 +575,26 @@ _RESP_DS_GRAPH_ID: str = 'resp_ds_graph'
 
 
 def _discharge_statistics_panel(unit_key: Dict[str, Any], proto_hash: str) -> html.Div:
+    """
+    Helper method prepares a two-figure plot displaying the specified neuron's discharge statistics (autocorrelogram and
+    inter-spike interval histogram) computed across all reps of the specified trial protocol. The top figure is a simple
+    representation of the trial protocol showing only the position trajectory of the target designated as "Fixation
+    Target #1". Below this is range slider that lets the user select the contiguous interval of time over which the
+    statistics are computed; initially, the slider covers the entire trial timeline shared by all trial reps (single
+    trial rep durations will vary if the initial segment of the protocol has a random duration). The bottom figure has
+    two side-by-side plots: the ACG and the ISI histogram.
+
+    Note that the discharge statistics are only generated if: (1) there are at least 3 reps of the given protocol
+    during the experiment session; (2) the protocol definition is conducive to averaging (no random variables, or a
+    single random-duration segment at the start of the trial protocol).
+
+    Args:
+        unit_key: Dictionary containing the primary key-value pairs that uniquely identify a neuron in the database.
+        proto_hash: The MD5 hash digest that uniquely identifies the trial protocol in the lab database.
+    Returns:
+        An HTML Div displaying the specified neuron's discharge statistics as described. If an error occurs while
+            retrieving response data, the method instead returns an HTML Div with an error message.
+    """
     trial_data = _retrieve_trial_data(unit_key, proto_hash)
     if trial_data is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial data for neuron (internal error).", is_open=True))
@@ -574,6 +672,17 @@ def _discharge_statistics_panel(unit_key: Dict[str, Any], proto_hash: str) -> ht
 
 def _discharge_statistics_figure(
         unit_id: int, trial_data: List[TrialData], range_ms: Optional[List[int]] = None) -> go.Figure:
+    """
+    Helper method computes the autocorrelogram (ACG) and inter-spike interval (ISI) histogram for the specified neuron
+    across all reps of a particular trial protocol.
+
+    Args:
+        unit_id: Integer ID assigned to neuron (unique across experiment session).
+        trial_data: List of TrialData objects containing the response data from each rep of a single trial protocol.
+        range_ms: The contiguous interval [S, E] over which the ACG and ISI should be computed, in milliseconds.
+    Returns:
+        The prepared figure displaying the computed ACG and ISI histogram.
+    """
     isi: Optional[np.ndarray] = None
     acg: Optional[np.ndarray] = None
     num_spikes_in_acg = 0
@@ -596,6 +705,12 @@ def _discharge_statistics_figure(
             acg_for_trial, n = stats.generate_cross_correlogram(spike_times, spike_times)
             acg = acg_for_trial if acg is None else (acg + acg_for_trial)
             num_spikes_in_acg += n
+        # convert counts per bin to relative probability to Hz (1ms bins). Also, NaN the lag = 0 bin (trigger spike
+        # is perfectly corralated with itself!)
+        if num_spikes_in_acg > 0:
+            acg = (acg / num_spikes_in_acg) * 1000
+            acg[100] = np.nan
+
     except Exception:
         isi = None
         acg = None
@@ -613,7 +728,7 @@ def _discharge_statistics_figure(
     ds_plot.update_layout(
         margin=dict(l=20, r=20, t=30, b=20),
         xaxis=dict(title='lag (milliseconds)'),
-        yaxis=dict(title='counts per bin'),
+        yaxis=dict(title='firing rate (Hz)'),
         xaxis2=dict(title='ISI (ms)'),
         yaxis2=dict(title='counts per bin'),
         showlegend=False
@@ -632,6 +747,10 @@ element is hidden when no neuron is selected. """
 
 
 def serve_layout() -> html.Div:
+    """
+    Generate the HTML Div that lays out the page on which clients can explore any neuron recordings stored in the
+    lab database.
+    """
     detail_panel = dbc.Tabs(
         [
             dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_SUMMARY_TAB_ID), className='mt-2'), label="Summary"),
