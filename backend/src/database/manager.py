@@ -123,6 +123,7 @@ from __future__ import annotations  # Needed in Python 3.7y to type-hint a metho
 import os
 import pickle
 import re
+import sys
 from copy import deepcopy
 import dash_bootstrap_components as dbc
 from dataclasses import dataclass
@@ -1442,8 +1443,404 @@ class DataBaseManager:
             # TODO: Need to log this error to an admin log so it can be addressed
             pass
 
+    def reconstruct_database_from_log(self) -> bool:
+        """
+        FOR ADMIN USE ONLY: THIS METHOD MUST NEVER BE CALLED WHILE THE BACKEND SERVER IS RUNNING AND PROCESSING EXTERNAL
+        CLIENT REQUESTS!
 
-class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
+        Reconstruct the entire content of the Lisberger lab database from the database update log entries and the
+        experiment data archive files stored in the backing repository.
+
+        See file header for a description of the database update log, the folder structure of the backing repository,
+        and how reconstruction is possible by "processing" the update log entries in sequence.
+
+        If the database becomes corrupted for whatever reason, this method provides a mechanism for repopulating it
+        from scratch without user intervention. The database update log contains an entry for every change made to the
+        database: addition or deletion of a row in any of the "manual" tables, an update to a "mapping" table, and a
+        session commit. The last is a complex task that involves many additions to the database. It is possible to
+        reproduce a session commit without user intervention because the repository stores the original session data
+        archive along with a pickle file containing all of the information required to do the commit.
+
+        During normal backend operation, all database changes are recorded in the database update log file. Here we
+        are processing the log entries in sequence to restore the database contents. The contents of the repository and
+        the update log itself are left unchanged. The database MUST be empty prior to beginning the rebuild; the method
+        will fail if it finds any entries in the database tables.
+
+        Returns:
+            True if database reconstruction was successful; else False. Progress messages -- and a final error or
+                success indicator are printed to the console.
+        """
+        # ensure database update log exists.
+        log_file_path = DataBaseManager._log_file_path()
+        if not log_file_path.is_file():
+            print(f"ERROR: No database log file found at {str(log_file_path)}", file=sys.stdout, flush=True)
+            return False
+
+        print(f"Starting database reconstruction from repository using log file at {str(log_file_path)}...",
+              file=sys.stdout, flush=True)
+
+        # first, verify that database is empty
+        for table_id in _table_map.keys():
+            n = self.num_table_rows(table_id)
+            if n != 0:
+                print(f"ERROR: Found {n} rows in {ti.table_label(table_id)} table. "
+                      f"Database must be empty prior to reconstruction!", file=sys.stdout, flush=True)
+                return False
+
+        try:
+            num_entries = 0
+            with open(log_file_path, 'rb') as file:
+                while True:
+                    try:
+                        entry = pickle.load(file)
+                        num_entries += 1
+                        print(f"Processing log entry #{num_entries}: \n    {entry}", file=sys.stdout, flush=True)
+                        if entry['op'] == 'add':
+                            err_msg = self.insert_into_table(entry['table'], entry['row'], log=False)
+                        elif entry['op'] == 'delete':
+                            err_msg = self.delete_from_table(entry['table'], entry['restriction'], log=False)
+                        elif entry['op'] == 'mapping':
+                            err_msg = self.update_mapping_table(
+                                entry['table'], entry['src_pk'], entry['dst_pks'], log=False)
+                        elif entry['op'] == 'session':
+                            err_msg = DataBaseManager._reconstruct_session(entry)
+                        else:
+                            err_msg = f"Invalid log entry"
+
+                        if err_msg is not None:
+                            raise Exception(err_msg)
+                    except EOFError:
+                        break
+        except Exception as e:
+            print(f"ERROR: Exception occurred while reconstructing lab database: {str(e)}", file=sys.stdout, flush=True)
+            print("Manual reconstruction of database content required. Consult this script's progress log to "
+                  "assist in that reconstruction.", file=sys.stdout, flush=True)
+            return False
+
+        print("Reconstruction completed successfully!", file=sys.stdout, flush=True)
+        return True
+
+    @staticmethod
+    def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]:
+        """
+        Commit an experiment session during scripted reconstruction of the lab database content from entries in the
+        database log file and experiment data archives stored in the backing repository.
+
+        For each experiment session, the original session archive and the pickle file containing the results of
+        pre-processing are stored in the folder $REPO/$USER, where $REPO is the data repository root and $USER is the
+        experimenter's username in the lab database. The archive file is $SUBJ_$DATE_$SFX.zip and the pickle file is
+        $SUBJ_$DATE_$SFX.pickle, where $SUBJ is the experiment subject's ID, $DATE is the session date in the format
+        'YYY-MM-DD', and $SFX is the session suffix.
+
+        Since all pre-processing results -- as well as any information entered manually when the session was originally
+        committed to the database -- are stored in the pickle file, the commit process requires no user intervention
+        and is significantly faster because it does not require processing of a large PL2 file. Still, it could take
+        many seconds or even minutes if the session recorded thousands of trials. Progress messages are written to the
+        STDOUT console.
+
+        Args:
+            log_entry: A database log entry for a session commit. This dictionary must have the form {'op': 'session',
+                'username': str, 'subj_id': str, 'date': 'YYYY-MM-DD', 'suffix': int}. See description above.
+        Returns:
+            An error description if session commit fails; else None
+        """
+        error_msg = None
+        session_repo_path = DataBaseManager.get_repo_directory_for(log_entry['username'])
+        base_filename = f"{log_entry['subj_id']}_{str(log_entry['date'])}_{log_entry['suffix']}"
+        zip_path_in_repo = Path(session_repo_path, f"{base_filename}.zip")
+        pickle_path_in_repo = Path(session_repo_path, f"{base_filename}.pickle")
+        session_pks = ['experimenter', 'subj_id', 'session_date', 'session_sfx']
+        try:
+            # load pre-processing results from pickle file
+            print(f"   > Checking session data archives...", file=sys.stdout, flush=True)
+            if not (zip_path_in_repo.is_file() and pickle_path_in_repo.is_file()):
+                raise Exception("Missing session ZIP archive or pre-processing results file!")
+            with open(pickle_path_in_repo, 'rb') as file:
+                results = pickle.load(file)
+            if not (isinstance(results, dict) or
+                    all([(k in results) for k in ['protocols', 'trials', 'units', 'session', 'ephys']])):
+                raise Exception("Invalid or incomplete pre-processing results file!")
+            protocols: List[maestro.Protocol] = results['protocols']
+            trial_info: Dict[str, _TrialInfo] = results['trials']
+            units: Optional[List[OmniplexUnit]] = results['units']
+            session_info: Dict[str, Optional[AttributeValue]] = results['session']
+            ephys_info: Optional[Dict[str, Optional[AttributeValue]]] = results['ephys']
+
+            print(f"   > Inserting session information into database...", file=sys.stdout, flush=True)
+            session_table = sgl.Session()
+            with session_table.connection.transaction:
+                session_table.insert1(session_info, replace=False)
+                if ephys_info is not None:
+                    sgl.Session.EPhys().insert1(ephys_info, replace=False)
+
+                if isinstance(units, list) and len(units) > 0:
+                    neurons: List[Dict[str, Any]] = list()
+                    for i, unit in enumerate(units):
+                        neuron = dict()
+                        for pk in session_pks:
+                            neuron[pk] = session_info[pk]
+                        neuron['unit_id'] = i + 1
+                        neuron['unit_channel'] = unit.channel
+                        neuron['unit_type'] = unit.neuron_type
+                        neuron['unit_rate'] = unit.firing_rate
+                        neuron['unit_snr'] = unit.snr
+                        neuron['unit_template'] = unit.template
+                        neurons.append(neuron)
+                    sgl.Session.Neuron().insert(neurons, replace=False)
+
+            # only insert new trial protocols
+            print(f"   > Inserting any new trial protocols into database...", file=sys.stdout, flush=True)
+            protocols_to_add: List[Dict[str, Any]] = list()
+            existing_proto_map = {pk['proto_hash']: 1
+                                  for pk in DataBaseManager().fetch_proj(DBTable.TRIAL_PROTOCOL, ['proto_hash'])}
+            for protocol in protocols:
+                if protocol.md5_digest not in existing_proto_map:
+                    protocol_entry: Dict[str, Any] = dict()
+                    protocol_entry['proto_hash'] = protocol.md5_digest
+                    protocol_entry['proto_name'] = protocol.trial.name
+                    protocol_entry['proto_set'] = "" if (protocol.trial.set_name is None) else protocol.trial.set_name
+                    protocol_entry['proto_subset'] = \
+                        "" if (protocol.trial.subset_name is None) else protocol.trial.subset_name
+                    protocol_entry['proto_def'] = pickle.dumps(protocol)
+                    protocols_to_add.append(protocol_entry)
+            if len(protocols_to_add) > 0:
+                protocol_table = sgl.TrialProtocol()
+                with protocol_table.connection.transaction:
+                    protocol_table.insert(protocols_to_add, replace=False)
+
+            # populate Trial table using a TrialProducer delegate object
+            print(f"   > Populating database with trial data...", file=sys.stdout, flush=True)
+            trial_table = sgl.Trial()
+            producer = _SessionTrialProducer(zip_path_in_repo, trial_info, protocols, units)
+            trial_table.set_trial_producer(producer)
+            trial_table.populate()
+            trial_table.set_trial_producer(None)
+
+            print("   > Session was successfully committed to database.", file=sys.stdout, flush=True)
+        except Exception as err:
+            error_msg = f"Exception while reconstructing experiment session:\n  {str(err)}"
+
+        return error_msg
+
+
+class _SessionTrialProducer(sgl.TrialProducer):
+    """
+    Helper class that populates the Lisberger lab database (the Trial table in sgl_schema.py) when an experiment session
+    is committed to the database. It is used in two contexts: (1) during a commit managed by the backend server via
+    the ProcessArchiveThread task; (2) during reconstruction of the database contents from the database update log and
+    the archive files stored in the backing repository.
+
+    NOTE: Inserting data associated with a single trial can involve many individual database inserts: one for the entry
+    into the Trial table itself, one for EACH recorded behavioral response trace inserted into the BehavioralResponse
+    part table, one for EACH recorded unit spike train inserted into the NeuronalResponse part table, and one for EACH
+    set of event timestamps inserted into the Event part table. To reduce the volume of database calls, we accumulate
+    trial entries, behavioral response traces, neural unit spike trains and event timestamp data over "chunks" of 10
+    trials at a time. Testing showed that a chunk size of ~25 trials significantly reduced the time it took to insert
+    all trial data (versus one database insert at a time), but larger chunk sizes did not further increase performance.
+
+    Usage: Construct the _SessionTrialProducer object, passing the required trial data and the path to the session data
+    archive. Set this object as the trial producer on the Trial table: sgl_schema.Trial.set_trial_producer(). Then call
+    sgl_schema.Trial.populate() to populate the Trial table with data from all trials recorded during the session.
+    """
+    def __init__(self, zip_path: Path, trial_info: Dict[str, _TrialInfo], protocols: List[maestro.Protocol],
+                 units: Optional[List[OmniplexUnit]], msg_q: Optional[Queue] = None,
+                 cancel: Optional[threading.Event] = None):
+        """
+        Construct the session trial data generator.
+
+        Args:
+            zip_path: The path to the session data archive containing all Maestro trial data files.
+            trial_info: Dictionary of information about all trials presented during the experiment session, ascertained
+                during pre-processing of the session archive. Keyed by trial data filenames.
+            protocols: List of all Maestro trial protocols presented during the experiment session.
+            units: List of all neural units recorded during the session.
+            msg_q: If not None, regular progress messages are delivered to this synchronous queue. Otherwise, progress
+                messages are printed to the STDOUT console. Default = None.
+            cancel: A event object to signal that the session commit has been cancelled. Default = None.
+        """
+        self.zip_path = zip_path
+        self.trial_info = trial_info
+        self._protocols = protocols
+        self.units = units
+        self.msg_q = msg_q
+        self.cancel_request = cancel
+
+    def insert_trials_for_session(self, session_key: Dict[str, Any]) -> None:
+        # generate list of trial file names in presentation order. We CANNOT rely on file creation time! If Omniplex
+        # system used and all trials were timestamped within the same PL2 file, then order by Omniplex start time.
+        # Else, if the file header includes the internal Maestro timestamp (we assume all trials will if the first
+        # one does!), use that. Otherwise, order by ascending numeric file suffix (.0001,...).
+        sort_strategy = None
+        sorted_filenames = None
+        if isinstance(self.units, list) and (len(self.units) > 0):
+            pl2_file_set = {unit.source_file for unit in self.units}
+            if len(pl2_file_set) == 1:
+                sort_strategy = 'omniplex'
+                sorted_filenames = sorted(self.trial_info, key=lambda k: self.trial_info[k].omniplex_start)
+        if not sort_strategy:
+            if self.trial_info[next(iter(self.trial_info))].header_timestamp:
+                sort_strategy = 'timestamp'
+                sorted_filenames = sorted(self.trial_info, key=lambda k: self.trial_info[k].header_timestamp)
+            else:
+                sort_strategy = 'index'
+                sorted_filenames = sorted(self.trial_info, key=lambda k: self.trial_info[k].file_index)
+
+        num_trials = len(sorted_filenames)
+        num_inserted = 0
+        message = f"{num_inserted} of {num_trials} trials added to database..."
+        if self.msg_q is None:
+            print(f"   >    {message}", file=sys.stdout, flush=True)
+        else:
+            self.msg_q.put_nowait(message)
+        t0 = time.time()
+        trial1_start_sec: float = 0
+        trial_table = sgl.Trial()
+        behavioral_table = sgl.Trial.BehavioralResponse()
+        neuronal_table = sgl.Trial.NeuronalResponse()
+        event_table = sgl.Trial.Event()
+
+        # we accumulate 10 trials' worth of data at a time to reduce the number of database calls overall. Testing
+        # indicated that larger "chunk sizes" did not further improve performance.
+        trial_entries: List[Dict[str, AttributeValue]] = list()
+        behavioral_entries: List[Dict[str, AttributeValue]] = list()
+        neuronal_entries: List[Dict[str, AttributeValue]] = list()
+        event_entries: List[Dict[str, AttributeValue]] = list()
+        num_trials_chunked = 0
+        with zipfile.ZipFile(self.zip_path, 'r') as archive:
+            for trial_filename in sorted_filenames:
+                data_file = maestro.DataFile.load(archive.read(trial_filename), trial_filename)
+                t_info = self.trial_info[trial_filename]
+
+                # compute scale factor to convert Omniplex spike times to Maestro timeline. However, if Maestro
+                # trial length according to Omniplex is more than 2ms off, fail.
+                maestro_omniplex_time_scaling = 1.0
+                if t_info.omniplex_start is not None:
+                    trial_length = (data_file.trial.record_start() + data_file.header.num_scans_saved - 1) / 1000.0
+                    omniplex_length = t_info.omniplex_stop - t_info.omniplex_start
+                    if abs(trial_length - omniplex_length) > 0.002:
+                        raise Exception(f"Trial duration on Omniplex does not match Maestro trial "
+                                        f"duration: {trial_filename}")
+                    maestro_omniplex_time_scaling = trial_length / omniplex_length
+
+                trial_entry: Dict[str, Any] = dict(
+                    session_key,
+                    trial_idx=(num_inserted + 1),
+                    proto_hash=t_info.proto_hash,
+                    trial_header=pickle.dumps(data_file.header),
+                    trial_filename=trial_filename,
+                    trial_dur=data_file.header.num_scans_saved - 1,
+                    trial_record_start=data_file.trial.record_start(),
+                    trial_success=((data_file.header.flags & maestro.FLAG_REWARD_EARNED) != 0),
+                    trial_rewarded=((data_file.header.flags & maestro.FLAG_REWARD_GIVEN) != 0),
+                    trial_rew1=data_file.header.reward_len1_ms,
+                    trial_rew2=data_file.header.reward_len2_ms
+                )
+
+                # compute trial start time relative to start of first trial in session -- if possible
+                if sort_strategy == 'index':
+                    trial_entry['trial_ts'] = -1
+                else:
+                    t_sec = t_info.omniplex_start if (
+                                sort_strategy == 'omniplex') else t_info.header_timestamp / 1000.0
+                    if num_inserted == 0:
+                        trial_entry['trial_ts'] = 0
+                        trial1_start_sec = t_sec
+                    else:
+                        trial_entry['trial_ts'] = t_sec - trial1_start_sec
+
+                # for this trial, get the values of the protocol's random variables
+                protocol = next((x for x in self._protocols if x.md5_digest == t_info.proto_hash), None)
+                if not protocol:
+                    raise Exception(
+                        f"Internal inconsistency: No trial protocol defined for trial in {trial_filename}")
+                rv_values: List[Any] = list()
+                for param in protocol.rvs:
+                    rv_value = data_file.trial.retrieve_segment_table_parameter_value(param)
+                    if not rv_value:
+                        raise Exception(
+                            f"Internal inconsistency: Invalid RV ({param}) for trial in {trial_filename}")
+                    rv_values.append(rv_value)
+                trial_entry['trial_rvs'] = pickle.dumps(rv_values)
+
+                trial_entries.append(trial_entry)
+                num_trials_chunked += 1
+
+                # insert recorded behavioral responses into part table Trial.BehavioralResponse
+                for response_id in maestro.BEHAVIOR_TO_CHANNEL.keys():
+                    ai_channel = maestro.BEHAVIOR_TO_CHANNEL[response_id]
+                    if ai_channel in data_file.ai_data:
+                        scale = maestro.ADC_TO_DEG if (response_id.find('POS') > -1) else maestro.ADC_TO_DPS
+                        response = np.array(data_file.ai_data[ai_channel]) * scale
+                        response_entry = dict(
+                            session_key,
+                            trial_idx=(num_inserted + 1),
+                            response_id=response_id,
+                            response_trace=response
+                        )
+                        behavioral_entries.append(response_entry)
+
+                # insert neural unit responses, if any, into Trial.NeuronalResponse. A neural unit may not fire any
+                # spikes during a trial, but that could be a valid response. Only exclude a unit if the last spike
+                # time is before trial start or the first spike time is after trial end!
+                if self.units is not None:
+                    for i, unit in enumerate(self.units):
+                        spikes = unit.spike_times
+                        if (spikes[-1] < t_info.omniplex_start) or (spikes[0] > t_info.omniplex_stop):
+                            continue
+
+                        spikes_in_trial = \
+                            spikes[(spikes >= t_info.omniplex_start) & (spikes <= t_info.omniplex_stop)]
+                        spikes_in_trial = (spikes_in_trial - t_info.omniplex_start) * maestro_omniplex_time_scaling
+                        response_entry = dict(
+                            session_key,
+                            trial_idx=(num_inserted + 1),
+                            unit_id=(i + 1),
+                            spike_times=spikes_in_trial
+                        )
+                        neuronal_entries.append(response_entry)
+
+                # insert any recorded marker events into Trial.Event (recorded in Maestro file, not by Omniplex).
+                if data_file.events is not None:
+                    for di_channel in data_file.events:
+                        # convert event times from ms to sec and offset if event recording started after trial began
+                        event_times = np.array(
+                            data_file.events[di_channel]) * 0.001 + data_file.trial.record_start()
+                        event_entry = dict(
+                            session_key,
+                            trial_idx=(num_inserted + 1),
+                            event_ch=di_channel,
+                            event_times=event_times
+                        )
+                        event_entries.append(event_entry)
+
+                num_inserted += 1
+                if (num_trials_chunked == 25) or (num_inserted == num_trials):
+                    trial_table.insert(trial_entries, replace=False)
+                    trial_entries.clear()
+                    num_trials_chunked = 0
+                    if len(behavioral_entries) > 0:
+                        behavioral_table.insert(behavioral_entries, replace=False)
+                        behavioral_entries.clear()
+                    if len(neuronal_entries) > 0:
+                        neuronal_table.insert(neuronal_entries, replace=False)
+                        neuronal_entries.clear()
+                    if len(event_entries) > 0:
+                        event_table.insert(event_entries, replace=False)
+                        event_entries.clear()
+
+                # report progress roughly once per second. Also check for cancel if cancel event provided.
+                if (time.time() - t0) > 1:
+                    message = f"{num_inserted} of {num_trials} trials added to database..."
+                    if self.msg_q is None:
+                        print(f"   >    {message}", file=sys.stdout, flush=True)
+                    else:
+                        self.msg_q.put_nowait(message)
+                    if (self.cancel_request is not None) and self.cancel_request.is_set():
+                        raise Exception("Operation cancelled.")
+                    t0 = time.time()
+
+
+class ProcessArchiveThread(threading.Thread):
     """
     This worker thread handles server-side processing during stages 2-4 of a session commit task:
         1) Wait for upload of session archive ZIP to the staging directory, monitoring its progress once per second. If
@@ -1773,7 +2170,7 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
             trial protocols not already in the database are inserted into the TrialProtocol table.
 
             2) The Trial table and its part tables are populated with data from all the trials presented during the
-            session. This is done in 50-trial chunks to regularly check for user cancel and update progress.
+            session. We post a progress message and check for user cancel roughly once per second during this process.
 
             3) The ZIP archive is moved to a permanent folder in the lab data repository, and the results from
             pre-processing the session archive, along with session and electrophysiology metadata entered manually by
@@ -1865,7 +2262,9 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
             # happen in insert_trials_for_session(). NOTE: Since the auto-populate cycle is wrapped in a transaction,
             # any trial insertions will be unwound if an exception occurs while populating.
             trial_table = sgl.Trial()
-            trial_table.set_trial_producer(self)
+            producer = _SessionTrialProducer(self.zip_path, self.trial_info, self._protocols, self.units,
+                                             msg_q=self.msg_q, cancel=self._cancel_request)
+            trial_table.set_trial_producer(producer)
             trial_table.populate()
             trial_table.set_trial_producer(None)
 
@@ -1905,144 +2304,6 @@ class ProcessArchiveThread(threading.Thread, sgl.TrialProducer):
                 pickle_path_in_repo.unlink(missing_ok=True)
 
         return error_msg
-
-    def insert_trials_for_session(self, session_key: Dict[str, Any]) -> None:
-        # generate list of trial file names in presentation order. We CANNOT rely on file creation time! If Omniplex
-        # system used and all trials were timestamped within the same PL2 file, then order by Omniplex start time. Else,
-        # if the file header includes the internal Maestro timestamp (we assume all trials will if the first one does!),
-        # use that. Otherwise, order by ascending numeric file suffix (.0001,...).
-        sort_strategy = None
-        sorted_filenames = None
-        if isinstance(self.units, list) and (len(self.units) > 0):
-            pl2_file_set = {unit.source_file for unit in self.units}
-            if len(pl2_file_set) == 1:
-                sort_strategy = 'omniplex'
-                sorted_filenames = sorted(self.trial_info, key=lambda k: self.trial_info[k].omniplex_start)
-        if not sort_strategy:
-            if self.trial_info[next(iter(self.trial_info))].header_timestamp:
-                sort_strategy = 'timestamp'
-                sorted_filenames = sorted(self.trial_info, key=lambda k: self.trial_info[k].header_timestamp)
-            else:
-                sort_strategy = 'index'
-                sorted_filenames = sorted(self.trial_info, key=lambda k: self.trial_info[k].file_index)
-
-        num_trials = len(sorted_filenames)
-        num_inserted = 0
-        self.msg_q.put_nowait(f"Inserting trials into database... {num_inserted} of {num_trials}")
-        t0 = time.time()
-        trial1_start_sec: float = 0
-        trial_table = sgl.Trial()
-        behavioral_table = sgl.Trial.BehavioralResponse()
-        neuronal_table = sgl.Trial.NeuronalResponse()
-        event_table = sgl.Trial.Event()
-        with zipfile.ZipFile(self.zip_path, 'r') as archive:
-            for trial_filename in sorted_filenames:
-                data_file = maestro.DataFile.load(archive.read(trial_filename), trial_filename)
-                t_info = self.trial_info[trial_filename]
-
-                # compute scale factor to convert Omniplex spike times to Maestro timeline. However, if Maestro trial
-                # length according to Omniplex is more than 2ms off, fail.
-                maestro_omniplex_time_scaling = 1.0
-                if t_info.omniplex_start is not None:
-                    trial_length = (data_file.trial.record_start() + data_file.header.num_scans_saved - 1) / 1000.0
-                    omniplex_length = t_info.omniplex_stop - t_info.omniplex_start
-                    if abs(trial_length - omniplex_length) > 0.002:
-                        raise Exception(f"Trial duration on Omniplex does not match Maestro trial "
-                                        f"duration: {trial_filename}")
-                    maestro_omniplex_time_scaling = trial_length / omniplex_length
-
-                trial_entry: Dict[str, Any] = dict(
-                    session_key,
-                    trial_idx=(num_inserted + 1),
-                    proto_hash=t_info.proto_hash,
-                    trial_header=pickle.dumps(data_file.header),
-                    trial_filename=trial_filename,
-                    trial_dur=data_file.header.num_scans_saved - 1,
-                    trial_record_start=data_file.trial.record_start(),
-                    trial_success=((data_file.header.flags & maestro.FLAG_REWARD_EARNED) != 0),
-                    trial_rewarded=((data_file.header.flags & maestro.FLAG_REWARD_GIVEN) != 0),
-                    trial_rew1=data_file.header.reward_len1_ms,
-                    trial_rew2=data_file.header.reward_len2_ms
-                    )
-
-                # compute trial start time relative to start of first trial in session -- if possible
-                if sort_strategy == 'index':
-                    trial_entry['trial_ts'] = -1
-                else:
-                    t_sec = t_info.omniplex_start if (sort_strategy == 'omniplex') else t_info.header_timestamp/1000.0
-                    if num_inserted == 0:
-                        trial_entry['trial_ts'] = 0
-                        trial1_start_sec = t_sec
-                    else:
-                        trial_entry['trial_ts'] = t_sec - trial1_start_sec
-
-                # for this trial, get the values of the protocol's random variables
-                protocol = next((x for x in self._protocols if x.md5_digest == t_info.proto_hash), None)
-                if not protocol:
-                    raise Exception(f"Internal inconsistency: No trial protocol defined for trial in {trial_filename}")
-                rv_values: List[Any] = list()
-                for param in protocol.rvs:
-                    rv_value = data_file.trial.retrieve_segment_table_parameter_value(param)
-                    if not rv_value:
-                        raise Exception(f"Internal inconsistency: Invalid RV ({param}) for trial in {trial_filename}")
-                    rv_values.append(rv_value)
-                trial_entry['trial_rvs'] = pickle.dumps(rv_values)
-
-                trial_table.insert1(trial_entry, replace=False)
-
-                # insert recorded behavioral responses into part table Trial.BehavioralResponse
-                for response_id in maestro.BEHAVIOR_TO_CHANNEL.keys():
-                    ai_channel = maestro.BEHAVIOR_TO_CHANNEL[response_id]
-                    if ai_channel in data_file.ai_data:
-                        scale = maestro.ADC_TO_DEG if (response_id.find('POS') > -1) else maestro.ADC_TO_DPS
-                        response = np.array(data_file.ai_data[ai_channel]) * scale
-                        response_entry = dict(
-                            session_key,
-                            trial_idx=(num_inserted + 1),
-                            response_id=response_id,
-                            response_trace=response
-                        )
-                        behavioral_table.insert1(response_entry, replace=False)
-
-                # insert neural unit responses, if any, into Trial.NeuronalResponse. A neural unit may not fire any
-                # spikes during a trial, but that could be a valid response. Only exclude a unit if the last spike
-                # time is before trial start or the first spike time is after trial end!
-                if self.units is not None:
-                    for i, unit in enumerate(self.units):
-                        spikes = unit.spike_times
-                        if (spikes[-1] < t_info.omniplex_start) or (spikes[0] > t_info.omniplex_stop):
-                            continue
-
-                        spikes_in_trial = \
-                            spikes[(spikes >= t_info.omniplex_start) & (spikes <= t_info.omniplex_stop)]
-                        spikes_in_trial = (spikes_in_trial - t_info.omniplex_start) * maestro_omniplex_time_scaling
-                        response_entry = dict(
-                            session_key,
-                            trial_idx=(num_inserted + 1),
-                            unit_id=(i + 1),
-                            spike_times=spikes_in_trial
-                        )
-                        neuronal_table.insert1(response_entry, replace=False)
-
-                # insert any recorded marker events into Trial.Event (recorded in Maestro file, not by Omniplex).
-                if data_file.events is not None:
-                    for di_channel in data_file.events:
-                        # convert event times from ms to sec and offset if event recording started after trial began
-                        event_times = np.array(data_file.events[di_channel])*0.001 + data_file.trial.record_start()
-                        event_entry = dict(
-                            session_key,
-                            trial_idx=(num_inserted + 1),
-                            event_ch=di_channel,
-                            event_times=event_times
-                        )
-                        event_table.insert1(event_entry, replace=False)
-
-                num_inserted += 1
-                if (time.time() - t0) > 1:
-                    self.msg_q.put_nowait(f"Inserting trials into database... {num_inserted} of {num_trials}")
-                    if self._cancel_request.is_set():
-                        raise Exception("Operation cancelled.")
-                    t0 = time.time()
 
     def _chunked_extract_from_archive(self, archive: zipfile.ZipFile, pl2_info: zipfile.ZipInfo,
                                       destination: Path) -> Optional[Path]:
