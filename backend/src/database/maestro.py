@@ -1479,6 +1479,21 @@ class Point2D:
         str_y = "0" if math.isclose(self.y, 0) else f"{self.y:.3f}".rstrip('0').rstrip('.')
         return f"({str_x}, {str_y})"
 
+    def as_string_with_wildcard(self, x_wild: bool = False, y_wild: bool = False):
+        """
+        Display the point's coordinates in string form as "(x, y)", but with the option to replace either or both
+        coordinate values with the asterisk character '*'.
+        Args:
+            x_wild: If true, x-component value is replaced by an '*'. Default = False.
+            y_wild: If True, y-component value is replaced by an '*'. Default = False.
+
+        Returns:
+            String representation of the 2D coordinate point, as described.
+        """
+        str_x = "*" if x_wild else ("0" if math.isclose(self.x, 0) else f"{self.x:.3f}".rstrip('0').rstrip('.'))
+        str_y = "*" if y_wild else ("0" if math.isclose(self.y, 0) else f"{self.y:.3f}".rstrip('0').rstrip('.'))
+        return f"({str_x}, {str_y})"
+
     def set_point(self, p: Point2D) -> None:
         self.x = p.x
         self.y = p.y
@@ -1527,21 +1542,21 @@ class Trial(NamedTuple):
             self.fix2: int = -1
             self.xy_update_intv: int = 4
             """ XYScope update interval for segment, in milliseconds. """
-            self.tgt_on: List[bool] = [False] * num_targets
+            self.tgt_on: List[bool] = [False for _ in range(num_targets)]
             """ Per-target on/off state during segment. """
-            self.tgt_rel: List[bool] = [True] * num_targets
+            self.tgt_rel: List[bool] = [True for _ in range(num_targets)]
             """ Is per-target position change relative (or absolute) at segment start? """
-            self.tgt_vel_stab_mask: List[int] = [0] * num_targets
+            self.tgt_vel_stab_mask: List[int] = [0 for _ in range(num_targets)]
             """ Per-target velocity stabilization mask for segment """
-            self.tgt_pos: List[Point2D] = [Point2D(0, 0)] * num_targets
+            self.tgt_pos: List[Point2D] = [Point2D(0, 0) for _ in range(num_targets)]
             """ Per-target instantaneous position change (H,V) at segment start, in degrees. """
-            self.tgt_vel: List[Point2D] = [Point2D(0, 0)] * num_targets
+            self.tgt_vel: List[Point2D] = [Point2D(0, 0) for _ in range(num_targets)]
             """ Per-target velocity (H,V) during segment, in deg/sec. """
-            self.tgt_acc: List[Point2D] = [Point2D(0, 0)] * num_targets
+            self.tgt_acc: List[Point2D] = [Point2D(0, 0) for _ in range(num_targets)]
             """ Per-target acceleration (H,V) during segment, in deg/sec^2. """
-            self.tgt_pat_vel: List[Point2D] = [Point2D(0, 0)] * num_targets
+            self.tgt_pat_vel: List[Point2D] = [Point2D(0, 0) for _ in range(num_targets)]
             """ Per-target pattern velocity (H,V) during segment, in deg/sec. """
-            self.tgt_pat_acc: List[Point2D] = [Point2D(0, 0)] * num_targets
+            self.tgt_pat_acc: List[Point2D] = [Point2D(0, 0) for _ in range(num_targets)]
             """ Per-target pattern acceleration (H,V) during segment, in deg/sec^2. """
 
             # new segment inherits trajectory parameters from previous segment -- except instantaneous position change
@@ -1696,7 +1711,8 @@ class Trial(NamedTuple):
         def __eq__(self, other: Trial.Perturbation) -> bool:
             ok = (self.__class__ == other.__class__) and (self.tgt_pos == other.tgt_pos) and \
                  (self.component == other.component) and (self.seg_start == other.seg_start) and \
-                 (self.type == other.type) and (self.dur == other.dur) and (self.amplitude == other.amplitude)
+                 (self.type == other.type) and (self.dur == other.dur) and (self.amplitude == other.amplitude) and \
+                 (len(self.extras) == len(other.extras))
             if ok:
                 for i, extra in enumerate(self.extras):
                     ok = ok and (extra == other.extras[i])
@@ -2471,6 +2487,8 @@ class Protocol(NamedTuple):
         columns = [{"name": "", "id": "param"}]
         columns.extend([{"name": f"Segment {i}", "id": f"seg_{i}"} for i in range(len(segments))])
 
+        # NOTE: Any parameter that varies randomly in the trial protocol is represented by an asterisk '*' in the
+        # segment table rendering rather than its value in the representative trial.
         duration = {"param": "Duration (ms)"}
         fix1_tgt = {"param": "Fix Tgt #1"}
         fix2_tgt = {"param": "Fix Tgt #2"}
@@ -2483,7 +2501,7 @@ class Protocol(NamedTuple):
         tgt_pat = [{"param": "Pattern Vel, Acc"} for _ in target_names]
         for i, seg in enumerate(segments):
             seg_id = f"seg_{i}"
-            duration[seg_id] = seg['dur']
+            duration[seg_id] = "***" if SegParam(SegParamType.DURATION, i, -1) in self.rvs else seg['dur']
             fix1_tgt[seg_id] = "NONE" if seg['fix1'] < 0 else target_names[seg['fix1']]
             fix2_tgt[seg_id] = "NONE" if seg['fix2'] < 0 else target_names[seg['fix2']]
             xy_delta[seg_id] = seg['xy_update']
@@ -2492,14 +2510,58 @@ class Protocol(NamedTuple):
                 trajectory = seg['trajectories'][tgt_idx]
                 tgt_on[tgt_idx][seg_id] = "ON" if trajectory['on'] else 'OFF'
                 tgt_vstab[tgt_idx][seg_id] = trajectory['vstab']
-                tgt_pos[tgt_idx][seg_id] = trajectory['pos']
-                tgt_vel_acc[tgt_idx][seg_id] = f"{trajectory['vel']}  {trajectory['acc']}"
-                tgt_pat[tgt_idx][seg_id] = f"{trajectory['patvel']}  {trajectory['patacc']}"
+                tgt_pos[tgt_idx][seg_id] = self.trial.segments[i].tgt_pos[tgt_idx].as_string_with_wildcard(
+                    (SegParam(SegParamType.TGT_POS_H, i, tgt_idx) in self.rvs),
+                    (SegParam(SegParamType.TGT_POS_V, i, tgt_idx) in self.rvs))
+                tgt_pos[tgt_idx][seg_id] += " rel" if self.trial.segments[i].tgt_rel[tgt_idx] else " abs"
+                tgt_vel_out = self.trial.segments[i].tgt_vel[tgt_idx].as_string_with_wildcard(
+                    (SegParam(SegParamType.TGT_VEL_H, i, tgt_idx) in self.rvs),
+                    (SegParam(SegParamType.TGT_VEL_V, i, tgt_idx) in self.rvs))
+                tgt_acc_out = self.trial.segments[i].tgt_acc[tgt_idx].as_string_with_wildcard(
+                    (SegParam(SegParamType.TGT_ACC_H, i, tgt_idx) in self.rvs),
+                    (SegParam(SegParamType.TGT_ACC_V, i, tgt_idx) in self.rvs))
+                tgt_vel_acc[tgt_idx][seg_id] = f"{tgt_vel_out}  {tgt_acc_out}"
+                tgt_pat_vel_out = self.trial.segments[i].tgt_pat_vel[tgt_idx].as_string_with_wildcard(
+                    (SegParam(SegParamType.TGT_PAT_VEL_H, i, tgt_idx) in self.rvs),
+                    (SegParam(SegParamType.TGT_PAT_VEL_V, i, tgt_idx) in self.rvs))
+                tgt_pat_acc_out = self.trial.segments[i].tgt_pat_acc[tgt_idx].as_string_with_wildcard(
+                    (SegParam(SegParamType.TGT_PAT_ACC_H, i, tgt_idx) in self.rvs),
+                    (SegParam(SegParamType.TGT_PAT_ACC_V, i, tgt_idx) in self.rvs))
+                tgt_pat[tgt_idx][seg_id] = f"{tgt_pat_vel_out}  {tgt_pat_acc_out}"
+                # tgt_pos[tgt_idx][seg_id] = trajectory['pos']
+                # tgt_vel_acc[tgt_idx][seg_id] = f"{trajectory['vel']}  {trajectory['acc']}"
+                # tgt_pat[tgt_idx][seg_id] = f"{trajectory['patvel']}  {trajectory['patacc']}"
         rows = [duration, fix1_tgt, fix2_tgt, xy_delta, marker]
         for i in range(len(target_names)):
             rows.extend([tgt_on[i], tgt_vstab[i], tgt_pos[i], tgt_vel_acc[i], tgt_pat[i]])
 
+        # the segment table rendered as a Dash DataTable...
+        # right-align first column displaying parameter descriptions, but left-align and underline the target names
+        # that appear in that column. Use a brownish-yellow background to ighlight the target name rows, which separate
+        # the target trajectory sections in the segment table. Finally, use a green background to highligh any cell in
+        # the segment table that houses a random variable.
         tgt_name_row_indices = [5 + i*5 for i in range(len(target_names))]
+        style_data_conditional = [
+            {'if': {'column_id': 'param'}, 'textAlign': 'right'},
+            {'if': {'column_id': 'param', 'row_index': tgt_name_row_indices},
+             'textDecoration': 'underline', 'textAlign': 'left'},
+            {'if': {'row_index': tgt_name_row_indices}, 'backgroundColor': 'rgba(218,165,32,128)', 'color': 'black'}
+        ]
+        for rv in self.rvs:
+            seg_id = f"seg_{rv.seg_idx}"
+            row_idx = 0
+            if rv.type != SegParamType.DURATION:
+                if rv.type in [SegParamType.TGT_POS_H, SegParamType.TGT_POS_V]:
+                    ofs = 2
+                elif rv.type in [SegParamType.TGT_VEL_H, SegParamType.TGT_VEL_V, SegParamType.TGT_ACC_H,
+                                 SegParamType.TGT_ACC_V]:
+                    ofs = 3
+                else:
+                    ofs = 4
+                row_idx = 5 + rv.tgt_idx*5 + ofs
+            style_data_conditional.append(
+                {'if': {'column_id': seg_id, 'row_index': [row_idx]}, 'backgroundColor': 'limegreen', 'color': 'black'}
+            )
         segment_table = dt.DataTable(
             columns=columns,
             data=rows,
@@ -2508,12 +2570,7 @@ class Protocol(NamedTuple):
             style_cell_conditional=[
                 {'if': {'column_id': 'param'}, 'width': '200px'}
             ],
-            style_data_conditional=[
-                {'if': {'column_id': 'param'}, 'textAlign': 'right'},
-                {'if': {'column_id': 'param', 'row_index': tgt_name_row_indices},
-                 'textDecoration': 'underline', 'textAlign': 'left'},
-                {'if': {'row_index': tgt_name_row_indices}, 'backgroundColor': 'rgba(218,165,32,128)', 'color': 'black'}
-            ],
+            style_data_conditional=style_data_conditional,
             style_data={'whiteSpace': 'pre-wrap'},
             style_table={'height': '330px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
             fixed_rows={'headers': True, 'data': 0},

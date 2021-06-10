@@ -201,6 +201,8 @@ class DataBaseManager:
             """ Lock object guarding access to the database updates log file. """
             self._db_lock: threading.Lock = threading.Lock()
             """ Lock object guarding access to the database itself. """
+            self._session_commit_lock: threading.Lock = threading.Lock()
+            """ Lock object used to queue the session commit tasks. """
 
     def on_startup(self) -> Optional[str]:
         """
@@ -1402,6 +1404,204 @@ class DataBaseManager:
                 error_msg = f"In-progress commit task {task_id} not found on server. Start over."
         return error_msg
 
+    def finish_commit(self, worker: ProcessArchiveThread) -> Optional[str]:
+        """
+        This method implements the final stage of the session commit workflow. It is called ONLY on the worker thread
+        that was originally spawned to manage the long-running commit task. The final stage is handled within the
+        DataBaseManager singleton to (a) ensure that multiple session commit jobs are queued to happen one at a time;
+        and (b) to safely share the persistent database connection with other threads servicing requests from other
+        clients.
+
+        Committing a pre-processed experiment session to the lab database involves the following steps:
+
+            1) Entries are inserted into the Session, Session.EPhys, and Session.Neuron tables as appropriate, and all
+            trial protocols not already in the database are inserted into the TrialProtocol table.
+
+            2) The Trial table and its part tables are populated with data from all the trials presented during the
+            session. We post a progress message and check for user cancel roughly once per second during this process.
+
+            3) The ZIP archive is moved to a permanent folder in the lab data repository, and the results from
+            pre-processing the session archive, along with session and electrophysiology metadata entered manually by
+            the user during the review stage, are saved in a pickle file in the same folder. That folder is
+            %REPO_HOME/<username>, where <username> is the experimenter's username in the database. The base filename
+            for the .zip and .pickle files is "<subj_id>_<session_date>_<session_sfx>", where <session_date> is in
+            ISO format 'YYYY-MM-DD'.
+
+            4) Lastly, the completed session commit is recorded in the database update log. This single log entry (along
+            with the archive and pickle file just stored in the data repository) accounts for all of the database
+            insertions required to commit the data from the experiment session.
+
+        If an error occurs at any point during the commit, any changes to the database and the file repository are
+        unwound before returning.
+
+        Lock objects are used to guard access to the database connection and to this commit procedure itself. If a
+        session commit task worker enters the final stage while another is currently executing in this method, the
+        former thread will wait until it can acquire the lock to begin its commit. Furthermore, a separate lock must be
+        acquired whenever data is inserted into the database.
+
+        Args:
+            worker: The worker thread on which the session commit task is executed. This thread object contains all of
+                the information needed to update the lab database with the session's worth of data.
+        Returns:
+            None if successful, in which case the session is fully committed to the database; otherwise an error
+                description.
+        """
+        assert isinstance(worker, ProcessArchiveThread), "Invalid session commit worker"
+        assert worker.stage == 4, "Session commit worker must be in stage 4!"
+
+        error_msg: Optional[str] = None
+        session_repo_path = DataBaseManager.get_repo_directory_for(worker.session_info['experimenter'])
+        base_filename = f"{worker.session_info['subj_id']}_{str(worker.session_info['session_date'])}_" \
+                        f"{worker.session_info['session_sfx']}"
+        zip_path_in_repo = Path(session_repo_path, f"{base_filename}.zip")
+        pickle_path_in_repo = Path(session_repo_path, f"{base_filename}.pickle")
+        session_inserted = False
+        protocols_added = False
+        protocols_to_add: List[Dict[str, Any]] = list()
+        protocol_table = sgl.TrialProtocol()
+        session_pks = ['experimenter', 'subj_id', 'session_date', 'session_sfx']
+
+        # only one session may be committed to the database at a time!
+        worker.msg_q.put_nowait("Waiting in session commit queue...")
+        with self._session_commit_lock:
+            try:
+                # convert all trial protocol candidates to the protocol objects that are added to the database. Then
+                # update the individual trial info to include the protocol's unique MD5 hexadecimal digest
+                protocols = [maestro.Protocol.from_candidate(c) for c in worker.proto_candidates]
+                for _, t_info in worker.trial_info.items():
+                    protocol = protocols[t_info.proto_index]
+                    t_info.proto_hash = protocol.md5_digest
+
+                # only insert new trial protocols -- keep track of what's inserted so we can rollback on failure
+                existing_proto_map = {pk['proto_hash']: 1
+                                      for pk in DataBaseManager().fetch_proj(DBTable.TRIAL_PROTOCOL, ['proto_hash'])}
+                for protocol in protocols:
+                    if protocol.md5_digest not in existing_proto_map:
+                        protocol_entry: Dict[str, Any] = dict()
+                        protocol_entry['proto_hash'] = protocol.md5_digest
+                        protocol_entry['proto_name'] = protocol.trial.name
+                        protocol_entry['proto_set'] = \
+                            "" if (protocol.trial.set_name is None) else protocol.trial.set_name
+                        protocol_entry['proto_subset'] = \
+                            "" if (protocol.trial.subset_name is None) else protocol.trial.subset_name
+                        protocol_entry['proto_def'] = pickle.dumps(protocol)
+                        protocols_to_add.append(protocol_entry)
+
+                worker.msg_q.put_nowait(f"Inserting session entry and any new trial protocols into database...")
+                session_table = sgl.Session()
+                with self._db_lock, session_table.connection.transaction:
+                    session_table.insert1(worker.session_info, replace=False)
+                    session_inserted = True
+                    if worker.ephys_info is not None:
+                        # need primary key of parent table for insertion into part table
+                        for pk in session_pks:
+                            worker.ephys_info[pk] = worker.session_info[pk]
+                        sgl.Session.EPhys().insert1(worker.ephys_info, replace=False)
+
+                        neurons: List[Dict[str, Any]] = list()
+                        for i, unit in enumerate(worker.units):
+                            neuron = dict()
+                            for pk in session_pks:
+                                neuron[pk] = worker.session_info[pk]
+                            neuron['unit_id'] = i + 1
+                            neuron['unit_channel'] = unit.channel
+                            neuron['unit_type'] = unit.neuron_type
+                            neuron['unit_rate'] = unit.firing_rate
+                            neuron['unit_snr'] = unit.snr
+                            neuron['unit_template'] = unit.template
+                            neurons.append(neuron)
+                        sgl.Session.Neuron().insert(neurons, replace=False)
+                    if len(protocols_to_add) > 0:
+                        protocol_table.insert(protocols_to_add, replace=False)
+                        protocols_added = True
+
+                if worker.is_cancelled():
+                    raise Exception("Operation cancelled.")
+
+                # in order to monitor progress and check for user cancel while populating trials, the Trial table class
+                # relies on a TrialProducer delegate to handle the task from within its make() call. Actual insertions
+                # happen in insert_trials_for_session(). NOTE: Since auto-populate cycle is wrapped in a transaction,
+                # any trial insertions will be unwound if an exception occurs while populating.
+                trial_table = sgl.Trial()
+                producer = _SessionTrialProducer(worker.zip_path, worker.trial_info, protocols, worker.units,
+                                                 worker=worker)
+                trial_table.set_trial_producer(producer)
+                trial_table.populate()
+                trial_table.set_trial_producer(None)
+
+                if worker.is_cancelled():
+                    raise Exception("Operation cancelled.")
+
+                worker.msg_q.put_nowait(f"Saving session archive and pre-processing results to data repository...")
+                if not session_repo_path.is_dir():
+                    session_repo_path.mkdir(parents=True)
+                worker.zip_path.replace(zip_path_in_repo)
+                results = {'protocols': protocols, 'trials': worker.trial_info, 'units': worker.units,
+                           'session': worker.session_info, 'ephys': worker.ephys_info}
+                with open(pickle_path_in_repo, 'wb') as file:
+                    pickle.dump(results, file)
+
+                # finally, log the session commit
+                res = self.log_session_commit(
+                    worker.session_info['experimenter'], worker.session_info['subj_id'],
+                    str(worker.session_info['session_date']), worker.session_info['session_sfx'])
+                if res:
+                    raise Exception(res)
+
+            except Exception as err:
+                error_msg = f"Error - Failed to commit session:\n  {str(err)}"
+            finally:
+                # unwind all changes if the commit failed! Note that trials are automatically removed when session is.
+                if error_msg:
+                    try:
+                        with self._db_lock:
+                            if session_inserted:
+                                (sgl.Session() & worker.session_info).delete(verbose=False)
+                            if protocols_added:
+                                restriction = [f"proto_hash = '{p['proto_hash']}'" for p in protocols_to_add]
+                                (protocol_table & restriction).delete(verbose=False)
+                    except Exception:
+                        pass  # TODO: We really have to kill the database at this point, because it is inconsistent.
+                    zip_path_in_repo.unlink(missing_ok=True)
+                    pickle_path_in_repo.unlink(missing_ok=True)
+
+        return error_msg
+
+    def batch_insert_trials(
+            self, trials: List[Dict[str, AttributeValue]], behavioral_entries: List[Dict[str, AttributeValue]],
+            neuronal_entries: List[Dict[str, AttributeValue]], events: List[Dict[str, AttributeValue]]) -> None:
+        """
+        Batch-insert trial response data during a session commit. This helper method is called during a session
+        commit to insert trial information and response data into the database's Trial table and its part tables.
+        The batch insert is guarded by a lock object to ensure that only a single thread uses the database connection
+        at one time. The insertions are not logged, since a single log entry for the commit task is recorded once the
+        commit is completed.
+
+        This method should be invoked by a _SessionTrialProducer() object in one of two contexts: (1) On a worker thread
+        during an interactive session commit workflow (see ProcessArchiveThread), or (2) during the administrative
+        script that reconstructs the database contents from the update log and archived files in the raw data repository
+        (see reconstruct_database_from_log()).
+
+        Args:
+            trials: The list of trials to be inserted.
+            behavioral_entries: The list of behavioral responses to be inserted.
+            neuronal_entries: THe list of neuronal response to be inserted.
+            events: The list of TTL event timestamps to be inserted
+        """
+        trial_table = sgl.Trial()
+        behavioral_table = sgl.Trial.BehavioralResponse()
+        neuronal_table = sgl.Trial.NeuronalResponse()
+        event_table = sgl.Trial.Event()
+
+        with self._db_lock:
+            trial_table.insert(trials, replace=False)
+            if len(behavioral_entries) > 0:
+                behavioral_table.insert(behavioral_entries, replace=False)
+            if len(neuronal_entries) > 0:
+                neuronal_table.insert(neuronal_entries, replace=False)
+            if len(events) > 0:
+                event_table.insert(events, replace=False)
+
     def cancel(self, task_id: str) -> bool:
         """
         Cancel a session commit task in progress or remove a completed task. If the relevant background task is still
@@ -1566,7 +1766,23 @@ class DataBaseManager:
             session_info: Dict[str, Optional[AttributeValue]] = results['session']
             ephys_info: Optional[Dict[str, Optional[AttributeValue]]] = results['ephys']
 
-            print(f"   > Inserting session information into database...", file=sys.stdout, flush=True)
+            # only insert new trial protocols
+            protocols_to_add: List[Dict[str, Any]] = list()
+            existing_proto_map = {pk['proto_hash']: 1
+                                  for pk in DataBaseManager().fetch_proj(DBTable.TRIAL_PROTOCOL, ['proto_hash'])}
+            for protocol in protocols:
+                if protocol.md5_digest not in existing_proto_map:
+                    protocol_entry: Dict[str, Any] = dict()
+                    protocol_entry['proto_hash'] = protocol.md5_digest
+                    protocol_entry['proto_name'] = protocol.trial.name
+                    protocol_entry['proto_set'] = "" if (protocol.trial.set_name is None) else protocol.trial.set_name
+                    protocol_entry['proto_subset'] = \
+                        "" if (protocol.trial.subset_name is None) else protocol.trial.subset_name
+                    protocol_entry['proto_def'] = pickle.dumps(protocol)
+                    protocols_to_add.append(protocol_entry)
+
+            print(f"   > Inserting session information and new trial protocols into database...",
+                  file=sys.stdout, flush=True)
             session_table = sgl.Session()
             with session_table.connection.transaction:
                 session_table.insert1(session_info, replace=False)
@@ -1588,24 +1804,8 @@ class DataBaseManager:
                         neurons.append(neuron)
                     sgl.Session.Neuron().insert(neurons, replace=False)
 
-            # only insert new trial protocols
-            print(f"   > Inserting any new trial protocols into database...", file=sys.stdout, flush=True)
-            protocols_to_add: List[Dict[str, Any]] = list()
-            existing_proto_map = {pk['proto_hash']: 1
-                                  for pk in DataBaseManager().fetch_proj(DBTable.TRIAL_PROTOCOL, ['proto_hash'])}
-            for protocol in protocols:
-                if protocol.md5_digest not in existing_proto_map:
-                    protocol_entry: Dict[str, Any] = dict()
-                    protocol_entry['proto_hash'] = protocol.md5_digest
-                    protocol_entry['proto_name'] = protocol.trial.name
-                    protocol_entry['proto_set'] = "" if (protocol.trial.set_name is None) else protocol.trial.set_name
-                    protocol_entry['proto_subset'] = \
-                        "" if (protocol.trial.subset_name is None) else protocol.trial.subset_name
-                    protocol_entry['proto_def'] = pickle.dumps(protocol)
-                    protocols_to_add.append(protocol_entry)
-            if len(protocols_to_add) > 0:
-                protocol_table = sgl.TrialProtocol()
-                with protocol_table.connection.transaction:
+                if len(protocols_to_add) > 0:
+                    protocol_table = sgl.TrialProtocol()
                     protocol_table.insert(protocols_to_add, replace=False)
 
             # populate Trial table using a TrialProducer delegate object
@@ -1643,8 +1843,7 @@ class _SessionTrialProducer(sgl.TrialProducer):
     sgl_schema.Trial.populate() to populate the Trial table with data from all trials recorded during the session.
     """
     def __init__(self, zip_path: Path, trial_info: Dict[str, _TrialInfo], protocols: List[maestro.Protocol],
-                 units: Optional[List[OmniplexUnit]], msg_q: Optional[Queue] = None,
-                 cancel: Optional[threading.Event] = None):
+                 units: Optional[List[OmniplexUnit]], worker: Optional[ProcessArchiveThread] = None):
         """
         Construct the session trial data generator.
 
@@ -1654,16 +1853,16 @@ class _SessionTrialProducer(sgl.TrialProducer):
                 during pre-processing of the session archive. Keyed by trial data filenames.
             protocols: List of all Maestro trial protocols presented during the experiment session.
             units: List of all neural units recorded during the session.
-            msg_q: If not None, regular progress messages are delivered to this synchronous queue. Otherwise, progress
-                messages are printed to the STDOUT console. Default = None.
-            cancel: A event object to signal that the session commit has been cancelled. Default = None.
+            worker: If not None, this is the worker thread on which the session commit task is performed on the server.
+                The method will deliver progress messages to the thread's synchronous queue and check regularly to see
+                if the client has cancelled the commit. Otherwise, progress messages are printed to STDOUT and the
+                operation is not cancellable. Default = None.
         """
         self.zip_path = zip_path
         self.trial_info = trial_info
         self._protocols = protocols
         self.units = units
-        self.msg_q = msg_q
-        self.cancel_request = cancel
+        self.worker = worker
 
     def insert_trials_for_session(self, session_key: Dict[str, Any]) -> None:
         # generate list of trial file names in presentation order. We CANNOT rely on file creation time! If Omniplex
@@ -1688,18 +1887,15 @@ class _SessionTrialProducer(sgl.TrialProducer):
         num_trials = len(sorted_filenames)
         num_inserted = 0
         message = f"{num_inserted} of {num_trials} trials added to database..."
-        if self.msg_q is None:
+        if self.worker is None:
             print(f"   >    {message}", file=sys.stdout, flush=True)
         else:
-            self.msg_q.put_nowait(message)
+            self.worker.msg_q.put_nowait(message)
         t0 = time.time()
         trial1_start_sec: float = 0
-        trial_table = sgl.Trial()
-        behavioral_table = sgl.Trial.BehavioralResponse()
-        neuronal_table = sgl.Trial.NeuronalResponse()
-        event_table = sgl.Trial.Event()
+        db_mgr = DataBaseManager()
 
-        # we accumulate 10 trials' worth of data at a time to reduce the number of database calls overall. Testing
+        # we accumulate 25 trials' worth of data at a time to reduce the number of database calls overall. Testing
         # indicated that larger "chunk sizes" did not further improve performance.
         trial_entries: List[Dict[str, AttributeValue]] = list()
         behavioral_entries: List[Dict[str, AttributeValue]] = list()
@@ -1813,30 +2009,25 @@ class _SessionTrialProducer(sgl.TrialProducer):
                         )
                         event_entries.append(event_entry)
 
+                # batch insert after accumulating data for 25 trials (or processed the last trial)
                 num_inserted += 1
                 if (num_trials_chunked == 25) or (num_inserted == num_trials):
-                    trial_table.insert(trial_entries, replace=False)
+                    db_mgr.batch_insert_trials(trial_entries, behavioral_entries, neuronal_entries, event_entries)
                     trial_entries.clear()
                     num_trials_chunked = 0
-                    if len(behavioral_entries) > 0:
-                        behavioral_table.insert(behavioral_entries, replace=False)
-                        behavioral_entries.clear()
-                    if len(neuronal_entries) > 0:
-                        neuronal_table.insert(neuronal_entries, replace=False)
-                        neuronal_entries.clear()
-                    if len(event_entries) > 0:
-                        event_table.insert(event_entries, replace=False)
-                        event_entries.clear()
+                    behavioral_entries.clear()
+                    neuronal_entries.clear()
+                    event_entries.clear()
 
                 # report progress roughly once per second. Also check for cancel if cancel event provided.
                 if (time.time() - t0) > 1:
                     message = f"{num_inserted} of {num_trials} trials added to database..."
-                    if self.msg_q is None:
+                    if self.worker is None:
                         print(f"   >    {message}", file=sys.stdout, flush=True)
                     else:
-                        self.msg_q.put_nowait(message)
-                    if (self.cancel_request is not None) and self.cancel_request.is_set():
-                        raise Exception("Operation cancelled.")
+                        self.worker.msg_q.put_nowait(message)
+                        if self.worker.is_cancelled():
+                            raise Exception("Operation cancelled.")
                     t0 = time.time()
 
 
@@ -2002,7 +2193,7 @@ class ProcessArchiveThread(threading.Thread):
         # Stage 4 - complete the session commit. If cancelled in this stage, any partially commited data is unwound.
         if finish and not cancelled:
             self.stage = 4
-            error_msg = self._finish_commit()
+            error_msg = DataBaseManager().finish_commit(worker=self)
             if error_msg:
                 self.msg_q.put_nowait(error_msg)
                 self.result = False
@@ -2015,6 +2206,10 @@ class ProcessArchiveThread(threading.Thread):
     def cancel(self) -> None:
         """ Cancel the session commit task handled by this worker thread. """
         self._cancel_request.set()
+
+    def is_cancelled(self) -> bool:
+        """ Has the session commit task been cancelled? """
+        return self._cancel_request.is_set()
 
     def finish(self) -> None:
         """ Wake up the worker thread to complete the session commit task. Has no effect if the worker is not
@@ -2159,149 +2354,6 @@ class ProcessArchiveThread(threading.Thread):
 
         except Exception as err:
             error_msg = f"Error: {str(err)}"
-
-        return error_msg
-
-    def _finish_commit(self) -> Optional[str]:
-        """
-        This method implements the final stage of the session commit workflow:
-
-            1) Entries are inserted into the Session, Session.EPhys, and Session.Neuron tables as appropriate, and all
-            trial protocols not already in the database are inserted into the TrialProtocol table.
-
-            2) The Trial table and its part tables are populated with data from all the trials presented during the
-            session. We post a progress message and check for user cancel roughly once per second during this process.
-
-            3) The ZIP archive is moved to a permanent folder in the lab data repository, and the results from
-            pre-processing the session archive, along with session and electrophysiology metadata entered manually by
-            the user during the review stage, are saved in a pickle file in the same folder. That folder is
-            %REPO_HOME/<username>, where <username> is the experimenter's username in the database. The base filename
-            for the .zip and .pickle files is "<subj_id>_<session_date>_<session_sfx>", where <session_date> is in
-            ISO format 'YYYY-MM-DD'.
-
-        If an error occurs at any point during the commit, any changes to the database and the file repository are
-        unwound before returning.
-
-        Returns:
-            None if successful, in which case the session is fully committed to the database; otherwise an error
-            description.
-        """
-        error_msg: Optional[str] = None
-        session_repo_path = DataBaseManager.get_repo_directory_for(self.session_info['experimenter'])
-        base_filename = f"{self.session_info['subj_id']}_{str(self.session_info['session_date'])}_" \
-                        f"{self.session_info['session_sfx']}"
-        zip_path_in_repo = Path(session_repo_path, f"{base_filename}.zip")
-        pickle_path_in_repo = Path(session_repo_path, f"{base_filename}.pickle")
-        session_inserted = False
-        protocols_added = False
-        protocols_to_add: List[Dict[str, Any]] = list()
-        protocol_table = sgl.TrialProtocol()
-        session_pks = ['experimenter', 'subj_id', 'session_date', 'session_sfx']
-        try:
-            # convert all trial protocol candidates to the trial protocol objects that are added to the database. Then
-            # update the individual trial info to include the protocol's unique MD5 hexadecimal digest
-            self._protocols = [maestro.Protocol.from_candidate(c) for c in self.proto_candidates]
-            for _, t_info in self.trial_info.items():
-                protocol = self._protocols[t_info.proto_index]
-                t_info.proto_hash = protocol.md5_digest
-
-            # IMPORTANT: We access the database tables directly here and do NOT go through DataBaseManager, as we don't
-            # want any of the additions logged. A single 'session commit' log entry, along with the files stored in the
-            # repository, is sufficient to reproduce everything that happens in this commit job.
-            self.msg_q.put_nowait(f"Inserting session entry and any new trial protocols into database...")
-            session_table = sgl.Session()
-            with session_table.connection.transaction:
-                session_table.insert1(self.session_info, replace=False)
-                session_inserted = True
-                if self.ephys_info is not None:
-                    # need primary key of parent table for insertion into part table
-                    for pk in session_pks:
-                        self.ephys_info[pk] = self.session_info[pk]
-                    sgl.Session.EPhys().insert1(self.ephys_info, replace=False)
-
-                    neurons: List[Dict[str, Any]] = list()
-                    for i, unit in enumerate(self.units):
-                        neuron = dict()
-                        for pk in session_pks:
-                            neuron[pk] = self.session_info[pk]
-                        neuron['unit_id'] = i + 1
-                        neuron['unit_channel'] = unit.channel
-                        neuron['unit_type'] = unit.neuron_type
-                        neuron['unit_rate'] = unit.firing_rate
-                        neuron['unit_snr'] = unit.snr
-                        neuron['unit_template'] = unit.template
-                        neurons.append(neuron)
-                    sgl.Session.Neuron().insert(neurons, replace=False)
-
-            if self._cancel_request.is_set():
-                raise Exception("Operation cancelled.")
-
-            # only insert new trial protocols -- keep track of what's inserted so we can rollback on failure
-            existing_proto_map = {pk['proto_hash']: 1
-                                  for pk in DataBaseManager().fetch_proj(DBTable.TRIAL_PROTOCOL, ['proto_hash'])}
-            for protocol in self._protocols:
-                if protocol.md5_digest not in existing_proto_map:
-                    protocol_entry: Dict[str, Any] = dict()
-                    protocol_entry['proto_hash'] = protocol.md5_digest
-                    protocol_entry['proto_name'] = protocol.trial.name
-                    protocol_entry['proto_set'] = "" if (protocol.trial.set_name is None) else protocol.trial.set_name
-                    protocol_entry['proto_subset'] = \
-                        "" if (protocol.trial.subset_name is None) else protocol.trial.subset_name
-                    protocol_entry['proto_def'] = pickle.dumps(protocol)
-                    protocols_to_add.append(protocol_entry)
-            if len(protocols_to_add) > 0:
-                with protocol_table.connection.transaction:
-                    protocol_table.insert(protocols_to_add, replace=False)
-                    protocols_added = True
-
-            if self._cancel_request.is_set():
-                raise Exception("Operation cancelled.")
-
-            # in order to monitor progress and check for user cancel while populating trials, the Trial table class
-            # relies on a TrialProducer delegate to handle the task from within its make() call. The actual insertions
-            # happen in insert_trials_for_session(). NOTE: Since the auto-populate cycle is wrapped in a transaction,
-            # any trial insertions will be unwound if an exception occurs while populating.
-            trial_table = sgl.Trial()
-            producer = _SessionTrialProducer(self.zip_path, self.trial_info, self._protocols, self.units,
-                                             msg_q=self.msg_q, cancel=self._cancel_request)
-            trial_table.set_trial_producer(producer)
-            trial_table.populate()
-            trial_table.set_trial_producer(None)
-
-            if self._cancel_request.is_set():
-                raise Exception("Operation cancelled.")
-
-            self.msg_q.put_nowait(f"Saving session archive and pre-processing results to data repository...")
-            if not session_repo_path.is_dir():
-                session_repo_path.mkdir(parents=True)
-            self.zip_path.replace(zip_path_in_repo)
-            results = {'protocols': self._protocols, 'trials': self.trial_info, 'units': self.units,
-                       'session': self.session_info, 'ephys': self.ephys_info}
-            with open(pickle_path_in_repo, 'wb') as file:
-                pickle.dump(results, file)
-
-            # finally, log the session commit
-            res = DataBaseManager().log_session_commit(
-                self.session_info['experimenter'], self.session_info['subj_id'],
-                str(self.session_info['session_date']), self.session_info['session_sfx'])
-            if res:
-                raise Exception(res)
-
-        except Exception as err:
-            error_msg = f"Error - Failed to commit session:\n  {str(err)}"
-        finally:
-            # unwind all changes if the commit failed! Note that trials are automatically removed when session is.
-            if error_msg:
-                try:
-                    if session_inserted:
-                        (sgl.Session() & self.session_info).delete(verbose=False)
-                    if protocols_added:
-                        restriction = [f"proto_hash = '{p['proto_hash']}'" for p in protocols_to_add]
-                        (protocol_table & restriction).delete(verbose=False)
-                except Exception:
-                    pass   # TODO: We really have to kill the database at this point, because it is inconsistent.
-                zip_path_in_repo.unlink(missing_ok=True)
-                pickle_path_in_repo.unlink(missing_ok=True)
 
         return error_msg
 
