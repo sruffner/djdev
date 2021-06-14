@@ -8,6 +8,7 @@ database content.
 @author: sruffner
 @created: 22mar2021
 """
+import sys
 from datetime import date
 from typing import List, Dict, Any, Optional, Union
 
@@ -28,7 +29,6 @@ from common import check_date
 from database import stats
 from database.manager import DataBaseManager, TrialData
 from database.table_info import DBTable
-import database.maestro as maestro
 
 
 _NEURON_TABLE_ID: str = "neuron_list"
@@ -358,6 +358,7 @@ def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> U
             row=1, col=1, secondary_y=(response_id.find('VEL') > -1)
         )
     fix1_pos, fix2_pos = trial_data.protocol.compute_fixation_target_trajectories(trial_data.trial_rvs)
+    fix1_on, fix2_on = trial_data.protocol.compute_fixation_target_on_epochs(trial_data.trial_rvs)
     if fix1_pos is not None:
         fig.add_trace(
             go.Scatter(x=[i for i in range(fix1_pos.shape[0])], y=fix1_pos[:, 0], name='FIX1_HPOS', mode='lines',
@@ -369,6 +370,12 @@ def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> U
                        line=_BEHAVIOR_TRACE_STYLE_MAP['FIX1_VPOS'], connectgaps=False),
             row=1, col=1, secondary_y=False
         )
+        # use a thin translucent horizontal bar to highlight the ON epochs for fixation target
+        for i in range(0, len(fix1_on), 2):
+            fig.add_shape(type='rect', x0=fix1_on[i], x1=fix1_on[i+1], xref='x', y0=0.05, y1=0.1, yref='y domain',
+                          fillcolor=_BEHAVIOR_TRACE_STYLE_MAP['FIX1_HPOS']['color'], line=dict(width=0), opacity=0.2,
+                          row=1, col=1)
+
     if fix2_pos is not None:
         fig.add_trace(
             go.Scatter(x=[i for i in range(fix2_pos.shape[0])], y=fix2_pos[:, 0], name='FIX2_HPOS', mode='lines',
@@ -380,6 +387,11 @@ def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> U
                        line=_BEHAVIOR_TRACE_STYLE_MAP['FIX2_VPOS'], connectgaps=False),
             row=1, col=1, secondary_y=False
         )
+        for i in range(0, len(fix2_on), 2):
+            fig.add_shape(type='rect', x0=fix2_on[i], x1=fix2_on[i+1], xref='x', y0=0.12, y1=0.17, yref='y domain',
+                          fillcolor=_BEHAVIOR_TRACE_STYLE_MAP['FIX2_HPOS']['color'], line=dict(width=0), opacity=0.2,
+                          row=1, col=1)
+
     for unit_id in trial_data.neuronal.keys():
         firing_rate_trace = trial_data.instantaneous_firing_rate(unit_id, smooth=True)
         fig.add_trace(
@@ -408,11 +420,6 @@ def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> U
         yaxis3=dict(title='firing rate (Hz)'),
         yaxis4=dict(range=[0, 10], anchor="x", overlaying="y3", visible=False)
     )
-
-    if (len(trial_data.protocol.trial.segments) > 1) and (len(trial_data.trial_rvs) == 1) and \
-            (trial_data.protocol.rvs[0].type == maestro.SegParamType.DURATION) and \
-            (trial_data.protocol.rvs[0].seg_idx == 0):
-        fig.add_vrect(x0=0, x1=trial_data.trial_rvs[0], fillcolor="red", opacity=0.2)
 
     return dcc.Graph(figure=fig)
 
@@ -448,15 +455,19 @@ def _retrieve_trial_data(unit_key: Dict[str, Any], proto_hash: str) -> Optional[
 def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union[html.Div, dcc.Graph]:
     """
     Helper method prepares a two-figure plot displaying the mean behavioral and neuronal response across all recorded
-    reps of the specified trial protocol. The top figure shows the position trajectory of the target designated as
-    "Fixation Target #1", along with the average eye velocity trajectory. The bottom figure shows the specified neuron's
-    mean firing rate during the trial, with a +/-1 STD band. The timeline in both figures is that portion of the trial
-    protocol that is shared across all reps -- if a protocol includes an initial random-duration segment, then each rep
-    will have a different duration overall.
+    reps of the specified trial protocol. The top figure shows the position trajectories of the targets designated as
+    "Fixation Target #1, #2", along with the average eye velocity trajectory. The bottom figure shows the specified
+    neuron's mean firing rate during the trial, with a +/-1 STD band.
+
+    The timeline in both figures is that portion of the trial protocol that is shared across all reps -- if a protocol
+    includes a random-duration segment, then each rep will have a different duration overall. The method averages the
+    reps across all fixed-duration segments, and across the last T milliseconds of the random-duration segment, where T
+    is the minimum observed duration of that segment across all reps. Of course, this means there is a discontinuity in
+    the average response at the end of the segment preceding the random-duration segment.
 
     Note that the average response figure is only generated if: (1) there are at least 3 reps of the given protocol
-    during the experiment session; (2) the protocol definition is conducive to averaging (no random variables, or a
-    single random-duration segment at the start of the trial protocol).
+    during the experiment session; (2) the protocol definition is conducive to averaging -- that is, it has at MOST one
+    random variable, which varies the duration of a single segment (not necessarily the first one).
 
     Args:
         unit_key: Dictionary containing the primary key-value pairs that uniquely identify a neuron in the database.
@@ -472,10 +483,13 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
     elif len(trial_data) < 3:
         return html.Div(dbc.Alert(f"Fewer than 3 trial reps ({len(trial_data)} found for selected protocol",
                                   is_open=True))
+    elif not trial_data[0].protocol.can_aggregate_responses():
+        return html.Div(dbc.Alert("Selected protocol is not conducive to averaging across trial reps", is_open=True))
 
     unit_id = unit_key['unit_id']
     protocol = trial_data[0].protocol
     prelude = 0
+    min_dur = 0
     hevel_list = list()
     vevel_list = list()
     for td in trial_data:
@@ -490,21 +504,44 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
         fix1_pos, fix2_pos = protocol.compute_fixation_target_trajectories([])
         t_vec = [i for i in range(len(hevel))]
     else:
-        # assumption: the RV is the duration of segment 0. Prelude P is the minimum seg 0 duration across trial reps.
-        # We average responses starting P ticks before the end of segment 0.
-        prelude = int(min([td.trial_rvs[0] for td in trial_data]))
-        hevel = np.nanmean([hevel_list[i][td.trial_rvs[0]-prelude:] for i, td in enumerate(trial_data)], axis=0)
-        vevel = np.nanmean([vevel_list[i][td.trial_rvs[0]-prelude:] for i, td in enumerate(trial_data)], axis=0)
-        firing_rate = np.nanmean([td.instantaneous_firing_rate(unit_id, smooth=True)[td.trial_rvs[0]-prelude:]
-                                  for td in trial_data], axis=0)
-        std_fr = np.nanstd([td.instantaneous_firing_rate(unit_id, smooth=True)[td.trial_rvs[0]-prelude:]
-                            for td in trial_data], axis=0)
+        firing_rate_list = [td.instantaneous_firing_rate(unit_id, smooth=True) for td in trial_data]
+
+        # the RV is the duration of a segment -- not necessarily the first one. For the random-duration segment, we
+        # only average over the last T ms of that segment, where T is the minimum observed duration across trial reps.
+        # This implies a "discontinuity" in the mean response traces.
+        vary_dur_seg = protocol.rvs[0].seg_idx
+        min_dur = int(min([td.trial_rvs[0] for td in trial_data]) + 0.5)
+        prelude = sum([protocol.trial.segments[i].dur for i in range(vary_dur_seg)])
+        pre_slice = slice(0, prelude)   # will be empty slice if first segment has random-duration
+        post_slices = [slice(prelude + td.trial_rvs[0] - min_dur, None) for td in trial_data]
+
+        hevel = np.concatenate(
+            (np.nanmean([hevel_list[i][pre_slice] for i in range(len(trial_data))], axis=0),
+             np.nanmean([hevel_list[i][post_slices[i]] for i in range(len(trial_data))], axis=0)),
+            axis=0
+        )
+        vevel = np.concatenate(
+            (np.nanmean([vevel_list[i][pre_slice] for i in range(len(trial_data))], axis=0),
+             np.nanmean([vevel_list[i][post_slices[i]] for i in range(len(trial_data))], axis=0)),
+            axis=0
+        )
+        firing_rate = np.concatenate(
+            (np.nanmean([firing_rate_list[i][pre_slice] for i in range(len(trial_data))], axis=0),
+             np.nanmean([firing_rate_list[i][post_slices[i]] for i in range(len(trial_data))], axis=0)),
+            axis=0
+        )
+        std_fr = np.concatenate(
+            (np.nanstd([firing_rate_list[i][pre_slice] for i in range(len(trial_data))], axis=0),
+             np.nanstd([firing_rate_list[i][post_slices[i]] for i in range(len(trial_data))], axis=0)),
+            axis=0
+        )
+
         fix1_pos, fix2_pos = protocol.compute_fixation_target_trajectories(trial_data[0].trial_rvs)
         if fix1_pos is not None:
-            fix1_pos = fix1_pos[trial_data[0].trial_rvs[0]-prelude:, :]
+            fix1_pos = np.concatenate((fix1_pos[pre_slice], fix1_pos[post_slices[0]]), axis=0)
         if fix2_pos is not None:
-            fix2_pos = fix2_pos[trial_data[0].trial_rvs[0]-prelude:, :]
-        t_vec = [i-prelude for i in range(len(hevel))]
+            fix2_pos = np.concatenate((fix2_pos[pre_slice], fix2_pos[post_slices[0]]), axis=0)
+        t_vec = [i-(prelude+min_dur) for i in range(len(hevel))]
 
     fig = make_subplots(rows=2, cols=1, specs=[[{"secondary_y": True}], [{"secondary_y": False}]])
     fig.add_trace(
@@ -562,8 +599,8 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
         yaxis3=dict(title='firing rate (Hz) [mean +/- 1STD]')
     )
 
-    if prelude > 0:
-        fig.add_vrect(x0=-prelude, x1=0, fillcolor="red", opacity=0.2)
+    if prelude+min_dur > 0:
+        fig.add_vrect(x0=-(prelude+min_dur), x1=0, fillcolor="red", opacity=0.2)
 
     return dcc.Graph(figure=fig)
 

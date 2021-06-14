@@ -2410,13 +2410,13 @@ class Protocol(NamedTuple):
         """
         Can the behavioral and neural responses to repeated presentations of this trial protocol be aggregated in some
         fashion, typically by averaging? By convention, the protocol must have AT MOST one defined random variable, and
-        that random variable can only be the duration of the first segment of the trial protocol.
+        that random variable can only the duration of one segment (not necessarily the first) in the trial protocol.
 
         Returns:
             True if protocol is amenable to averaging response data, as described; else False.
         """
         return (len(self.rvs) == 0) or \
-               ((len(self.rvs) == 1) and (self.rvs[0].type == SegParamType.DURATION) and (self.rvs[0].seg_idx == 0))
+               ((len(self.rvs) == 1) and (self.rvs[0].type == SegParamType.DURATION))
 
     def summary(self) -> Dict[str, Any]:
         """
@@ -2634,6 +2634,66 @@ class Protocol(NamedTuple):
                 if seg.fix2 >= 0:
                     fix2[t:t+seg.dur, :] = tgt_pos_trajectories[seg.fix2][t:t+seg.dur, :].copy()
                 t += seg.dur
+        return fix1, fix2
+
+    def compute_fixation_target_on_epochs(self, trial_rvs: List[Union[int, float]]) -> Tuple[List[int], List[int]]:
+        """
+        Compute the epochs during which designated fixation targets #1 and #2 are turned ON over the course of a
+        particular instance of this trial protocol.
+
+        The trial target designated as "Fix 1" or "Fix 2" is set on a segment by segment basis, and any trial target
+        can be turned on or off during each segment. This method analyzes the trial rep to define the intervals during
+        which "Fix1" and "Fix2" is defined (they could be set to "NONE" for any given segment) and ON. Since segment
+        duration can vary randomly, we need the random variable values for a trial rep to correctly calculate the
+        epochs.
+
+        Each ON epoch is an interval [S, E], with S and E in milliseconds since the start of the trial. If the fixation
+        target is turned ON and OFF multiple times, there will be multiple epochs: [S1, E1, S2, E2, ..., SN, EN]. If
+        the fixation target is ON for the entire trial, then there will be one epoch [S=0, E=duration of trial].
+
+        Args:
+            trial_rvs: The value of any random variables for the particular trial instance. Length must match the
+                number of RVs defined on the protocol. Ignored if the protocol lacks any random variables.
+        Returns:
+            A 2-tuple (fix1, fix2). The first element is a list of 2*N elapsed times (ms since trial start) [S1, E1,
+                S2, E2, ..., SN, EN] specifying the N non-overlapping ON epochs for fixation target #1. The second
+                element holds the ON epochs for fixation target #2. If a fixation target is unused or never turned on,
+                the corresponding element will be an empty list.
+        Raises:
+            ValueError: If the length of trial_rvs does not match the number of random variables for this protocol.
+        """
+        # if there are any random variables, replace their values in the trial definition with the supplied values. NOTE
+        # that this alters the definition of the internal trial object, but that should not matter because we must
+        # always supply the RV values for a given trial instance!
+        if len(self.rvs) > 0:
+            if len(self.rvs) != len(trial_rvs):
+                raise ValueError("Random-variable value list does not match trial protocol definition!")
+            for i, param in enumerate(self.rvs):
+                self.trial.segments[param.seg_idx].set_value_of(param.type, param.tgt_idx, trial_rvs[i])
+
+        fix1: List[int] = list()
+        fix2: List[int] = list()
+        t1_start = t2_start = -1
+        t = 0
+        for seg in self.trial.segments:
+            if (t1_start == -1) and (seg.fix1 >= 0) and seg.tgt_on[seg.fix1]:
+                t1_start = t
+            elif t1_start > -1 and ((seg.fix1 < 0) or not seg.tgt_on[seg.fix1]):
+                fix1.extend([t1_start, t])
+                t1_start = -1
+            if (t2_start == -1) and (seg.fix2 >= 0) and seg.tgt_on[seg.fix2]:
+                t2_start = t
+            elif t2_start > -1 and ((seg.fix2 < 0) or not seg.tgt_on[seg.fix2]):
+                fix2.extend([t2_start, t])
+                t2_start = -1
+            t += seg.dur
+
+        # close the last ON epoch, if fixation target is on through end of trial
+        if t1_start > -1:
+            fix1.extend([t1_start, t])
+        if t2_start > -1:
+            fix2.extend([t2_start, t])
+
         return fix1, fix2
 
 

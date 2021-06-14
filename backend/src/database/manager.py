@@ -845,8 +845,8 @@ class DataBaseManager:
             neuron_key: At a minimum, this dictionary must uniquely identify a recorded neural unit in the database.
             aggregate: If True, include ONLY those trial protocols for which the average neural response can be
                 computed. By convention, there must be at least 3 reps of the trial protocol for which the neural
-                response was recorded, AND the protocol itself either must have NO random variables OR an initial
-                fixation segment of random duration. Default = False.
+                response was recorded, AND the protocol itself either must have NO random variables OR a single segment
+                (not necessarily segment 0) of random duration. Default = False.
         Returns:
             A dictionary containing the user-friendly pathname ("set/subset/name") of each trial protocol presented
                 while recording the response of the neural unit, keyed by the protocol's MD5 hash digest. If aggregate
