@@ -6,7 +6,8 @@ task_row1 = dbc.Row([
         dbc.Card(
             children=[
                 dbc.Button("Explore", href="/explore", color="primary", className="mt-3"),
-                html.H4("Explore the lab database for specific datasets", className="text-center mt-3")],
+                html.H4("Explore the lab database for specific datasets and related information",
+                        className="text-center mt-3")],
             body=True, color="dark", outline=True),
         width=4, className="mb-4"),
 

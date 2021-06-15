@@ -6,7 +6,7 @@ import dash_bootstrap_components as dbc
 from app import app
 # import all pages in the app
 from database.manager import DataBaseManager
-from pages import home, curate, commit_session, explore
+from pages import home, curate, commit_session, explore, neurons
 
 navbar = dbc.NavbarSimple(
     children=[
@@ -43,7 +43,9 @@ def display_page(pathname):
     elif pathname == '/commit_session':
         return commit_session.layout
     elif pathname == '/explore':
-        return explore.serve_layout()
+        return explore.layout
+    elif pathname == '/neurons':
+        return neurons.serve_layout()
     else:
         return home.layout
 
