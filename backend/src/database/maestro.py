@@ -2696,6 +2696,28 @@ class Protocol(NamedTuple):
 
         return fix1, fix2
 
+    def duration_of_rep(self, trial_rvs: List[Union[int, float]]) -> int:
+        """
+        Get expected duration of a particular presentation of this trial protocol, taking into account the durations
+        of any random-duration trial segments. If the protocol lacks any random-duration segments, then all reps will
+        have the same duration.
+
+        Args:
+            trial_rvs: The value of any random variables for the particular trial instance. Length must match the
+                number of RVs defined on the protocol. Ignored if the protocol lacks any random variables.
+        Returns:
+            The expected duration of the trial rep given the durations -- specified in trial_rvs -- of any
+                random-duration segments in the protocol.
+        Raises:
+            ValueError: If the length of trial_rvs does not match the number of random variables for this protocol.
+        """
+        if len(self.rvs) > 0:
+            if len(self.rvs) != len(trial_rvs):
+                raise ValueError("Random-variable value list does not match trial protocol definition!")
+            for i, param in enumerate(self.rvs):
+                self.trial.segments[param.seg_idx].set_value_of(param.type, param.tgt_idx, trial_rvs[i])
+        return sum([seg.dur for seg in self.trial.segments])
+
 
 class ProtocolCandidate:
     """

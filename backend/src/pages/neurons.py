@@ -17,6 +17,7 @@ necessarily the first one).
 @author: sruffner
 @created: 22mar2021
 """
+import sys
 from datetime import date
 from typing import List, Dict, Any, Optional, Union
 
@@ -263,6 +264,9 @@ _RESP_PROTO_VIEW_CLOSE_ID: str = 'resp_proto_view_close'
 """ ID of button that extinguishes the Bootstrap Modal window in which a protocol is displayed. """
 _RESP_RESP_VIEW_ID: str = "resp_resp_view"
 """ ID of HTML Div in the 'Response Data' panel in which the selected response data is displayed. """
+_RESP_VIEW_LOADING_ID: str = "resp_view_loading"
+""" ID of the Dash Loading component encapsulating the response graph(s) to display a loading indicator when it takes a
+significant amount of time to prepare those graphs. """
 
 
 def _response_panel(row_selected: Dict[str, Any]) -> html.Div:
@@ -308,8 +312,9 @@ def _response_panel(row_selected: Dict[str, Any]) -> html.Div:
 
     markdown = dcc.Markdown(
         '''Select a trial protocol, then select an individual trial response or an aggregate response statistic. 
-        *Aggregate response data is available only for those trial protocols for which 3 or more trial reps were 
-        recorded. In addition, the trial protocol can have no random variables, or a single random-duration segment.*'''
+        *Aggregate response data is available only for those trial protocols for which 3 or more **successfully 
+        completed** trial reps were recorded. In addition, the trial protocol can have no random variables, or a 
+        single random-duration segment (highlighted in red in the figure).*'''
     )
 
     nav_row = dbc.Row([
@@ -317,7 +322,8 @@ def _response_panel(row_selected: Dict[str, Any]) -> html.Div:
         dbc.Col([view_btn, proto_modal]),
         dbc.Col(select_response, width=3, className='mr-1')
     ])
-    return html.Div([markdown, nav_row, figure_view])
+    loading_figure = dcc.Loading(id=_RESP_VIEW_LOADING_ID, children=figure_view, type='circle')
+    return html.Div([markdown, nav_row, loading_figure])
 
 
 _BEHAVIOR_TRACE_STYLE_MAP = {
@@ -339,6 +345,12 @@ def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> U
     top figure shows the position trajectory of the target designated as "Fixation Target #1" and the recorded position
     and velocity trajectories of the eye. The bottom figure shows the neuron's recorded spike train and the derived
     firing rate as a function of time.
+
+    Given the notion of a "failsafe segment" in a Maestro trial, incomplete trials -- aborted because the animal did
+    not satisfy fixation requirements at some point during the trial -- may be stored in the lab database. For such
+    trials, the time axis of each figure spans the duration of the trial had it run to completion, and the fixation
+    target trajectories are computed for the entire trial. The actual recorded response data (eye position/velocity and
+    unit firing rate) will, of course, be truncated.
 
     Args:
         unit_key: Dictionary containing the primary key-value pairs that uniquely identify a neuron in the database.
@@ -367,16 +379,17 @@ def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> U
 
     # plot fixation target #1 H,V trajectories, if defined. Also use a thin translucent horizontal bar to highlight the
     # ON epochs for the fixation target #1, and label with the text annotation "Fix1 ON"
+    duration_ms = trial_data.protocol.duration_of_rep(trial_data.trial_rvs)
     fix1_pos, fix2_pos = trial_data.protocol.compute_fixation_target_trajectories(trial_data.trial_rvs)
     fix1_on, fix2_on = trial_data.protocol.compute_fixation_target_on_epochs(trial_data.trial_rvs)
     if fix1_pos is not None:
         fig.add_trace(
-            go.Scatter(x=[i for i in range(fix1_pos.shape[0])], y=fix1_pos[:, 0], name='FIX1_HPOS', mode='lines',
+            go.Scatter(x=[i for i in range(duration_ms)], y=fix1_pos[:, 0], name='FIX1_HPOS', mode='lines',
                        line=_BEHAVIOR_TRACE_STYLE_MAP['FIX1_HPOS'], connectgaps=False),
             row=1, col=1, secondary_y=False
         )
         fig.add_trace(
-            go.Scatter(x=[i for i in range(fix1_pos.shape[0])], y=fix1_pos[:, 1], name='FIX1_VPOS', mode='lines',
+            go.Scatter(x=[i for i in range(duration_ms)], y=fix1_pos[:, 1], name='FIX1_VPOS', mode='lines',
                        line=_BEHAVIOR_TRACE_STYLE_MAP['FIX1_VPOS'], connectgaps=False),
             row=1, col=1, secondary_y=False
         )
@@ -391,12 +404,12 @@ def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> U
     # and analogously for fixation target #2...
     if fix2_pos is not None:
         fig.add_trace(
-            go.Scatter(x=[i for i in range(fix2_pos.shape[0])], y=fix2_pos[:, 0], name='FIX2_HPOS', mode='lines',
+            go.Scatter(x=[i for i in range(duration_ms)], y=fix2_pos[:, 0], name='FIX2_HPOS', mode='lines',
                        line=_BEHAVIOR_TRACE_STYLE_MAP['FIX2_HPOS'], connectgaps=False),
             row=1, col=1, secondary_y=False
         )
         fig.add_trace(
-            go.Scatter(x=[i for i in range(fix2_pos.shape[0])], y=fix2_pos[:, 1], name='FIX2_VPOS', mode='lines',
+            go.Scatter(x=[i for i in range(duration_ms)], y=fix2_pos[:, 1], name='FIX2_VPOS', mode='lines',
                        line=_BEHAVIOR_TRACE_STYLE_MAP['FIX2_VPOS'], connectgaps=False),
             row=1, col=1, secondary_y=False
         )
@@ -437,17 +450,27 @@ def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> U
         yaxis4=dict(range=[0, 10], anchor="x", overlaying="y3", visible=False)
     )
 
+    # if trial was not completed successfully, the lower plot will only span the recorded duration, rather than the
+    # expected duration of the trial. Here we force the lower plot to the same x-axis range as the upper plot, and add
+    # an annotation to the upper plot to indicate that trial aborted prematurely.
+    if not trial_data.success:
+        fig.update_xaxes(row=2, col=1, range=[0, duration_ms])
+        fig.add_annotation(x=0, y=1.0, yref='y domain', text='<b>** TRIAL NOT COMPLETED **</b>', showarrow=False,
+                           ax=0, ay=0, xanchor="left", yanchor="bottom", row=1, col=1)
+
     return dcc.Graph(figure=fig)
 
 
-def _retrieve_trial_data(unit_key: Dict[str, Any], proto_hash: str) -> Optional[List[TrialData]]:
+def _retrieve_trial_data(unit_key: Dict[str, Any], proto_hash: str,
+                         complete_reps_only: bool = False) -> Optional[List[TrialData]]:
     """
     Retrieve the data for all trial reps of the selected protocol for the selected neuron.
 
     Args:
         unit_key: Dictionary that includes the primary key of a selected neural unit in the database.
         proto_hash: The selected trial protocol's MD5 hash digest (the primary key in protocol database table).
-
+        complete_reps_only: If True, the method only returns data for successfully completed reps; else, it returns data
+            for all reps found. Default = False.
     Returns:
         A list of trial data objects, one for each rep of the specified trial protocol during which specified neuron
             was recorded. Returns None if an error occurs while retrieving the dat.
@@ -464,40 +487,41 @@ def _retrieve_trial_data(unit_key: Dict[str, Any], proto_hash: str) -> Optional[
             if td is None:
                 ok = False
                 break
-            trial_data.append(td)
+            elif (not complete_reps_only) or td.success:
+                trial_data.append(td)
     return trial_data if ok else None
 
 
 def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union[html.Div, dcc.Graph]:
     """
     Helper method prepares a two-figure plot displaying the mean behavioral and neuronal response across all recorded
-    reps of the specified trial protocol. The top figure shows the position trajectories of the targets designated as
-    "Fixation Target #1, #2", along with the average eye velocity trajectory. The bottom figure shows the specified
-    neuron's mean firing rate during the trial, with a +/-1 STD band.
+    reps of the specified trial protocol THAT WERE COMPLETED SUCCESSFULLY. The top figure shows the position
+    trajectories of the targets designated as "Fixation Target #1, #2", along with the average eye velocity trajectory.
+    The bottom figure shows the specified neuron's mean firing rate during the trial, with a +/-1 STD band.
 
     The timeline in both figures is that portion of the trial protocol that is shared across all reps -- if a protocol
     includes a random-duration segment, then each rep will have a different duration overall. The method averages the
-    reps across all fixed-duration segments, and across the last T milliseconds of the random-duration segment, where T
-    is the minimum observed duration of that segment across all reps. Of course, this means there is a discontinuity in
-    the average response at the end of the segment preceding the random-duration segment.
+    successful reps across all fixed-duration segments, and across the last T milliseconds of the random-duration
+    segment, where T is the minimum observed duration of that segment across all reps. Of course, this means there is a
+    discontinuity in the average response at the end of the segment preceding the random-duration segment.
 
-    Note that the average response figure is only generated if: (1) there are at least 3 reps of the given protocol
-    during the experiment session; (2) the protocol definition is conducive to averaging -- that is, it has at MOST one
-    random variable, which varies the duration of a single segment (not necessarily the first one).
+    Note that the average response figure is only generated if: (1) there are at least 3 SUCCESSFULLY COMPLETED reps of
+    the given protocol during the experiment session; (2) the protocol definition is conducive to averaging -- that is,
+    it has at MOST one random variable, which varies the duration of a single segment (not necessarily the first one).
 
     Args:
         unit_key: Dictionary containing the primary key-value pairs that uniquely identify a neuron in the database.
         proto_hash: The MD5 hash digest that uniquely identifies the trial protocol in the lab database.
     Returns:
-        A Dash Graph component containing the mean behavioral and neuronal responses over all recorded reps of the
-            specified trial protocol. If an error occurs while retrieving or processing response data, the method
-            instead returns an HTML Div with an error message.
+        A Dash Graph component containing the mean behavioral and neuronal responses over all successfully completed
+            reps of the specified trial protocol. If an error occurs while retrieving or processing response data, the
+            method instead returns an HTML Div with an error message.
     """
-    trial_data = _retrieve_trial_data(unit_key, proto_hash)
+    trial_data = _retrieve_trial_data(unit_key, proto_hash, complete_reps_only=True)
     if trial_data is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial data for neuron (internal error).", is_open=True))
     elif len(trial_data) < 3:
-        return html.Div(dbc.Alert(f"Fewer than 3 trial reps ({len(trial_data)} found for selected protocol",
+        return html.Div(dbc.Alert(f"Fewer than 3 successful trial reps ({len(trial_data)} found for selected protocol",
                                   is_open=True))
     elif not trial_data[0].protocol.can_aggregate_responses():
         return html.Div(dbc.Alert("Selected protocol is not conducive to averaging across trial reps", is_open=True))
@@ -530,38 +554,33 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
         vary_dur_seg = protocol.rvs[0].seg_idx
         min_dur = int(min([td.trial_rvs[0] for td in trial_data]) + 0.5)
         prelude = sum([protocol.trial.segments[i].dur for i in range(vary_dur_seg)])
-        pre_slice = slice(0, prelude)   # will be empty slice if first segment has random-duration
-        post_slices = [slice(prelude + td.trial_rvs[0] - min_dur, None) for td in trial_data]
 
         hevel = np.concatenate(
-            (np.nanmean([hevel_list[i][pre_slice] for i in range(len(trial_data))], axis=0),
-             np.nanmean([hevel_list[i][post_slices[i]] for i in range(len(trial_data))], axis=0)),
+            (np.nanmean([hevel_list[i][0:prelude] for i in range(len(trial_data))], axis=0),
+             np.nanmean([hevel_list[i][prelude+td.trial_rvs[0]-min_dur:] for i, td in enumerate(trial_data)], axis=0)),
             axis=0
         )
         vevel = np.concatenate(
-            (np.nanmean([vevel_list[i][pre_slice] for i in range(len(trial_data))], axis=0),
-             np.nanmean([vevel_list[i][post_slices[i]] for i in range(len(trial_data))], axis=0)),
+            (np.nanmean([vevel_list[i][0:prelude] for i in range(len(trial_data))], axis=0),
+             np.nanmean([vevel_list[i][prelude+td.trial_rvs[0]-min_dur:] for i, td in enumerate(trial_data)], axis=0)),
             axis=0
         )
         firing_rate = np.concatenate(
-            (np.nanmean([firing_rate_list[i][pre_slice] for i in range(len(trial_data))], axis=0),
-             np.nanmean([firing_rate_list[i][post_slices[i]] for i in range(len(trial_data))], axis=0)),
+            (np.nanmean([firing_rate_list[i][0:prelude] for i in range(len(trial_data))], axis=0),
+             np.nanmean([firing_rate_list[i][prelude+td.trial_rvs[0]-min_dur:] for i, td in enumerate(trial_data)],
+                        axis=0)),
             axis=0
         )
         std_fr = np.concatenate(
-            (np.nanstd([firing_rate_list[i][pre_slice] for i in range(len(trial_data))], axis=0),
-             np.nanstd([firing_rate_list[i][post_slices[i]] for i in range(len(trial_data))], axis=0)),
+            (np.nanstd([firing_rate_list[i][0:prelude] for i in range(len(trial_data))], axis=0),
+             np.nanstd([firing_rate_list[i][prelude+td.trial_rvs[0]-min_dur:] for i, td in enumerate(trial_data)],
+                       axis=0)),
             axis=0
         )
 
-        fix1_pos, fix2_pos = protocol.compute_fixation_target_trajectories(trial_data[0].trial_rvs)
-        if fix1_pos is not None:
-            fix1_pos = np.concatenate((fix1_pos[pre_slice], fix1_pos[post_slices[0]]), axis=0)
-        if fix2_pos is not None:
-            fix2_pos = np.concatenate((fix2_pos[pre_slice], fix2_pos[post_slices[0]]), axis=0)
-
-        # we need to compute the fixation target ON epoch times for the trial rep that has the minimum observed
-        # duration for the random-duration segment.
+        # we compute fixation target position trajectories and ON epoch times for the trial rep that had the minimum
+        # observed duration for the random-duration segment.
+        fix1_pos, fix2_pos = protocol.compute_fixation_target_trajectories([min_dur])
         fix1_on, fix2_on = protocol.compute_fixation_target_on_epochs([min_dur])
         if fix1_on is not None:
             for i in range(len(fix1_on)):
@@ -659,6 +678,12 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
         )
         t += seg_dur
 
+    # indicate the number of trial reps aggregated to produce this figure
+    fig.add_annotation(
+        x=-(prelude+min_dur), y=1.0, yref='y domain', text=f"<b>N = {len(trial_data)} reps</b>", showarrow=False,
+        ax=0, ay=0, xanchor='left', yanchor='bottom', row=1, col=1, secondary_y=False, font=dict(size=16)
+    )
+
     fig.update_layout(
         margin=dict(l=20, r=20, t=30, b=20),
         height=800,
@@ -686,19 +711,19 @@ _RESP_DS_GRAPH_ID: str = 'resp_ds_graph'
 def _discharge_statistics_panel(unit_key: Dict[str, Any], proto_hash: str) -> html.Div:
     """
     Helper method prepares a two-figure plot displaying the specified neuron's discharge statistics (autocorrelogram and
-    inter-spike interval histogram) computed across all reps of the specified trial protocol. The top figure is a simple
-    representation of the trial protocol showing only the position trajectory of the target designated as "Fixation
-    Target #1". A series of alternating blue and gray bars along the top of this plot indicate the spans of the trial
-    segments.
+    inter-spike interval histogram) computed across all SUCCESSFULLY COMPLETED reps of the specified trial protocol. The
+    top figure is a simple representation of the trial protocol showing only the position trajectory of the target
+    designated as "Fixation Target #1". A series of alternating blue and gray bars along the top of this plot indicate
+    the spans of the trial segments.
 
     Below this is a range slider that lets the user select the contiguous interval of trial segments over which the
     statistics are computed; initially, the slider covers all segments in the trial protocol. We select the interval in
     terms of segments rather than trial time because the trial protocol may include a random-duration segment.
 
     The bottom figure has two side-by-side plots: the ACG and the ISI histogram. Note that the discharge statistics are
-    only generated if: (1) there are at least 3 reps of the given protocol during the experiment session; (2) the
-    protocol definition is conducive to averaging (no random variables, or a single random-duration segment -- not
-    necessarily the first one).
+    only generated if: (1) there are at least 3 successfully completed reps of the given protocol during the experiment
+    session; (2) the protocol definition is conducive to averaging (no random variables, or a single random-duration
+    segment -- not necessarily the first one).
 
     Args:
         unit_key: Dictionary containing the primary key-value pairs that uniquely identify a neuron in the database.
@@ -707,11 +732,11 @@ def _discharge_statistics_panel(unit_key: Dict[str, Any], proto_hash: str) -> ht
         An HTML Div displaying the specified neuron's discharge statistics as described. If an error occurs while
             retrieving response data, the method instead returns an HTML Div with an error message.
     """
-    trial_data = _retrieve_trial_data(unit_key, proto_hash)
+    trial_data = _retrieve_trial_data(unit_key, proto_hash, complete_reps_only=True)
     if trial_data is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial data for neuron (internal error).", is_open=True))
     elif len(trial_data) < 3:
-        return html.Div(dbc.Alert(f"Fewer than 3 trial reps ({len(trial_data)} found for selected protocol",
+        return html.Div(dbc.Alert(f"Fewer than 3 successful trial reps ({len(trial_data)} found for selected protocol",
                                   is_open=True))
     elif not trial_data[0].protocol.can_aggregate_responses():
         return html.Div(dbc.Alert("Selected protocol is not conducive to averaging across trial reps", is_open=True))
@@ -818,11 +843,12 @@ def _discharge_statistics_figure(
         unit_id: int, trial_data: List[TrialData], seg_range: Optional[List[int]] = None) -> go.Figure:
     """
     Helper method computes the autocorrelogram (ACG) and inter-spike interval (ISI) histogram for the specified neuron
-    across all reps of a particular trial protocol.
+    across all successfully completed reps of a particular trial protocol.
 
     Args:
         unit_id: Integer ID assigned to neuron (unique across experiment session).
-        trial_data: List of TrialData objects containing the response data from each rep of a single trial protocol.
+        trial_data: List of TrialData objects containing the response data from each successfully completed rep of a
+            single trial protocol.
         seg_range: The contiguous interval [S, E] of trial segments over which the ACG and ISI should be computed. S
             lies in [0..N) and E in (0..N], where N is the number of segments in the trial protocol. Segment index N
             corresponds to trial's end. Default is None, in which case the computation covers the entire trial.
@@ -987,8 +1013,10 @@ def on_response_panel_ds_range(range_value, selected_rows, rows, proto_hash_valu
     idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
     selected_unit = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
     ok = isinstance(range_value, list) and not ((selected_unit is None) or (proto_hash_value is None))
-    return dash.no_update if not ok else _discharge_statistics_figure(
-        selected_unit['unit_id'], _retrieve_trial_data(selected_unit, proto_hash_value), range_value)
+    return dash.no_update if not ok else \
+        _discharge_statistics_figure(
+            selected_unit['unit_id'],
+            _retrieve_trial_data(selected_unit, proto_hash_value, complete_reps_only=True), range_value)
 
 
 @app.callback([Output(_RESP_PROTO_VIEW_MODAL_ID, "is_open"), Output(_RESP_PROTO_VIEW_BODY_ID, "children")],
