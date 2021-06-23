@@ -17,28 +17,26 @@ necessarily the first one).
 @author: sruffner
 @created: 22mar2021
 """
-import sys
 from datetime import date
 from typing import List, Dict, Any, Optional, Union
 
-import dash_html_components as html
+import dash
 import dash_bootstrap_components as dbc
 import dash_core_components as dcc
+import dash_html_components as html
 import dash_table as dt
-import dash
-from dash.dependencies import Input, Output, State
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+from dash.dependencies import Input, Output, State
 from plotly.subplots import make_subplots
 
-from app import app
 import database.table_info as ti
+from app import app
 from common import check_date
 from database import stats
 from database.manager import DataBaseManager, TrialData
 from database.table_info import DBTable
-
 
 _NEURON_TABLE_ID: str = "neuron_list"
 """ The ID assigned to the Dash DataTable presenting the list of neurons in the database. """
@@ -290,8 +288,7 @@ def _response_panel(row_selected: Dict[str, Any]) -> html.Div:
     select_protocol = dbc.Select(
         id=_RESP_PROTO_SELECT_ID,
         options=[{'label': v, 'value': k} for k, v in proto_map.items()],
-        value=first_proto_key,
-        className="mb-2"
+        value=first_proto_key
     )
     view_btn = dbc.Button("View details", id=_RESP_PROTO_VIEW_OPEN_ID, color='primary')
     proto_modal = dbc.Modal(
@@ -307,23 +304,32 @@ def _response_panel(row_selected: Dict[str, Any]) -> html.Div:
     )
 
     # These get populated via chained callbacks.
-    select_response = dbc.Select(id=_RESP_RESP_SELECT_ID)
+    select_response = dbc.Select(id=_RESP_RESP_SELECT_ID, style={'display': 'inline'})
     figure_view = html.Div(id=_RESP_RESP_VIEW_ID, children=[])
 
+    # a tooltip is presented in a Bootstrap Popover element attached to a pill badge on the navigation row.
+    help_badge = dbc.Badge("?", pill=True, id='resp_help_badge', className='mt-1 float-right', color='info',
+                           style={'font-size': 18})
     markdown = dcc.Markdown(
         '''Select a trial protocol, then select an individual trial response or an aggregate response statistic. 
         *Aggregate response data is available only for those trial protocols for which 3 or more **successfully 
         completed** trial reps were recorded. In addition, the trial protocol can have no random variables, or a 
-        single random-duration segment (highlighted in red in the figure).*'''
+        single random-duration segment (highlighted in red in the figures for "Mean firing rate" and "Discharge 
+        statistics").*'''
     )
+    help_popover = dbc.Popover(
+        [dbc.PopoverBody(markdown)],
+        id='resp_help_popover', target='resp_help_badge', trigger='hover', placement='left-start')
 
     nav_row = dbc.Row([
         dbc.Col(select_protocol, width=6),
         dbc.Col([view_btn, proto_modal]),
-        dbc.Col(select_response, width=3, className='mr-1')
-    ])
+        dbc.Col(select_response, width=3),
+        dbc.Col([help_badge, help_popover], width=1)
+    ], className='mb-2')
+
     loading_figure = dcc.Loading(id=_RESP_VIEW_LOADING_ID, children=figure_view, type='circle')
-    return html.Div([markdown, nav_row, loading_figure])
+    return html.Div([nav_row, loading_figure])
 
 
 _BEHAVIOR_TRACE_STYLE_MAP = {
@@ -440,6 +446,21 @@ def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> U
             row=2, col=1, secondary_y=True
         )
 
+    # segment spans defined by alternating blue and gray bars along top of bottom plot, with segment label.
+    t = 0
+    for i, seg in enumerate(trial_data.protocol.trial.segments):
+        fig.add_shape(
+            type='rect', x0=t, x1=t+seg.dur, xref='x', y0=1.01, y1=1.09, yref='y domain',
+            fillcolor='lightsteelblue' if (i % 2) == 0 else 'whitesmoke', line=dict(width=0),
+            row=2, col=1, secondary_y=False
+        )
+        fig.add_annotation(
+            x=t, y=1.05, yref='y domain', text=f"<b>Seg{i}</b>", showarrow=False, ax=0, ay=0,
+            xanchor='left', yanchor='middle',
+            row=2, col=1, secondary_y=False
+        )
+        t += seg.dur
+
     fig.update_layout(
         margin=dict(l=20, r=20, t=30, b=20),
         height=800,
@@ -530,24 +551,22 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
     protocol = trial_data[0].protocol
     min_dur = 0
     vary_dur_seg = -1
-    prelude = 0
     hevel_list = list()
     vevel_list = list()
     for td in trial_data:
         h, v = td.eye_velocity_saccades_removed()
         hevel_list.append(h)
         vevel_list.append(v)
+    firing_rate_list = [td.instantaneous_firing_rate(unit_id, smooth=True) for td in trial_data]
     if len(protocol.rvs) == 0:
         hevel = np.nanmean(hevel_list, axis=0)
         vevel = np.nanmean(vevel_list, axis=0)
-        firing_rate = np.nanmean([td.instantaneous_firing_rate(unit_id, smooth=True) for td in trial_data], axis=0)
-        std_fr = np.nanstd([td.instantaneous_firing_rate(unit_id, smooth=True) for td in trial_data], axis=0)
+        firing_rate = np.nanmean(firing_rate_list, axis=0)
+        std_fr = np.nanstd(firing_rate_list, axis=0)
         fix1_pos, fix2_pos = protocol.compute_fixation_target_trajectories([])
         fix1_on, fix2_on = protocol.compute_fixation_target_on_epochs([])
         t_vec = [i for i in range(len(hevel))]
     else:
-        firing_rate_list = [td.instantaneous_firing_rate(unit_id, smooth=True) for td in trial_data]
-
         # the RV is the duration of a segment -- not necessarily the first one. For the random-duration segment, we
         # only average over the last T ms of that segment, where T is the minimum observed duration across trial reps.
         # This implies a "discontinuity" in the mean response traces.
@@ -565,16 +584,14 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
              np.nanmean([vevel_list[i][prelude+td.trial_rvs[0]-min_dur:] for i, td in enumerate(trial_data)], axis=0)),
             axis=0
         )
+        firing_rate_pre = [firing_rate_list[i][0:prelude] for i in range(len(trial_data))]
+        firing_rate_post = [firing_rate_list[i][prelude+td.trial_rvs[0]-min_dur:] for i, td in enumerate(trial_data)]
         firing_rate = np.concatenate(
-            (np.nanmean([firing_rate_list[i][0:prelude] for i in range(len(trial_data))], axis=0),
-             np.nanmean([firing_rate_list[i][prelude+td.trial_rvs[0]-min_dur:] for i, td in enumerate(trial_data)],
-                        axis=0)),
+            (np.nanmean(firing_rate_pre, axis=0), np.nanmean(firing_rate_post, axis=0)),
             axis=0
         )
         std_fr = np.concatenate(
-            (np.nanstd([firing_rate_list[i][0:prelude] for i in range(len(trial_data))], axis=0),
-             np.nanstd([firing_rate_list[i][prelude+td.trial_rvs[0]-min_dur:] for i, td in enumerate(trial_data)],
-                       axis=0)),
+            (np.nanstd(firing_rate_pre, axis=0), np.nanstd(firing_rate_post, axis=0)),
             axis=0
         )
 
@@ -582,14 +599,8 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
         # observed duration for the random-duration segment.
         fix1_pos, fix2_pos = protocol.compute_fixation_target_trajectories([min_dur])
         fix1_on, fix2_on = protocol.compute_fixation_target_on_epochs([min_dur])
-        if fix1_on is not None:
-            for i in range(len(fix1_on)):
-                fix1_on[i] -= (prelude+min_dur)
-        if fix2_on is not None:
-            for i in range(len(fix2_on)):
-                fix2_on[i] -= (prelude+min_dur)
 
-        t_vec = [i-(prelude+min_dur) for i in range(len(hevel))]
+        t_vec = [i for i in range(len(hevel))]
 
     # two subplots: Average eye velocity and fixation target position trajectories in top plot, and mean +/-1 STD
     # firing rate of neuron in the bottom plot
@@ -663,16 +674,16 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
     )
 
     # segment spans defined by alternating blue and gray bars along top of bottom plot, with segment label.
-    t = -(prelude+min_dur)
+    t = 0
     for i, seg in enumerate(protocol.trial.segments):
         seg_dur = min_dur if (i == vary_dur_seg) else seg.dur
         fig.add_shape(
-            type='rect', x0=t, x1=t+seg_dur, xref='x', y0=1.02, y1=1.12, yref='y domain',
+            type='rect', x0=t, x1=t+seg_dur, xref='x', y0=1.01, y1=1.09, yref='y domain',
             fillcolor='lightsteelblue' if (i % 2) == 0 else 'whitesmoke', line=dict(width=0),
             row=2, col=1, secondary_y=False
         )
         fig.add_annotation(
-            x=t, y=1.07, yref='y domain', text=f"<b>Seg{i}</b>", showarrow=False, ax=0, ay=0,
+            x=t, y=1.05, yref='y domain', text=f"<b>Seg{i}</b>", showarrow=False, ax=0, ay=0,
             xanchor='left', yanchor='middle',
             row=2, col=1, secondary_y=False
         )
@@ -680,7 +691,7 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
 
     # indicate the number of trial reps aggregated to produce this figure
     fig.add_annotation(
-        x=-(prelude+min_dur), y=1.0, yref='y domain', text=f"<b>N = {len(trial_data)} reps</b>", showarrow=False,
+        x=0, y=1.0, yref='y domain', text=f"<b>N = {len(trial_data)} reps</b>", showarrow=False,
         ax=0, ay=0, xanchor='left', yanchor='bottom', row=1, col=1, secondary_y=False, font=dict(size=16)
     )
 
@@ -696,8 +707,9 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
     # highlight the portion of the figure that represents the random-duration segment with a translucent rectangle
     # spanning the two plots vertically, plus, a vertical dashed line at the start of that segment
     if min_dur > 0:
-        fig.add_vrect(x0=-min_dur, x1=0, fillcolor="red", opacity=0.2)
-        fig.add_vline(x=-min_dur, line=dict(dash='dash', color='darkred', width=3), opacity=0.4)
+        t_start = sum([protocol.trial.segments[i].dur for i in range(vary_dur_seg)])
+        fig.add_vrect(x0=t_start, x1=t_start+min_dur, fillcolor="red", opacity=0.2)
+        fig.add_vline(x=t_start, line=dict(dash='dash', color='darkred', width=3), opacity=0.4)
 
     return dcc.Graph(figure=fig)
 
@@ -803,6 +815,13 @@ def _discharge_statistics_panel(unit_key: Dict[str, Any], proto_hash: str) -> ht
             xanchor='left', yanchor='middle'
         )
         t += seg_dur
+
+    # highlight the portion of the figure that represents the random-duration segment with a translucent rectangle
+    # spanning the two plots vertically, plus, a vertical dashed line at the start of that segment
+    if min_dur > 0:
+        t_start = sum([protocol.trial.segments[i].dur for i in range(rv_seg_idx)])
+        proto_plot.add_vrect(x0=t_start, x1=t_start+min_dur, fillcolor="red", opacity=0.2)
+        proto_plot.add_vline(x=t_start, line=dict(dash='dash', color='darkred', width=3), opacity=0.4)
 
     proto_plot.update_layout(
         margin=dict(l=20, r=20, t=30, b=20),
