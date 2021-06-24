@@ -395,7 +395,12 @@ def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> U
     # plot fixation target #1 H,V trajectories, if defined. Also use a thin translucent horizontal bar to highlight the
     # ON epochs for the fixation target #1, and label with the text annotation "Fix1 ON"
     duration_ms = trial_data.protocol.duration_of_rep(trial_data.trial_rvs)
-    fix1_pos, fix2_pos = trial_data.protocol.compute_fixation_target_trajectories(trial_data.trial_rvs)
+    fix1_pos, fix2_pos = trial_data.protocol.compute_fixation_target_trajectories(
+        trial_data.trial_rvs,
+        trial_data.behavior['HEPOS'] if 'HEPOS' in trial_data.behavior else None,
+        trial_data.behavior['VEPOS'] if 'VEPOS' in trial_data.behavior else None,
+        trial_data.vstab_win_len_ms
+    )
     fix1_on, fix2_on = trial_data.protocol.compute_fixation_target_on_epochs(trial_data.trial_rvs)
     if fix1_pos is not None:
         fig.add_trace(

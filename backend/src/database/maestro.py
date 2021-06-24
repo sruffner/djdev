@@ -2146,6 +2146,14 @@ class Trial(NamedTuple):
                 return True
         return False
 
+    def uses_vstab(self) -> bool:
+        """ Does this trial velocity-stabilize any participating target during any segment? """
+        for seg in self.segments:
+            for i in range(len(self.targets)):
+                if seg.tgt_vel_stab_mask[i] != 0:
+                    return True
+        return False
+
     def duration(self) -> int:
         """ Return the total duration of this trial in milliseconds. This method merely returns the sum of the segment
         durations as defined in the trial. """
@@ -2250,7 +2258,8 @@ class Trial(NamedTuple):
         """
         return sum(self.segments[i].dur for i in range(self.record_seg))
 
-    def target_trajectories(self) -> List[np.ndarray]:
+    def target_trajectories(self, hgpos: Optional[np.ndarray] = None, vepos: Optional[np.ndarray] = None,
+                            vstab_win_len: Optional[int] = None) -> List[np.ndarray]:
         """
         Compute the position trajectories of all targets participating in this trial.
 
@@ -2260,6 +2269,13 @@ class Trial(NamedTuple):
         pattern velocity for video targets. Finally, the calculation assumes that targets move even if they are turned
         off. This has always been the case -- except for XYScope targets prior to Maestro 1.2.1
 
+        Args:
+            hgpos: The horizontal eye position trajectory (in deg) during trial -- used to adjust target trajectories
+                during periods of velocity stabilization. Default = None, in which case no adjustment can be made.
+            vepos: The vertical eye position trajectory (in deg) during trial -- used to adjust target trajectories
+                during periods of velocity stabilization. Default = None, in which case no adjustment can be made.
+            vstab_win_len: The length of the sliding window (1 to 20 ms) for smoothing eye position when computing the
+                target trajectory adjustment for velocity stabilization. Default = None (no smoothing).
         Returns:
             A list of 2D Numpy arrays, where the I-th array is the position trajectory of the I-th participating target.
                 Each array is Nx2, where N is the trial duration and the N-th "row" is the (H,V) position of the target
@@ -2271,9 +2287,17 @@ class Trial(NamedTuple):
         current_pos: List[Point2D] = [Point2D(0, 0) for _ in range(num_tgts)]
         current_vel: List[Point2D] = [Point2D(0, 0) for _ in range(num_tgts)]
 
+        # enable velocity stabilization compensation if all restrictions met
+        t_record = self.record_start()
+        do_vstab = self.uses_vstab() and (hgpos is not None) and (vepos is not None) and (len(hgpos) == len(vepos)) \
+            and (len(hgpos) >= (dur - t_record))
+        vstab_win_len = 1 if (not isinstance(vstab_win_len, int)) else max(min(20, vstab_win_len), 1)
+        current_eye_pos = Point2D(0, 0)
+        last_eye_pos = Point2D(0, 0)
+
         t = 0
         delta = 0.001  # in Maestro, one "tick" = 1 millisecond
-        for seg in self.segments:
+        for seg_idx, seg in enumerate(self.segments):
             for i in range(num_tgts):
                 if seg.tgt_rel[i]:
                     current_pos[i].offset_by(seg.tgt_pos[i].x, seg.tgt_pos[i].y)
@@ -2283,11 +2307,36 @@ class Trial(NamedTuple):
 
             t_start_seg = t
             while t < (t_start_seg + seg.dur):
+                # if doing VStab compensation, get current eye position, smoothed if window length > 1.
+                if do_vstab and (t >= t_record):
+                    if (vstab_win_len == 1) or (t == t_record):
+                        current_eye_pos.set(hgpos[t-t_record], vepos[t-t_record])
+                    else:
+                        start = max(0, t-t_record-vstab_win_len)
+                        end = t-t_record
+                        current_eye_pos.set(np.nanmean(hgpos[start:end]), np.nanmean(vepos[start:end]))
+
                 for i in range(num_tgts):
+                    # velocity stabilization adjustment of target position, if applicable
+                    vstab_mask = seg.tgt_vel_stab_mask[i]
+                    if do_vstab and (t >= t_record) and vstab_mask != 0:
+                        if (t == t_start_seg) and \
+                              ((seg_idx == 0) or (self.segments[seg_idx-1].tgt_vel_stab_mask[i] == 0)) and \
+                              ((vstab_mask & VEL_STAB_SNAP) != 0):
+                            current_pos[i].set_point(current_eye_pos)
+                        else:
+                            current_pos[i].offset_by(
+                                (current_eye_pos.x - last_eye_pos.x) if ((vstab_mask & VEL_STAB_H) != 0) else 0,
+                                (current_eye_pos.y - last_eye_pos.y) if ((vstab_mask & VEL_STAB_V) != 0) else 0
+                            )
                     trajectories[i][t, :] = [current_pos[i].x, current_pos[i].y]
                     current_pos[i].offset_by(current_vel[i].x * delta, current_vel[i].y * delta)
                     current_vel[i].offset_by(seg.tgt_acc[i].x * delta, seg.tgt_acc[i].y * delta)
                 t += 1
+
+                # if doing VStab compensation, remember eye position
+                if do_vstab:
+                    last_eye_pos.set_point(current_eye_pos)
 
         return trajectories
 
@@ -2578,16 +2627,19 @@ class Protocol(NamedTuple):
         )
         return [html.Div(badges, className='mt-3 mb-1'), segment_table]
 
-    def compute_fixation_target_trajectories(self, trial_rvs: List[Union[int, float]]) -> \
+    def compute_fixation_target_trajectories(
+            self, trial_rvs: List[Union[int, float]], hgpos: Optional[np.ndarray] = None,
+            vepos: Optional[np.ndarray] = None, vstab_win_len: Optional[int] = None) -> \
             Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
         Compute the H,V position trajectory of designated fixation targets #1 and #2 over the course of a particular
         instance of this trial protocol.
 
         This implementation does a basic piecewise integration similar to what happens on the fly in Maestro during a
-        trial. However, it does NOT account for ANY of the following: velocity stabilization, velocity perturbations,
-        the video update rate of the RMVideo and XYScope platforms. Also, it does not provide window velocity and
-        pattern velocity traces for the fixation targets.
+        trial. However, it does NOT account for ANY of the following: velocity perturbations, the video update rate of
+        the RMVideo and XYScope platforms. Also, it does not provide window velocity and pattern velocity traces for the
+        fixation targets. If the eye position trajectory is supplied, it will adjust target trajectories during any
+        segments in which H and/or V velocity stabilization is enabled.
 
         In most protocols, only "Fix1" is used. In that case, the method will, obviously, not compute the position
         trajectory for "Fix2". Furthermore, if the designated "Fix1" target is unspecified during any segment of the
@@ -2597,6 +2649,14 @@ class Protocol(NamedTuple):
         Args:
             trial_rvs: The value of any random variables for the particular trial instance. Length must match the
                 number of RVs defined on the protocol. Ignored if the protocol lacks any random variables.
+            hgpos: The horizontal eye position trajectory (in deg) over the course of the particular trial instance --
+                used to adjust target trajectories during periods of velocity stabilization. Default = None, in which
+                case no adjustment can be made.
+            vepos: The vertical eye position trajectory (in deg) over the course of the particular trial instance --
+                used to adjust target trajectories during periods of velocity stabilization. Default = None, in which
+                case no adjustment can be made.
+            vstab_win_len: The length of the sliding window (1 to 20 ms) for smoothing eye position when computing the
+                target trajectory adjustment for velocity stabilization. Default = None (no smoothing).
         Returns:
             A 2-tuple (fix1, fix2). The first element is the position trajectory for fixation target #1, and the second
                 is that for fixation target #2. If a fixation target is unused, the corresponding element is None. Else,
@@ -2615,7 +2675,7 @@ class Protocol(NamedTuple):
                 self.trial.segments[param.seg_idx].set_value_of(param.type, param.tgt_idx, trial_rvs[i])
 
         trial_dur = self.trial.duration()
-        tgt_pos_trajectories: List[np.ndarray] = self.trial.target_trajectories()
+        tgt_pos_trajectories: List[np.ndarray] = self.trial.target_trajectories(hgpos, vepos, vstab_win_len)
         fix1: Optional[np.ndarray] = None
         if self.trial.uses_fix1():
             fix1 = np.empty((trial_dur, 2))
