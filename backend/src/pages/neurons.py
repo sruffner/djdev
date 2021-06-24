@@ -42,15 +42,16 @@ _NEURON_TABLE_ID: str = "neuron_list"
 """ The ID assigned to the Dash DataTable presenting the list of neurons in the database. """
 
 _NEURON_TABLE_ATTRS: List[str] = [
-    'experimenter', 'subj_id', 'session_date', 'session_sfx', 'unit_id', 'unit_type', 'unit_rate'
+    'experimenter', 'subj_id', 'session_date', 'session_sfx', 'unit_id', 'unit_type', 'unit_rate', 'unit_spikes'
 ]
 """ DBTable.SESSION_NEURON attributes that are fetched from database for display in neuron table. """
 
 _NEURON_TABLE_COLS: List[ti.Column] = [
-    ti.Column('unit_id', 'Unit #', '50px', False),
     ti.Column('session', 'Session', '100px', False),
+    ti.Column('unit_id', 'Unit #', '50px', False),
     ti.Column('nt_name', 'Neuron Type', '100px', False),
     ti.Column('unit_rate', 'Rate (Hz)', '100px', False),
+    ti.Column('unit_spikes', '#Spikes', '100px', False),
     ti.Column('full_name', 'Experimenter', '150px', False),
     ti.Column('subj_id', 'Subject', '100px', False)
 ]
@@ -118,6 +119,8 @@ _FILTER_SUBJ_ID: str = "filter_subj"
 """ ID of Bootstrap Select element to filter neuron table by the experiment subject. """
 _FILTER_TYPE_ID: str = "filter_type"
 """ ID of Bootstrap Select element to filter neuron table by the neuron type. """
+_FILTER_SPIKES_ID: str = "filter_spikes"
+""" ID of Bootstrap Input element to filter neuron table by total spike count exceeding value in this element. """
 _FILTER_DATE_ID: str = "filter_date"
 """ ID of Bootstrap Select element to choose how neuron table is filtered by a specified date. """
 _DATE_PICKER_ID: str = "filter_date_picker"
@@ -169,6 +172,10 @@ def _filter_group() -> dbc.Row:
                    options=[{"label": opt['nt_name'], "value": str(opt['nt_id'])} for opt in neuron_types],
                    value=_FILTER_UNUSED)
     ], size='sm'), className='mr-1 ml-1 mb-2')
+    num_spikes_row = dbc.Row(dbc.InputGroup([
+        dbc.InputGroupAddon("#Spikes >=", addon_type="prepend"),
+        dbc.Input(id=_FILTER_SPIKES_ID, type='number', min=0, debounce=True, value=0)
+    ], size='sm'), className='mr-1 ml-1 mb-2')
     date_row = dbc.Row(dbc.InputGroup([
         dbc.InputGroupAddon("Recorded: ", addon_type="prepend"),
         dbc.Select(id=_FILTER_DATE_ID,
@@ -184,7 +191,8 @@ def _filter_group() -> dbc.Row:
         dbc.Col(dbc.Button("Filters", id=_FILTER_RAISE_ID, size='sm', color='primary')),
         dbc.Popover(
             [
-                dbc.PopoverBody([neuron_type_row, subject_row, experimenter_row, date_row, control_row]),
+                dbc.PopoverBody([neuron_type_row, num_spikes_row, subject_row, experimenter_row, date_row,
+                                 control_row]),
             ],
             id=_FILTER_POPOVER_ID,
             target=_FILTER_RAISE_ID,
@@ -224,6 +232,7 @@ def _unit_summary(row_selected: Dict[str, Any]) -> html.Div:
         ["Experimenter", f"{row_selected['full_name']}"],
         ["Omniplex Ch", f"{unit['unit_channel']}"],
         ["Firing Rate", f"{unit['unit_rate']:.1f} Hz"],
+        ["Total #Spikes", f"{unit['unit_spikes']}"],
         ["Signal-to-Noise:", f"{unit['unit_snr']:.2f}"],
         ["Peak-to-Peak", f"{peak_to_peak:.1f} \u00B5V"]
     ]
@@ -992,7 +1001,7 @@ def on_response_panel_proto_select(proto_hash_value, selected_rows, rows):
     trial_indices = db_mgr.trials_for_neuron(selected_row, proto_hash_value)
     session_pk = {'experimenter': selected_row['experimenter'], 'subj_id': selected_row['subj_id'],
                   'session_date': selected_row['session_date'], 'session_sfx': selected_row['session_sfx']}
-    total_trials = db_mgr.num_table_rows(DBTable.TRIAL, session_pk)
+    total_trials = db_mgr.num_table_rows(DBTable.TRIAL, [session_pk])
     options = [{'label': f"Trial {k} of {total_trials}", 'value': str(k)} for k in trial_indices]
     can_aggregate = (proto_hash_value in DataBaseManager().trial_protocols_for_neuron(selected_row, aggregate=True))
     options.append({'label': "Mean firing rate", 'value': 'mfr', 'disabled': not can_aggregate})
@@ -1054,7 +1063,8 @@ def on_response_panel_show_hide_protocol_definition(*args):
     return False, dash.no_update
 
 
-def _filter_restrictions(username: str, subj_id: str, nt_id: str, date_op: str, date_iso: str) -> Optional[List[str]]:
+def _filter_restrictions(username: str, subj_id: str, nt_id: str, date_op: str, date_iso: str, min_spikes: int) \
+        -> Optional[List[str]]:
     """
     Helper method prepares a list of string conditions -- in DataJoint syntax -- defining the filters that should be
     applied to restrict the set of neural units displayed in the main table on this panel.
@@ -1065,6 +1075,7 @@ def _filter_restrictions(username: str, subj_id: str, nt_id: str, date_op: str, 
         nt_id: If not _FILTER_UNUSED, restrict to neurons with this type ID (will be cast to int).
         date_op: If not _FILTER_UNUSED, restrict by recording session date ("on", "before", or "after")
         date_iso: The date in ISO format at 'YYYY-MM-DD'. If invalid, no date restriction is prepared.
+        min_spikes: Restrict to neurons for which total spike count is greater than or equal to this number.
     Returns:
         The list of restriction conditions. For example, ["username = 'sar'", "session_date < '2020-03-05'"]. If no
             filter restrictions are set, returns None.
@@ -1079,18 +1090,21 @@ def _filter_restrictions(username: str, subj_id: str, nt_id: str, date_op: str, 
     if (date_op != _FILTER_UNUSED) and check_date(date_iso):
         op_map = {'on': '=', 'before': '<', 'after': '>'}
         restrictions.append(f"session_date {op_map[date_op]} '{str(date_iso)}'")
+    if isinstance(min_spikes, int) and (min_spikes > 0):
+        restrictions.append(f"unit_spikes >= {min_spikes}")
     return restrictions if (len(restrictions) > 0) else None
 
 
 @app.callback([Output(_FILTER_EXP_ID, "value"), Output(_FILTER_SUBJ_ID, "value"), Output(_FILTER_TYPE_ID, "value"),
-               Output(_FILTER_DATE_ID, "value")], [Input(_FILTER_CLEAR_ID, "n_clicks")])
+               Output(_FILTER_DATE_ID, "value"), Output(_FILTER_SPIKES_ID, "value")],
+              [Input(_FILTER_CLEAR_ID, "n_clicks")])
 def clear_filters(n_clear):
     if not n_clear:
         raise dash.exceptions.PreventUpdate
-    return _FILTER_UNUSED, _FILTER_UNUSED, _FILTER_UNUSED, _FILTER_UNUSED
+    return _FILTER_UNUSED, _FILTER_UNUSED, _FILTER_UNUSED, _FILTER_UNUSED, 0
 
 
-filter_ids = [_FILTER_EXP_ID, _FILTER_SUBJ_ID, _FILTER_TYPE_ID, _FILTER_DATE_ID]
+filter_ids = [_FILTER_EXP_ID, _FILTER_SUBJ_ID, _FILTER_TYPE_ID, _FILTER_DATE_ID, _FILTER_SPIKES_ID]
 input_vector = [Input(sel_id, "value") for sel_id in filter_ids]
 input_vector.append(Input(_DATE_PICKER_ID, "date"))
 state_vector = [State(sel_id, "value") for sel_id in filter_ids]
@@ -1106,9 +1120,9 @@ def update_filter_result_count(*args):
 
     # no need for update when user changes the date but does not filter on that date
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
-    if trigger_id == _DATE_PICKER_ID and args[8] == _FILTER_UNUSED:
+    if trigger_id == _DATE_PICKER_ID and args[9] == _FILTER_UNUSED:
         raise dash.exceptions.PreventUpdate
 
-    restrictions = _filter_restrictions(args[5], args[6], args[7], args[8], args[9])
+    restrictions = _filter_restrictions(args[6], args[7], args[8], args[9], args[11], int(args[10]))
     rows = _fetch_neurons(restrictions)
     return f"{len(rows)} units found", [], rows

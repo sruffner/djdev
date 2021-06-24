@@ -1,5 +1,6 @@
 { "table": "User", "entry": {"username": "sruffner", "full_name": "Scott A Ruffner", "contact_email": "sruffner@srscicomp.com", "role": "Administrator"}}
 { "table": "User", "entry": {"username": "dherzfeld", "full_name": "David J Herzfeld", "contact_email": "david.herzfeld@duke.edu", "role": "Post Doctoral Researcher"}}
+{ "table": "User", "entry": {"username": "nhall", "full_name": "Nathan Hall", "contact_email": "nathan.halld@duke.edu", "role": "Post Doctoral Researcher"}}
 { "table": "User", "entry": {"username": "sgl", "full_name": "Stephen G Lisberger", "contact_email": "lisberger@neuro.duke.edu", "role": "Principal Investigator"}}
 
 { "table": "Rig", "entry": {"rig_id": "Rig 1", "rig_loc": "Vivarium (right front)"}}
@@ -10,14 +11,14 @@
 { "table": "Rig", "entry": {"rig_id": "Rig X", "rig_loc": "Universe"}}
 
 { "table": "Subject", "entry": {"subj_id": "jojobe", "species": "Macaca mulatta", "dob": "2017-12-08", "sex": "M"}}
-{ "table": "Subject", "entry": {"subj_id": "rondo", "species": "Macaca mulatta", "dob": "2015-05-06", "sex": "M"}}
+{ "table": "Subject", "entry": {"subj_id": "dandy", "species": "Macaca mulatta", "dob": "2015-05-06", "sex": "M"}}
 { "table": "Subject", "entry": {"subj_id": "yolanda", "species": "Macaca mulatta", "dob": "2019-04-18", "sex": "F"}}
 { "table": "Subject", "entry": {"subj_id": "yoda", "species": "Macaca mulatta", "dob": "2016-05-22", "sex": "M"}}
 
 
 { "table": "SubjectImplant", "entry": {"subj_id": "jojobe", "implant_date": "2018-07-22", "st_ap": "4", "st_ml": "3", "st_dv": "5", "ap_angle": "10", "ml_angle": "0"}}
-{ "table": "SubjectImplant", "entry": {"subj_id": "rondo", "implant_date": "2017-04-28", "st_ap": "2.5", "st_ml": "3", "st_dv": "0", "ap_angle": "0", "ml_angle": "0"}}
-{ "table": "SubjectImplant", "entry": {"subj_id": "rondo", "implant_date": "2019-09-15", "st_ap": "4", "st_ml": "5.6", "st_dv": "0", "ap_angle": "10", "ml_angle": "5"}}
+{ "table": "SubjectImplant", "entry": {"subj_id": "dandy", "implant_date": "2017-04-28", "st_ap": "2.5", "st_ml": "3", "st_dv": "0", "ap_angle": "0", "ml_angle": "0"}}
+{ "table": "SubjectImplant", "entry": {"subj_id": "dandy", "implant_date": "2019-09-15", "st_ap": "4", "st_ml": "5.6", "st_dv": "0", "ap_angle": "10", "ml_angle": "5"}}
 { "table": "SubjectImplant", "entry": {"subj_id": "yolanda", "implant_date": "2019-12-10", "st_ap": "1.6", "st_ml": "1.2", "st_dv": "1", "ap_angle": "4", "ml_angle": "8"}}
 { "table": "SubjectImplant", "entry": {"subj_id": "yolanda", "implant_date": "2020-01-08", "st_ap": "4", "st_ml": "3", "st_dv": "5", "ap_angle": "8.6", "ml_angle": "15.2"}}
 { "table": "SubjectImplant", "entry": {"subj_id": "yolanda", "implant_date": "2019-06-09", "st_ap": "12", "st_ml": "14", "st_dv": "8", "ap_angle": "0", "ml_angle": "11"}}

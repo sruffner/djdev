@@ -506,6 +506,7 @@ _table_info: Dict[DBTable, _TableInfo] = {
             'unit_channel': AttrInfo(AttrTypeEnum.TEXT, 'Source Channel', False, None, None, None, '75px'),
             'unit_type': AttrInfo(AttrTypeEnum.FKEY, 'Neuron Type', False, DBTable.NEURON_TYPE, 'nt_id'),
             'unit_rate': AttrInfo(AttrTypeEnum.FLOAT, 'Mean Firing Rate (Hz)', False, None, None, None, '100px'),
+            'unit_spikes': AttrInfo(AttrTypeEnum.INT, '#Spikes', False, None, None, None, '100px'),
             'unit_snr': AttrInfo(AttrTypeEnum.FLOAT, 'SNR', False, None, None, None, '100px'),
             'unit_template': AttrInfo(AttrTypeEnum.BLOB, 'Template Waveform (10ms)', False)
         }),
@@ -539,6 +540,7 @@ _table_info: Dict[DBTable, _TableInfo] = {
             'trial_rewarded': AttrInfo(AttrTypeEnum.BOOL, 'Reward Given', False),
             'trial_rew1': AttrInfo(AttrTypeEnum.INT, 'Reward Pulse 1 (ms)', False),
             'trial_rew2': AttrInfo(AttrTypeEnum.INT, 'Reward Pulse 2 (ms)', False),
+            'vstab_win_len': AttrInfo(AttrTypeEnum.INT, 'VStab Window Len (ms)', False),
             'trial_ts': AttrInfo(AttrTypeEnum.FLOAT, 'Timestamp (s)', False),
             'trial_rvs': AttrInfo(AttrTypeEnum.BLOB, 'RV', False)
         }),

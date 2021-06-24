@@ -466,17 +466,16 @@ class DataBaseManager:
         return [(v, v) for v in fkey_values]
 
     def num_table_rows(self, table_id: DBTable,
-                       restriction: Optional[List[str], Dict[str, AttributeValue]] = None) -> int:
+                       restriction: Optional[List[Union[str, Dict[str, AttributeValue]]]] = None) -> int:
         """
         Get the current number of entities in the specified database table.
 
         Args:
             table_id: ID of database table.
-            restriction: If not None, then this argument specifies restriction conditions -- either as a dictionary of
-                attribute ID-value pairs, or as a list of string conditions (see DataJoint docs). Either way, the result
-                reflects the number of rows in the table that satisfy ALL conditions. The restriction conditions are not
-                checked for validity.
-
+            restriction: If not None, then this argument specifies a list of restriction conditions; each condition is
+                specified either as a dictionary of attribute ID-value pairs, or as a string (see DataJoint docs). The
+                result reflects the number of rows in the table that satisfy ALL conditions. The restriction conditions
+                are not checked for validity.
         Returns:
             Number of rows in the table that satisfy the conditions specified (if any). Returns 0 if unable to access
             database, if specified table does not exist, or if a restriction condition is specified that includes an
@@ -484,8 +483,7 @@ class DataBaseManager:
         """
         try:
             table: dj.Table = _table_map[table_id]
-            query = (table & restriction) if isinstance(restriction, dict) else \
-                ((table & dj.AndList(restriction)) if isinstance(restriction, list) else table)
+            query = (table & dj.AndList(restriction)) if isinstance(restriction, list) else table
             with self._db_lock:
                 n = len(query)
         except Exception:
@@ -664,7 +662,7 @@ class DataBaseManager:
         table_pk = ti.primary_key_of(table_id, False)
         try:
             restriction = {key: row_pk[key] for key in table_pk}
-            exists = (self.num_table_rows(table_id, restriction) == 1)
+            exists = (self.num_table_rows(table_id, [restriction]) == 1)
         except KeyError:
             raise ValueError("Incomplete primary key")
         return exists
@@ -978,6 +976,7 @@ class DataBaseManager:
                 rewarded=trial_info['trial_rewarded'],
                 reward1_ms=trial_info['trial_rew1'],
                 reward2_ms=trial_info['trial_rew2'],
+                vstab_win_len_ms=trial_info['vstab_win_len'],
                 timestamp_sec=trial_info['trial_ts'],
                 trial_rvs=pickle.loads(trial_info['trial_rvs']),
                 behavior=behavioral_field,
@@ -1321,27 +1320,32 @@ class DataBaseManager:
 
     def set_neural_unit_type(self, task_id: str, index: int, neuron_type: int) -> bool:
         """
-        Update the neuron type ID assigned to a neural unit identified during pre-processing of the session data
-        archive. During stage 3 of the session commit workflow, the user (via the client front-end) must specify the
-        neuron type for each identified unit before the session can be committed to the database. The method has no
+        Update the neuron type ID assigned to one or all neural units identified during pre-processing of the session
+        data archive. During stage 3 of the session commit workflow, the user (via the client front-end) must specify
+        the neuron type for each identified unit before the session can be committed to the database. The method has no
         effect in any other stage.
 
         Args:
             task_id: The commit task identifier.
-            index: The zero-based index of the neural unit requested.
+            index: The zero-based index of the neural unit requested. If -1, then the specified neuron type is applied
+                to ALL identified units in the session. Otherwise, the operation fails.
             neuron_type: The neuron type ID. This should identify an existing entry in the database's NeuronType table,
                 but it is not checked until the session is actually committed to the database in stage 4
 
         Returns:
             True if successful; False if the task_id does not identify an in-progress commit task, if that task is not
-                currently in stage 3, or if the unit index is invalid.
+                currently in stage 3, or if the unit index is neither -1 nor identifies a neural unit in the session.
         """
         ok = False
         with self.task_list_lock:
             if task_id in self.running_tasks:
                 worker = self.running_tasks[task_id]
-                if (worker.stage == 3) and (index >= 0) and (index < len(worker.units)):
-                    worker.units[index].neuron_type = neuron_type
+                if (worker.stage == 3) and (index >= -1) and (index < len(worker.units)):
+                    if index == -1:
+                        for i in range(len(worker.units)):
+                            worker.units[i].neuron_type = neuron_type
+                    else:
+                        worker.units[index].neuron_type = neuron_type
                     ok = True
         return ok
 
@@ -1507,6 +1511,7 @@ class DataBaseManager:
                             neuron['unit_channel'] = unit.channel
                             neuron['unit_type'] = unit.neuron_type
                             neuron['unit_rate'] = unit.firing_rate
+                            neuron['unit_spikes'] = len(unit.spike_times)
                             neuron['unit_snr'] = unit.snr
                             neuron['unit_template'] = unit.template
                             neurons.append(neuron)
@@ -1578,9 +1583,9 @@ class DataBaseManager:
         commit is completed.
 
         This method should be invoked by a _SessionTrialProducer() object in one of two contexts: (1) On a worker thread
-        during an interactive session commit workflow (see ProcessArchiveThread), or (2) during the administrative
-        script that reconstructs the database contents from the update log and archived files in the raw data repository
-        (see reconstruct_database_from_log()).
+        during an interactive session commit workflow (see finish_commit()), or (2) during the administrative script
+        that reconstructs the database contents from the update log and archived files in the raw data repository (see
+        reconstruct_database_from_log()).
 
         Args:
             trials: The list of trials to be inserted.
@@ -1593,6 +1598,8 @@ class DataBaseManager:
         neuronal_table = sgl.Trial.NeuronalResponse()
         event_table = sgl.Trial.Event()
 
+        # NOTE: We don't use a database transaction here b/c this method is only called within a DataJoint populate()
+        # call, which already has started a transaction...
         with self._db_lock:
             trial_table.insert(trials, replace=False)
             if len(behavioral_entries) > 0:
@@ -1799,6 +1806,7 @@ class DataBaseManager:
                         neuron['unit_channel'] = unit.channel
                         neuron['unit_type'] = unit.neuron_type
                         neuron['unit_rate'] = unit.firing_rate
+                        neuron['unit_spikes'] = len(unit.spike_times)
                         neuron['unit_snr'] = unit.snr
                         neuron['unit_template'] = unit.template
                         neurons.append(neuron)
@@ -1929,7 +1937,8 @@ class _SessionTrialProducer(sgl.TrialProducer):
                     trial_success=((data_file.header.flags & maestro.FLAG_REWARD_EARNED) != 0),
                     trial_rewarded=((data_file.header.flags & maestro.FLAG_REWARD_GIVEN) != 0),
                     trial_rew1=data_file.header.reward_len1_ms,
-                    trial_rew2=data_file.header.reward_len2_ms
+                    trial_rew2=data_file.header.reward_len2_ms,
+                    vstab_win_len=data_file.header.velocity_stab_window_len_ms
                 )
 
                 # compute trial start time relative to start of first trial in session -- if possible
@@ -2061,7 +2070,7 @@ class ProcessArchiveThread(threading.Thread):
         session metadata and trial protocols are validated before the worker can transition to stage 4.
 
         7) In stage 4, the worker commits the experiment session to the lab database and raw data repository. See
-        _finish_commit() for the details.
+        DataBaseManager.finish_commit() for the details.
 
     To communicate progress to the main thread, the worker will post a message to a synchronous queue. A message is
     posted whenever there's a significant progress transition. It is incumbent on the thread that launched the worker to
@@ -2107,7 +2116,7 @@ class ProcessArchiveThread(threading.Thread):
         """ The list of neural units culled from the session data archive during stage 2 pre-processing. Includes the
         information required to prepare an entry in the Session.Neuron part table for each neural unit. Prepared by
         worker during stage 2 pre-processing. Safe for server to access only while worker is paused in stage 3; during
-        that stage, the user will need to assign a neuron type to each neural unit. """
+        that stage, the user can assign a neuron type to each neural unit. """
         self.session_info: Optional[Dict[str, Optional[AttributeValue]]] = None
         """ User-supplied information required to add an entry in the Session table in the database, keyed by the table
         table attribute IDs. During pre-processing, the worker thread may initialize some of this information. The 
@@ -2570,7 +2579,7 @@ class ProcessArchiveThread(threading.Thread):
                                       f"Omniplex channel {channel_id} ...{100.0*block_idx/num_blocks:.1f}%")
                 t0 = time.time()
 
-        # prepare neural unit objects. The neuron type is initially unassigned.
+        # prepare neural unit objects. The neuron type is not set here.
         noise = np.median(block_medians) * 1.4826
         out: List[OmniplexUnit] = list()
         for i in range(len(spikes)):
@@ -2798,6 +2807,8 @@ class TrialData:
     """ Duration of reward pulse #1 in milliseconds. """
     reward2_ms: int
     """ Duration of reward pulse #2 in milliseconds. """
+    vstab_win_len_ms: int
+    """ Window length for smoothing eye position during velocity stabilization, in milliseconds [1..20]."""
     timestamp_sec: float
     """ Trial start timestamp, in seconds since start of first trial in experiment session (<0 if unknown). """
     trial_rvs: List[Union[int, float]]

@@ -291,6 +291,7 @@ class Session(dj.Manual):
         unit_channel : varchar(10)          # ID/label for source channel on which unit was recorded
         (unit_type) -> NeuronType           # Identified neuron type
         unit_rate : float                   # Mean firing rate of neural unit while held (in Hz)
+        unit_spikes : int unsigned          # total number of spikes recorded
         unit_snr : float                    # Signal-to-noise ratio (indication of quality of recording?)
         unit_template : blob                # Average spike waveform template
         """
@@ -363,22 +364,23 @@ class TrialProducer:
 @schema
 class Trial(dj.Imported):
     definition = """
-    -> Session                          # The experimental session during which the trial was presented
-    trial_idx : int unsigned            # Indicates order of presentation during session (starts at 1)
+    -> Session                             # The experimental session during which the trial was presented
+    trial_idx : int unsigned               # Indicates order of presentation during session (starts at 1)
     ---
-    -> TrialProtocol                    # trial protocol (aka, Maestro trial definition)
-    trial_header : blob                 # Original data file header (in opaque format for use by backend server)
-    trial_filename : varchar(50)        # Maestro data filename (ends in 4-digit extension like .0001)
-    trial_dur : int unsigned            # recorded duration of trial in milliseconds
-    trial_record_start : int unsigned   # if non-zero, recording began this many milliseconds after trial start
-    trial_success : boolean             # trial completed successfully
-    trial_rewarded : boolean            # could be false if reward earned but was randomly withheld
-    trial_rew1: int                     # length of reward pulse 1 in milliseconds
-    trial_rew2: int                     # length of reward pulse 2 in milliseconds
-    trial_ts: float                     # trial start timestamp, in elapsed secs since start of first trial in session
-                                        # (-1 if not available)
-    trial_rvs: blob                     # list of trial random variable values (opaque format; list of int/float values,
-                                        # in same order as maestro.Protocol.diffs; empty list if no protocol RVs)
+    -> TrialProtocol                       # trial protocol (aka, Maestro trial definition)
+    trial_header : blob                    # Original data file header (in opaque format for use by backend server)
+    trial_filename : varchar(50)           # Maestro data filename (ends in 4-digit extension like .0001)
+    trial_dur : int unsigned               # recorded duration of trial in milliseconds
+    trial_record_start : int unsigned      # if non-zero, recording began this many milliseconds after trial start
+    trial_success : boolean                # trial completed successfully
+    trial_rewarded : boolean               # could be false if reward earned but was randomly withheld
+    trial_rew1: smallint unsigned          # length of reward pulse 1 in milliseconds
+    trial_rew2: smallint unsigned          # length of reward pulse 2 in milliseconds
+    vstab_win_len: tinyint unsigned        # length of sliding window for smoothing eye pos in VStab (ms, 1..20)
+    trial_ts: float                        # trial start timestamp, in elapsed secs since start of first trial in
+                                           # session (-1 if not available)
+    trial_rvs: blob                        # trial random variable values (opaque format; list of int/float values, in
+                                           # same order as maestro.Protocol.diffs; empty list if no protocol RVs)
     """
 
     _trial_producer: Optional[TrialProducer] = None

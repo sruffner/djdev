@@ -272,7 +272,8 @@ class _SessionCommitter:
                     value=initial_selection
                 )
             ], className='mb-3')
-        header_kids = [html.Hr(), select_type]
+        apply_all_btn = dbc.Button("Apply selected type to all units", color='primary', id='stage3_nt_apply_all')
+        header_kids = [html.Hr(), dbc.Row([dbc.Col(select_type, width=8), dbc.Col(apply_all_btn, width=4)])]
 
         peak_to_peak = max(unit.template) - min(unit.template)
         header_kids.extend([
@@ -478,16 +479,21 @@ class _SessionCommitter:
                 return _SessionCommitter.stage3_display_unit(unit)
             return dash.no_update
 
-        # note that we never update the output here, but the current unit's neuron type is updated on server side
-        @dash_app.callback(Output('stage3_unit_select', 'options'), [Input('stage3_neuron_type_select', 'value')],
-                           [State('stage3_unit_select', 'value'), State('commit_state', 'data')])
-        def on_stage3_neuron_type_select(type_str, unit_idx_str, client_state):
+        # note that we never update the output here, but the current unit's neuron type is updated on server side,
+        # or, if the "Apply All" button is pressed, all units are set to the selected neuron type.
+        @dash_app.callback(Output('stage3_unit_select', 'options'),
+                           [Input('stage3_nt_apply_all', 'n_clicks'), Input('stage3_neuron_type_select', 'value')],
+                           [State('stage3_neuron_type_select', 'value'), State('stage3_unit_select', 'value'),
+                            State('commit_state', 'data')])
+        def on_stage3_neuron_type_select(n_apply_all, type_str, state_type_str, unit_idx_str, client_state):
             unit_idx = int(unit_idx_str) if isinstance(unit_idx_str, str) else -1
-            nt_id = int(type_str) if isinstance(type_str, str) else -1
+            nt_arg = type_str if (type_str is not None) else state_type_str
+            nt_id = int(nt_arg) if isinstance(nt_arg, str) else -1
             if (unit_idx > -1) and (nt_id > -1):
+                apply_to_all = (n_apply_all is not None)
                 session_builder = DataBaseManager()
                 task_id = client_state['task_id']
-                session_builder.set_neural_unit_type(task_id, unit_idx, nt_id)
+                session_builder.set_neural_unit_type(task_id, -1 if apply_to_all else unit_idx, nt_id)
             return dash.no_update
 
         state_vector = [State(f"{attr_id}_input", "value") for attr_id in ti.attributes_of(ti.DBTable.SESSION)]
