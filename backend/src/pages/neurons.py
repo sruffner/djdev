@@ -532,7 +532,8 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
     Helper method prepares a two-figure plot displaying the mean behavioral and neuronal response across all recorded
     reps of the specified trial protocol THAT WERE COMPLETED SUCCESSFULLY. The top figure shows the position
     trajectories of the targets designated as "Fixation Target #1, #2", along with the average eye velocity trajectory.
-    The bottom figure shows the specified neuron's mean firing rate during the trial, with a +/-1 STD band.
+    The bottom figure shows the specified neuron's mean firing rate during the trial, with a +/-1 SEM (standard error of
+    the mean) band.
 
     The timeline in both figures is that portion of the trial protocol that is shared across all reps -- if a protocol
     includes a random-duration segment, then each rep will have a different duration overall. The method averages the
@@ -576,7 +577,7 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
         hevel = np.nanmean(hevel_list, axis=0)
         vevel = np.nanmean(vevel_list, axis=0)
         firing_rate = np.nanmean(firing_rate_list, axis=0)
-        std_fr = np.nanstd(firing_rate_list, axis=0)
+        sem_fr = np.nanstd(firing_rate_list, axis=0) / np.sqrt(len(firing_rate_list))
         fix1_pos, fix2_pos = protocol.compute_fixation_target_trajectories([])
         fix1_on, fix2_on = protocol.compute_fixation_target_on_epochs([])
         t_vec = [i for i in range(len(hevel))]
@@ -604,10 +605,10 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
             (np.nanmean(firing_rate_pre, axis=0), np.nanmean(firing_rate_post, axis=0)),
             axis=0
         )
-        std_fr = np.concatenate(
+        sem_fr = np.concatenate(
             (np.nanstd(firing_rate_pre, axis=0), np.nanstd(firing_rate_post, axis=0)),
             axis=0
-        )
+        ) / np.sqrt(len(firing_rate_list))
 
         # we compute fixation target position trajectories and ON epoch times for the trial rep that had the minimum
         # observed duration for the random-duration segment.
@@ -677,12 +678,12 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
         row=2, col=1, secondary_y=False
     )
     fig.add_trace(
-        go.Scatter(x=t_vec, y=firing_rate+std_fr, mode='lines', connectgaps=True, line=dict(width=0),
+        go.Scatter(x=t_vec, y=firing_rate+sem_fr, mode='lines', connectgaps=True, line=dict(width=0),
                    name="+1STD", yaxis='y3', showlegend=False),
         row=2, col=1, secondary_y=False
     )
     fig.add_trace(
-        go.Scatter(x=t_vec, y=firing_rate-std_fr, mode='lines', connectgaps=True, line=dict(width=0),
+        go.Scatter(x=t_vec, y=firing_rate-sem_fr, mode='lines', connectgaps=True, line=dict(width=0),
                    name="-1STD", yaxis='y3', fillcolor='rgba(68, 68, 68, 0.3)', fill='tonexty', showlegend=False),
         row=2, col=1, secondary_y=False
     )
