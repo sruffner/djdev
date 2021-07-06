@@ -37,7 +37,7 @@ dj.config['database.user'] = 'root'
 dj.config['safemode'] = False
 dj.config['enable_python_native_blobs'] = True
 if 'MYSQL_ROOT_PASSWORD' not in os.environ:
-    print("====> ERROR: The environment variable MYSQL_ROOT_PASSWORD is missing... BYE!", flush=True)
+    print("====> ERROR: The environment variable MYSQL_ROOT_PASSWORD is missing!", flush=True)
 dj.config['database.password'] = os.environ['MYSQL_ROOT_PASSWORD']
 
 from database.manager import DataBaseManager

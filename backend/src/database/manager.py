@@ -16,9 +16,6 @@ the underlying MySQL database is NOT thread-safe. Multiple threads calling into 
 in internal packet communication errors within the PYMYSQL package. For this reason, I've added a Lock to guard any
 DataBaseManager code that queries or modifies the database via DataJoint.
 
-TODO: The ProcessArchiveThread does a bunch of database inserts during the actual session commit without going through
-    DataBaseManager. These inserts are wrapped in a transaction -- hopefully that's OK
-
 ==> Session commits.
 
 Committing an experiment session to the database requires a multi-stage, user-interactive procedure. Multiple clients
@@ -635,7 +632,7 @@ class DataBaseManager:
             table: dj.Table = _table_map[table_id]
             with self._db_lock, table.connection.transaction:
                 query = (table & restriction) if restriction else table
-                query.delete(verbose=False)
+                query.delete()
                 if log:
                     err_msg = self._log_delete_from_table(table_id, restriction)
                     if err_msg:
@@ -823,7 +820,7 @@ class DataBaseManager:
             dst_pk = map_table_id.destination_key_for_mapping_table()
             xref_rows = [{src_pk: src_pk_val, dst_pk: value} for value in map_set]
             with self._db_lock, map_table.connection.transaction:
-                (map_table & {src_pk: src_pk_val}).delete(verbose=False)
+                (map_table & {src_pk: src_pk_val}).delete()
                 if len(xref_rows) > 0:
                     map_table.insert(xref_rows)
                 if log:
@@ -1561,10 +1558,10 @@ class DataBaseManager:
                     try:
                         with self._db_lock:
                             if session_inserted:
-                                (sgl.Session() & worker.session_info).delete(verbose=False)
+                                (sgl.Session() & worker.session_info).delete()
                             if protocols_added:
                                 restriction = [f"proto_hash = '{p['proto_hash']}'" for p in protocols_to_add]
-                                (protocol_table & restriction).delete(verbose=False)
+                                (protocol_table & restriction).delete()
                     except Exception:
                         pass  # TODO: We really have to kill the database at this point, because it is inconsistent.
                     zip_path_in_repo.unlink(missing_ok=True)
