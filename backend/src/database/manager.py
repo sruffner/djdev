@@ -111,6 +111,17 @@ Summary of the log entry types:
     3) Mapping table update: {'op': 'mapping', 'table': DBTable, 'src_pk': int, 'dst_pks': Set[int]}
     4) Session commit: {'op': 'session', 'username': str, 'subj_id': str, 'date': 'YYYY-MM-DD', 'suffix': int}
 
+==> Portal authorized users.
+
+The MySQL server that hosts the lab database also hosts an independent database of authorized portal users. Any
+anonymous visitor to the portal will only be able to explore lab data; one must be logged-in with the appropriate
+access privileges to commit experimental data, curate information in the lab's manual tables, manage the portal user
+database, or download datasets. For details on the access levels, see sgl_auth.py.
+
+Since DataJoint's persistent connection with the MySQL server is not thread-safe, it is important that any queries to
+the portal user database be protected by a thread lock. Since DataBaseManager already implements that mechanism, we
+decided to use it to implement access to the user database.
+
 @author: sruffner
 @created: 03mar2021
 """
@@ -145,6 +156,7 @@ from database.table_info import DBTable, AttributeValue, AttrTypeEnum
 import database.maestro as maestro
 import database.PL2 as PL2
 import database.sgl_schema as sgl
+import database.sgl_auth as sgl_auth
 
 
 _table_map: Dict[DBTable, dj.Table] = {
@@ -315,6 +327,35 @@ class DataBaseManager:
         except Exception as err:
             error_msg = f"Failed to post 'session' entry to database update log: {str(err)}"
         return error_msg
+
+    def authenticate_portal_user(self, username: str, password: str) -> Optional[str]:
+        """
+        Authenticate the user account on the Lisberger lab portal with the specified name and password.
+
+        Args:
+            username: The username for the account.
+            password: The (plaintext) password for the account.
+        Returns:
+            None if account was authenticated; else a brief error description (invalid username, etc.)
+        """
+        with self._db_lock:
+            error_msg = sgl_auth.authenticate_user(username, password)
+        return error_msg
+
+    def get_portal_user_record(self, username: str) -> Union[str, Dict[str, str]]:
+        """
+        Retrieve a user account record from the database of users authorized for restricted access to the Lisberger lab
+        data portal.
+
+        Args:
+            username: Username of the account.
+        Returns:
+            If successful, returns the user account record as a dictionary of key-value pairs. For security reasons, the
+            user's encrypted password is removed from the record. Otherwise, returns a brief error description.
+        """
+        with self._db_lock:
+            user_record = sgl_auth.get_user(username)
+        return user_record
 
     def entry_form(self, table_id: DBTable, include_attrs: Optional[List[str]] = None,
                    initial_entry: Optional[Dict[str, AttributeValue]] = None,

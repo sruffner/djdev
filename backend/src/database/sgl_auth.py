@@ -80,6 +80,11 @@ _PASSWORD_HASH_METHOD = 'pbkdf2:sha256:10000'
 _USER_PROFILE_KEYS = {'full_name', 'contact_email', 'title', 'organization'}
 """ Set of attributes that are part of an authorized user's editable profile. """
 _ACCESS_LEVELS = ['admin', 'curate', 'contribute', 'readonly']
+""" List of all defined access levels. """
+CURATE_ACCESS = ['admin', 'curate']
+""" List of access levels that allow user to curate lab database tables. """
+CONTRIBUTE_ACCESS = ['admin', 'curate', 'contribute']
+""" List of access levels that allow user to contribute experiment sessions to the lab database. """
 
 
 def _insert_user(username: str, password: str, confirm: str, access: str, full_name: str,
@@ -177,7 +182,7 @@ def _delete_user(username: Optional[str] = None) -> Optional[str]:
     return error_msg
 
 
-def _get_user(username: str) -> Union[str, Dict[str, str]]:
+def get_user(username: str) -> Union[str, Dict[str, str]]:
     """
     Retrieve a user account record from the database of users authorized for restricted access to the Lisberger lab
     data portal.
@@ -185,8 +190,8 @@ def _get_user(username: str) -> Union[str, Dict[str, str]]:
     Args:
         username: Username of the account.
     Returns:
-        If successful, returns the user account record as a dictionary of key-value pairs. Otherwise, returns a brief
-        error description.
+        If successful, returns the user account record as a dictionary of key-value pairs. For security reasons, the
+        user's encrypted password is removed from the record. Otherwise, returns a brief error description.
     """
     table: dj.Table = AuthorizedUser()
     pk = dict(username=username)
@@ -194,6 +199,7 @@ def _get_user(username: str) -> Union[str, Dict[str, str]]:
     user_record = None
     try:
         user_record = (table & pk).fetch1()
+        user_record.pop('password')
     except Exception as e:
         error_msg = f'Unrecognized username or other failure: {str(e)}'
     return error_msg if (error_msg is not None) else user_record
@@ -397,7 +403,7 @@ def _process_command() -> bool:
             else change_password(username, old_password, new_password)
     elif command == 'u':
         username = input('Enter username > ')
-        user_record = _get_user(username)
+        user_record = get_user(username)
         if not isinstance(user_record, dict):
             error_msg = user_record
         else:
