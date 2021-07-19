@@ -26,7 +26,7 @@ import re
 import sys
 from datetime import datetime
 from getpass import getpass
-from typing import Optional, Union, Dict
+from typing import Optional, Union, Dict, List
 
 import datajoint as dj
 import time
@@ -79,16 +79,18 @@ _PASSWORD_HASH_METHOD = 'pbkdf2:sha256:10000'
 """ Method used to generate hashed passwords that are stored in DB """
 _USER_PROFILE_KEYS = {'full_name', 'contact_email', 'title', 'organization'}
 """ Set of attributes that are part of an authorized user's editable profile. """
-_ACCESS_LEVELS = ['admin', 'curate', 'contribute', 'readonly']
+ACCESS_LEVELS = ['admin', 'curate', 'contribute', 'readonly']
 """ List of all defined access levels. """
+READONLY_ACCESS = ACCESS_LEVELS[3]
+""" The most restrictive access level only allows user to download data sets from the portal. """
 CURATE_ACCESS = ['admin', 'curate']
 """ List of access levels that allow user to curate lab database tables. """
 CONTRIBUTE_ACCESS = ['admin', 'curate', 'contribute']
 """ List of access levels that allow user to contribute experiment sessions to the lab database. """
 
 
-def _insert_user(username: str, password: str, confirm: str, access: str, full_name: str,
-                 contact_email: str) -> Optional[str]:
+def insert_user(username: str, password: str, confirm: str, access: str, full_name: str,
+                contact_email: str) -> Optional[str]:
     """
     Create a new user account with restricted access to the Lisberger lab data portal.
 
@@ -129,7 +131,7 @@ def _check_user(username: str, password: str, confirm: str, access: str, full_na
     error_msg = _validate_password(password, confirm)
     if error_msg is not None:
         return error_msg
-    if access not in _ACCESS_LEVELS:
+    if access not in ACCESS_LEVELS:
         return f"Invalid access level: {access}"
     if not (5 <= len(full_name) <= 50):
         return "Full name must have 5-50 characters"
@@ -159,7 +161,7 @@ def _validate_password(password: str, confirm: str) -> Optional[str]:
     return None
 
 
-def _delete_user(username: Optional[str] = None) -> Optional[str]:
+def delete_user(username: Optional[str] = None) -> Optional[str]:
     """
     Remove a user login account for the Lisberger lab data portal.
 
@@ -191,7 +193,7 @@ def get_user(username: str) -> Union[str, Dict[str, str]]:
         username: Username of the account.
     Returns:
         If successful, returns the user account record as a dictionary of key-value pairs. For security reasons, the
-        user's encrypted password is removed from the record. Otherwise, returns a brief error description.
+            user's encrypted password is removed from the record. Otherwise, returns a brief error description.
     """
     table: dj.Table = AuthorizedUser()
     pk = dict(username=username)
@@ -203,6 +205,28 @@ def get_user(username: str) -> Union[str, Dict[str, str]]:
     except Exception as e:
         error_msg = f'Unrecognized username or other failure: {str(e)}'
     return error_msg if (error_msg is not None) else user_record
+
+
+def get_all_users() -> Union[str, List[Dict[str, str]]]:
+    """
+    Retrieve all registered user accounts on the Lisberger lab data portal.
+
+    Returns:
+        If successful, returns a list of key-value dictionaries, where each dictionary is a user account record. For
+            security reasons, the user's encrypted password is removed from each record. On failure, returns a brief
+            error description.
+
+    """
+    table: dj.Table = AuthorizedUser()
+    error_msg = None
+    user_records: Optional[List[Dict[str, str]]] = None
+    try:
+        user_records = table.fetch(as_dict=True)
+        for rec in user_records:
+            rec.pop('password', None)
+    except Exception as e:
+        error_msg = f'Unable to retrieve user account records: {str(e)}'
+    return error_msg if (error_msg is not None) else user_records
 
 
 def authenticate_user(username: str, password: str, admin_only: bool = False) -> Optional[str]:
@@ -265,7 +289,7 @@ def change_password(username: str, old_password: str, new_password: str) -> Opti
     return error_msg
 
 
-def _change_access(username: str, access: str) -> Optional[str]:
+def change_access(username: str, access: str) -> Optional[str]:
     """
     Change the restricted access level assigned to an existing user account on the Lisberger lab data portal.
 
@@ -275,7 +299,7 @@ def _change_access(username: str, access: str) -> Optional[str]:
     Returns:
         None if operation was successful; else a brief error description.
     """
-    if access not in _ACCESS_LEVELS:
+    if access not in ACCESS_LEVELS:
         return f"Invalid access level: {access}"
     table: dj.Table = AuthorizedUser()
     entry = dict(username=username, access=access)
@@ -383,16 +407,16 @@ def _process_command() -> bool:
         email = input('Enter email address > ')
         password = getpass('Enter password (8-32 characters) > ')
         confirm_password = getpass('Confirm password > ')
-        error_msg = _insert_user(username, password, confirm_password, access, full_name, email)
+        error_msg = insert_user(username, password, confirm_password, access, full_name, email)
     elif command == 'd':
         username = input('Enter username of user to be removed > ')
-        error_msg = _delete_user(username)
+        error_msg = delete_user(username)
     elif command == 'r':
-        error_msg = _delete_user()
+        error_msg = delete_user()
     elif command == 'c':
         username = input('Enter username > ')
         access = input('Enter access level (admin, curate, contribute, readonly) > ')
-        error_msg = _change_access(username, access)
+        error_msg = change_access(username, access)
     elif command == 'p':
         username = input('Enter username > ')
         old_password = getpass('Enter current password > ')

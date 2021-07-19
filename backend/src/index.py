@@ -8,12 +8,30 @@ menu in the navigation bar along the top of the browser page.
 User authentication/login is implemented using the Flask-Login library. It is ASSUMED that the Dash app is hosted
 behind a reverse proxy that implements SSL so that all requests and responses are encrypted.
 
+There are currently 4 different "access levels" for authenticated users; the access level determine what routes in this
+"multi-page" app are accessible to the client:
+    1) Anonymous user: "/home", "/explore", and "/neurons".
+    2) Authenticated "readonly" user: Same routes as (1), with the ability to download data set. Also has access to
+        "/user_profile" (by which the user can edit their own profile or change their password).
+    3) Authenticated "contribute" user: Same routes as (2), plus "/commit_session".
+    4) Authenticated "curate" user: Same routes as (3), plus "/curate".
+    5) Authenticated "admin" user: All routes.
+Since a user could choose to access this app across multiple tabs in the browser, then later logout on any one of the
+tabs, the other tabs could expose content to which the client should no longer have access. All restricted pages must
+handle this scenario. There's also the possibility that the user could leave open the browser tab(s) and the user
+session subsequently expires. For this reason, a Dash Interval component fires once every 10 seconds to check the
+client's authentication status and redirect to "/home" if the client is logged out or otherwise lacks the required
+access level for the current page content.
+
 Note the "__main__"" entry point at the end of the file. The portal application is started in Python with the
 command "python ./index.py". The Dash application instance is created in app.py.
 
 @created: oct2020
 @author: sruffner
 """
+import sys
+from urllib.parse import urlparse, urlunparse
+
 import dash
 import dash_core_components as dcc
 import dash_html_components as html
@@ -23,7 +41,39 @@ import flask_login
 
 from app import app, load_authorized_user
 from database.manager import DataBaseManager
-from pages import home, curate, commit_session, explore, neurons
+from pages import home, curate, commit_session, explore, neurons, user_profile, manage_users
+
+
+_LOGIN_MODAL_ID = "login-modal"
+""" ID of the Login modal window component. """
+_LOGIN_USERNAME_ID = "login-username"
+""" ID of Login modal's form widget in which username is entered. """
+_LOGIN_PASSWORD_ID = "login-password"
+""" ID of Login modal's form widget in which user's password is entered. """
+_LOGIN_ALERT_ID = "login-alert"
+""" ID of Bootstrap Alert that displays error message in Login modal window when a login attempt fails. """
+_LOGIN_SUBMIT_ID = "login-submit-btn"
+""" ID of button to initiate login attempt on Login modal window. """
+_LOGIN_CANCEL_ID = "login-cancel-btn"
+""" ID of button to cancel login attempt on Login modal window. """
+_LOGIN_ID = "login-btn"
+""" ID of button on navigation bar that raises the Login modal window. """
+_NAV_MENU_ID = "nav-menu"
+""" ID of dropdown menu in navigation bar exposing parts of the portal accessible only to authenticated clients. """
+_LINK_CURATE_ID = "link-curate"
+""" ID of link-style menu item in navigation bar's dropdown menu that links to the 'curate' page. """
+_LINK_COMMIT_ID = "link-commit"
+""" ID of link-style menu item in navigation bar's dropdown menu that links to the 'commit session' page. """
+_LINK_USERS_ID = "link-manage-users"
+""" ID of link-style menu item in navigation bar's dropdown menu that links to the 'portal user management' page. """
+_LOGOUT_ID = "logout-btn"
+""" ID of button-style menu item in navigation bar's dropdown menu that logs out the current user. """
+_URL_ID = "url"
+""" ID of Dash Location component representing the current browser location. """
+_PAGE_CONTENT_ID = "page-content"
+""" ID of the main Div (below the navigation bar) encapsulating the current page's content in this multi-page app. """
+_AUTH_INTV_ID = "check-auth-intv"
+""" ID of an Interval component firing once per minute to check if current user is authorized to access page. """
 
 
 def _serve_layout() -> html.Div:
@@ -33,24 +83,24 @@ def _serve_layout() -> html.Div:
             dbc.ModalBody(dbc.Form([
                 dbc.FormGroup([
                     dbc.Label("Username", width=2),
-                    dbc.Col(dbc.Input(type="text", id="login-username", placeholder="Enter username"), width=10)
+                    dbc.Col(dbc.Input(type="text", id=_LOGIN_USERNAME_ID, placeholder="Enter username"), width=10)
                 ], row=True),
                 dbc.FormGroup([
                     dbc.Label("Password", width=2),
-                    dbc.Col(dbc.Input(type="password", id="login-password", placeholder="Enter password"), width=10)
+                    dbc.Col(dbc.Input(type="password", id=_LOGIN_PASSWORD_ID, placeholder="Enter password"), width=10)
                 ], row=True),
                 dbc.FormGroup(
-                    dbc.Alert("", id="login-alert", is_open=False)
+                    dbc.Alert("", id=_LOGIN_ALERT_ID, is_open=False)
                 )
             ])),
             dbc.ModalFooter(
                 dbc.Row([
-                    dbc.Button("Login", id="login-submit-btn", color="primary", n_clicks=0),
-                    dbc.Button("Cancel", id="login-cancel-btn", color="primary", n_clicks=0, className="ml-3")
+                    dbc.Button("Login", id=_LOGIN_SUBMIT_ID, color="primary", n_clicks=0),
+                    dbc.Button("Cancel", id=_LOGIN_CANCEL_ID, color="primary", n_clicks=0, className="ml-3")
                 ])
             )
         ],
-        id="login-modal", backdrop="static", size="lg", is_open=False
+        id=_LOGIN_MODAL_ID, backdrop="static", size="lg", is_open=False
     )
 
     # If a user is logged in, the dropdown menu is rendered in the nav bar with items enabled/disabled depending on the
@@ -58,8 +108,7 @@ def _serve_layout() -> html.Div:
     login_btn_style = None
     drop_menu_style = dict(display='none')
     drop_menu_label = "Welcome"
-    can_curate = False
-    can_commit = False
+    can_curate = can_commit = is_admin = False
     if flask_login.current_user.is_authenticated:
         portal_user = load_authorized_user(flask_login.current_user.get_id())
         if portal_user is not None:
@@ -68,27 +117,33 @@ def _serve_layout() -> html.Div:
             drop_menu_label = f"Welcome, {portal_user.first_name()}"
             can_curate = portal_user.can_curate_database()
             can_commit = portal_user.can_commit_to_database()
+            is_admin = portal_user.is_admin()
 
     navbar = dbc.Navbar(
         [
             html.A(dbc.NavbarBrand("Lisberger Data Portal"), href="/home"),
             dbc.Row(
                 [
-                    dbc.Col(dbc.Button("Login", id='login-btn', color="info", style=login_btn_style, n_clicks=0),
+                    dbc.Col(dbc.Button("Login", id=_LOGIN_ID, color="info", style=login_btn_style, n_clicks=0),
                             width="auto"),
                     dbc.Col(
                         dbc.DropdownMenu(
                             children=[
                                 dbc.DropdownMenuItem("What do you want to do?", header=True),
                                 dbc.DropdownMenuItem("Explore the database", href="/explore"),
-                                dbc.DropdownMenuItem("Curate lab information (access restricted)", id='link-curate',
+                                dbc.DropdownMenuItem("Curate lab information (access restricted)", id=_LINK_CURATE_ID,
                                                      href="/curate", disabled=not can_curate),
-                                dbc.DropdownMenuItem("Commit experiment session (access restricted)", id='link-commit',
-                                                     href="/commit_session", disabled=not can_commit),
+                                dbc.DropdownMenuItem("Commit experiment session (access restricted)",
+                                                     id=_LINK_COMMIT_ID, href="/commit_session",
+                                                     disabled=not can_commit),
                                 dbc.DropdownMenuItem(divider=True),
-                                dbc.DropdownMenuItem("Logout", id='logout-btn', n_clicks=0)
+                                dbc.DropdownMenuItem("Manage user accounts (administrators only)", href='/manage_users',
+                                                     id=_LINK_USERS_ID, disabled=not is_admin),
+                                dbc.DropdownMenuItem(divider=True),
+                                dbc.DropdownMenuItem("Update your profile", href="/user_profile"),
+                                dbc.DropdownMenuItem("Logout", id=_LOGOUT_ID, n_clicks=0)
                             ],
-                            id='nav-menu', right=True, label=drop_menu_label, color="info", style=drop_menu_style
+                            id=_NAV_MENU_ID, right=True, label=drop_menu_label, color="info", style=drop_menu_style
                         ),
                         width="auto"
                     )
@@ -102,11 +157,12 @@ def _serve_layout() -> html.Div:
 
     # the div encapsulating page content is populuated each time the URL changes
     return html.Div([
-        dcc.Location(id='url', refresh=False),
-        dcc.Location(id='redirect', refresh=True),
+        dcc.Location(id=_URL_ID, refresh=False),
+        #  dcc.Location(id=_REDIRECT_ID, refresh=True),
+        dcc.Interval(id=_AUTH_INTV_ID, disabled=False, interval=10000),
         navbar,
         modal_login,
-        html.Div(id='page-content')
+        html.Div(id=_PAGE_CONTENT_ID)
     ])
 
 
@@ -114,51 +170,87 @@ def _serve_layout() -> html.Div:
 app.layout = _serve_layout
 
 
-@app.callback([Output('page-content', 'children'), Output('redirect', 'pathname')],
-              [Input('url', 'pathname')])
-def display_page(pathname):
-    redirect_url = dash.no_update
+@app.callback([Output(_PAGE_CONTENT_ID, 'children'), Output(_URL_ID, 'href'), Output(_URL_ID, 'refresh')],
+              [Input(_URL_ID, 'pathname'), Input(_AUTH_INTV_ID, 'n_intervals')], [State(_URL_ID, 'href')])
+def display_page(pathname, n_intervals, current_href):
+    ctx = dash.callback_context
+    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if (ctx.triggered is not None) else ""
+
+    # at regular intervals we check to see if we're on a restricted-access page, but the user is either not logged in
+    # or doesn't have the required access. When that happens, redirect to the home page.
+    if (trigger_id == _AUTH_INTV_ID) and (n_intervals is not None):
+        url_parts = urlparse(current_href) if isinstance(current_href, str) else ""
+        if (url_parts.path == '/explore') or (url_parts.path == '/neurons'):
+            return dash.no_update, dash.no_update, False
+        can_curate = can_commit = is_admin = is_logged_in = False
+        if flask_login.current_user.is_authenticated:
+            portal_user = load_authorized_user(flask_login.current_user.get_id())
+            if portal_user:
+                is_logged_in = True
+                can_curate = portal_user.can_curate_database()
+                can_commit = portal_user.can_commit_to_database()
+                is_admin = portal_user.is_admin()
+        if ((url_parts.path == '/curate') and not can_curate) or \
+                ((url_parts.path == '/commit_session') and not can_commit) or \
+                ((url_parts.path == '/manage_users') and not is_admin) or (not is_logged_in):
+            url_parts = [(part if i != 2 else '/home') for i, part in enumerate(url_parts)]
+            return dash.no_update, urlunparse(url_parts), True
+        return dash.no_update, dash.no_update, False
+
+    redirect = False
     if pathname == '/explore':
         layout = explore.layout
     elif pathname == '/neurons':
         layout = neurons.serve_layout()
     else:
-        can_curate = can_commit = False
+        can_curate = can_commit = is_admin = is_logged_in = False
         if flask_login.current_user.is_authenticated:
             portal_user = load_authorized_user(flask_login.current_user.get_id())
             if portal_user:
+                is_logged_in = True
                 can_curate = portal_user.can_curate_database()
                 can_commit = portal_user.can_commit_to_database()
+                is_admin = portal_user.is_admin()
         if pathname == '/curate':
             layout = curate.layout if can_curate else None
-            redirect_url = dash.no_update if can_curate else '/home'
+            redirect = not can_curate
         elif pathname == '/commit_session':
             layout = commit_session.layout if can_commit else None
-            redirect_url = dash.no_update if can_commit else '/home'
+            redirect = not can_commit
+        elif pathname == '/user_profile':
+            layout = user_profile.serve_layout() if is_logged_in else None
+            redirect = not is_logged_in
+        elif pathname == '/manage_users':
+            layout = manage_users.serve_layout() if is_admin else None
+            redirect = not is_admin
         else:
             layout = home.serve_layout(can_curate, can_commit)
-    return layout, redirect_url
+    update_href = dash.no_update
+    if redirect:
+        url_parts = urlparse(current_href)
+        update_href = urlunparse([(part if i != 2 else '/home') for i, part in enumerate(url_parts)])
+    return layout, update_href, redirect
 
 
 @app.callback(
-    [Output('login-modal', 'is_open'), Output('login-username', 'value'), Output('login-password', 'value'),
-     Output('nav-menu', 'label'), Output('nav-menu', 'style'), Output('login-btn', 'style'),
-     Output('link-curate', 'disabled'), Output('link-commit', 'disabled'), Output('login-alert', 'children'),
-     Output('login-alert', 'is_open'), Output('url', 'pathname')],
-    [Input('login-btn', 'n_clicks'), Input('login-submit-btn', 'n_clicks'), Input('login-cancel-btn', 'n_clicks'),
-     Input('logout-btn', 'n_clicks')],
-    [State('login-username', 'value'), State('login-password', 'value')]
+    [Output(_LOGIN_MODAL_ID, 'is_open'), Output(_LOGIN_USERNAME_ID, 'value'), Output(_LOGIN_PASSWORD_ID, 'value'),
+     Output(_NAV_MENU_ID, 'label'), Output(_NAV_MENU_ID, 'style'), Output(_LOGIN_ID, 'style'),
+     Output(_LINK_CURATE_ID, 'disabled'), Output(_LINK_COMMIT_ID, 'disabled'), Output(_LINK_USERS_ID, 'disabled'),
+     Output(_LOGIN_ALERT_ID, 'children'), Output(_LOGIN_ALERT_ID, 'is_open'), Output(_URL_ID, 'pathname')],
+    [Input(_LOGIN_ID, 'n_clicks'), Input(_LOGIN_SUBMIT_ID, 'n_clicks'), Input(_LOGIN_CANCEL_ID, 'n_clicks'),
+     Input(_LOGOUT_ID, 'n_clicks')],
+    [State(_LOGIN_USERNAME_ID, 'value'), State(_LOGIN_PASSWORD_ID, 'value')]
 )
 def login_callback(*args):
     ctx = dash.callback_context
-    out = [dash.no_update] * 11
+    out = [dash.no_update] * 12
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if (ctx.triggered is not None) else ""
 
-    if trigger_id == 'login-btn':
+    if trigger_id == _LOGIN_ID:
         out[0] = True
         out[1] = out[2] = ""
-        out[9] = False
-    elif trigger_id == 'login-submit-btn':
+        out[10] = False
+    elif trigger_id == _LOGIN_SUBMIT_ID:
         username = args[4] if isinstance(args[4], str) else ""
         password = args[5] if isinstance(args[5], str) else ""
         error_msg = DataBaseManager().authenticate_portal_user(username, password)
@@ -177,24 +269,26 @@ def login_callback(*args):
             out[5] = dict(display='none')
             out[6] = not portal_user.can_curate_database()
             out[7] = not portal_user.can_commit_to_database()
-            out[8] = ""
-            out[9] = False
-            out[10] = '/home'
+            out[8] = not portal_user.is_admin()
+            out[9] = ""
+            out[10] = False
+            out[11] = '/home'
         else:
-            out[8] = error_msg
-            out[9] = True
-    elif trigger_id == 'login-cancel-btn':
+            out[9] = error_msg
+            out[10] = True
+    elif trigger_id == _LOGIN_CANCEL_ID:
         out[0] = False
         out[1] = out[2] = ""
-        out[9] = False
-    elif trigger_id == 'logout-btn':
+        out[10] = False
+    elif trigger_id == _LOGOUT_ID:
         flask_login.logout_user()
         out[3] = "Welcome"
         out[4] = dict(display='none')
         out[5] = None
         out[6] = True
         out[7] = True
-        out[10] = '/home'
+        out[8] = True
+        out[11] = '/home'
     return tuple(out)
 
 

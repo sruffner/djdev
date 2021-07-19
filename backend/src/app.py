@@ -8,6 +8,7 @@ TODO: Configuration really needs work. The DataJoint configuration appears in mu
 @created: oct2020
 @author: sruffner
 """
+from datetime import timedelta
 from typing import Dict, Optional
 
 import dash
@@ -47,12 +48,17 @@ dj.config['database.password'] = os.environ['MYSQL_ROOT_PASSWORD']
 from database.manager import DataBaseManager
 import database.sgl_auth as sgl_auth
 
-# Setup for Flask-Login.
+# Setup for Flask-Login. Note we restrict session lifetimes to 24 hours.
 # TODO: We need to work on app configuration and put the SECRET_KEY in a safe place. One idea is to generate it on
 #  first use and store in a file that is always git-ignored....
+server.permanent_session_lifetime = timedelta(hours=24)
 server.config.update(SECRET_KEY=os.urandom(12))
 login_manager = flask_login.LoginManager()
 login_manager.init_app(server)
+login_manager.login_view = '/home'
+login_manager.refresh_view = '/home'
+login_manager.needs_refresh_message = "Session timed out, please login again."
+login_manager.needs_refresh_message_category = "info"
 
 
 class PortalUser(flask_login.UserMixin):
@@ -73,6 +79,18 @@ class PortalUser(flask_login.UserMixin):
 
     def can_commit_to_database(self) -> bool:
         return self.user_record['access'] in sgl_auth.CONTRIBUTE_ACCESS
+
+    def full_name(self) -> str:
+        return self.user_record['full_name']
+
+    def contact_email(self) -> str:
+        return self.user_record['contact_email']
+
+    def title(self) -> str:
+        return self.user_record['title']
+
+    def organization(self) -> str:
+        return self.user_record['organization']
 
 
 @login_manager.user_loader

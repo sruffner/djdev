@@ -344,18 +344,116 @@ class DataBaseManager:
 
     def get_portal_user_record(self, username: str) -> Union[str, Dict[str, str]]:
         """
-        Retrieve a user account record from the database of users authorized for restricted access to the Lisberger lab
-        data portal.
+        Retrieve one or all user account records from the database of users authorized for restricted access to the
+        Lisberger lab data portal.
 
         Args:
             username: Username of the account.
         Returns:
-            If successful, returns the user account record as a dictionary of key-value pairs. For security reasons, the
-            user's encrypted password is removed from the record. Otherwise, returns a brief error description.
+            If successful, returns the user account record. For security reasons, the user's encrypted password is
+                removed from the record. Otherwise, returns a brief error description.
         """
         with self._db_lock:
             user_record = sgl_auth.get_user(username)
         return user_record
+
+    def get_all_portal_user_records(self) -> Union[str, List[Dict[str, str]]]:
+        """
+        Retrieve all user account records from the database of users authorized for restricted access to the Lisberger
+        lab data portal.
+
+        Returns:
+            If successful, returns the user account records. For security reasons, the user's encrypted password is
+                removed from each record. Otherwise, returns a brief error description.
+        """
+        with self._db_lock:
+            user_records = sgl_auth.get_all_users()
+        return user_records
+
+    def register_new_portal_user(self, username: str, password: str, access: str, full_name: str,
+                                 contact_email: str) -> Optional[str]:
+        """
+        Create a new user account authorized for restricted access to the Lisberger lab data portal.
+
+        Args:
+            username: The username (3-20 lowercase letters or digits, starting with a letter).
+            password: Plain-text password (8-32 characters, with at least one digit and one uppercase character). For
+                security, the password will be stored in the database in encrypted form.
+            access: Access level assigned to user. Must be one of 'admin' > 'curate' > 'contribute' > 'readonly'.
+            full_name: The user's full name. Must be 5-50 characters long, but otherwise unchecked for format.
+            contact_email: The user's email address. Up to 80 characters long and checked for valid format.
+        Returns:
+            None if successful, else a brief error description.
+        """
+        with self._db_lock:
+            error_msg = sgl_auth.insert_user(username, password, password, access, full_name, contact_email)
+        return error_msg
+
+    def remove_portal_user(self, username: str) -> Optional[str]:
+        """
+        Permanently remove the specified user account from the Lisberger lab data portal.
+
+        Args:
+            username: Username for user account to be removed.
+        Returns:
+            None if successful, else a brief error description
+        """
+        if username is None:
+            return "Username not specified"
+        with self._db_lock:
+            error_msg = sgl_auth.delete_user(username)
+        return error_msg
+
+    def update_portal_user_profile(
+            self, username: str, full_name: str, email: str, title: str, org: str) -> Optional[str]:
+        """
+        Update the profile for an existing user account on the Lisberger lab data portal.
+
+        Args:
+            username: Username of the account.
+            full_name: The user's full name. Must be 5-50 chars long.
+            email: The user's email address. Must be a valid email address up to 80 chars long.
+            title: The user's title or position description; 0-50 chars long.
+            org: The user's organization name; 0-50 chars long.
+        Returns:
+            None if successful, else a brief error message.
+        """
+        with self._db_lock:
+            error_msg = sgl_auth.update_user_profile(username, full_name, email, title, org)
+        return error_msg
+
+    def change_portal_user_password(self, username: str, old_password: str, new_password: str) -> Optional[str]:
+        """
+        Change the password for an existing user account on the Lisberger lab data portal.
+
+        Args:
+            username: Username of the account.
+            old_password: The user's current password. Operation fails if this is incorrect.
+            new_password: The user's new password. Operation fails if this is not a valid password. No action taken if
+                this matches 'old_password'.
+        Returns:
+            None if successful, else a brief error message.
+        """
+        if old_password == new_password:
+            return None
+        with self._db_lock:
+            error_msg = sgl_auth.change_password(username, old_password, new_password)
+        return error_msg
+
+    def change_portal_user_access_level(self, username: str, access: str) -> Optional[str]:
+        """
+        Change the access level assigned to an existing user account on the Lisberger lab data portal.
+
+        Args:
+            username: Username of the account.
+            access: The desired access level. Must be one of 'admin' > 'curate' > 'contribute' > 'readonly'.
+
+        Returns:
+            None if successful, else a brief error description.
+        """
+        with self._db_lock:
+            error_msg = sgl_auth.change_access(username, access)
+        return error_msg
 
     def entry_form(self, table_id: DBTable, include_attrs: Optional[List[str]] = None,
                    initial_entry: Optional[Dict[str, AttributeValue]] = None,
