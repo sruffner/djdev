@@ -496,37 +496,6 @@ def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> U
     return dcc.Graph(figure=fig)
 
 
-def _retrieve_trial_data(unit_key: Dict[str, Any], proto_hash: str,
-                         complete_reps_only: bool = False) -> Optional[List[TrialData]]:
-    """
-    Retrieve the data for all trial reps of the selected protocol for the selected neuron.
-
-    Args:
-        unit_key: Dictionary that includes the primary key of a selected neural unit in the database.
-        proto_hash: The selected trial protocol's MD5 hash digest (the primary key in protocol database table).
-        complete_reps_only: If True, the method only returns data for successfully completed reps; else, it returns data
-            for all reps found. Default = False.
-    Returns:
-        A list of trial data objects, one for each rep of the specified trial protocol during which specified neuron
-            was recorded. Returns None if an error occurs while retrieving the dat.
-    """
-    db_mgr = DataBaseManager()
-    trial_indices = db_mgr.trials_for_neuron(unit_key, proto_hash=proto_hash)
-    ok = not (trial_indices is None)
-    trial_data: List[TrialData] = list()
-    trial_pk = unit_key.copy()
-    if ok:
-        for trial_idx in trial_indices:
-            trial_pk['trial_idx'] = trial_idx
-            td = db_mgr.data_for_trial(trial_pk, unit_ids=[unit_key['unit_id']])
-            if td is None:
-                ok = False
-                break
-            elif (not complete_reps_only) or td.success:
-                trial_data.append(td)
-    return trial_data if ok else None
-
-
 def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union[html.Div, dcc.Graph]:
     """
     Helper method prepares a two-figure plot displaying the mean behavioral and neuronal response across all recorded
@@ -553,7 +522,7 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
             reps of the specified trial protocol. If an error occurs while retrieving or processing response data, the
             method instead returns an HTML Div with an error message.
     """
-    trial_data = _retrieve_trial_data(unit_key, proto_hash, complete_reps_only=True)
+    trial_data = DataBaseManager().retrieve_trial_reps_for_neuron(unit_key, proto_hash)
     if trial_data is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial data for neuron (internal error).", is_open=True))
     elif len(trial_data) < 3:
@@ -572,7 +541,9 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
         h, v = td.eye_velocity_saccades_removed()
         hevel_list.append(h)
         vevel_list.append(v)
+
     firing_rate_list = [td.instantaneous_firing_rate(unit_id, smooth=True) for td in trial_data]
+
     if len(protocol.rvs) == 0:
         hevel = np.nanmean(hevel_list, axis=0)
         vevel = np.nanmean(vevel_list, axis=0)
@@ -759,7 +730,7 @@ def _discharge_statistics_panel(unit_key: Dict[str, Any], proto_hash: str) -> ht
         An HTML Div displaying the specified neuron's discharge statistics as described. If an error occurs while
             retrieving response data, the method instead returns an HTML Div with an error message.
     """
-    trial_data = _retrieve_trial_data(unit_key, proto_hash, complete_reps_only=True)
+    trial_data = DataBaseManager().retrieve_trial_reps_for_neuron(unit_key, proto_hash)
     if trial_data is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial data for neuron (internal error).", is_open=True))
     elif len(trial_data) < 3:
@@ -1050,7 +1021,7 @@ def on_response_panel_ds_range(range_value, selected_rows, rows, proto_hash_valu
     return dash.no_update if not ok else \
         _discharge_statistics_figure(
             selected_unit['unit_id'],
-            _retrieve_trial_data(selected_unit, proto_hash_value, complete_reps_only=True), range_value)
+            DataBaseManager().retrieve_trial_reps_for_neuron(selected_unit, proto_hash_value), range_value)
 
 
 @app.callback([Output(_RESP_PROTO_VIEW_MODAL_ID, "is_open"), Output(_RESP_PROTO_VIEW_BODY_ID, "children")],

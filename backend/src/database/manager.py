@@ -128,6 +128,7 @@ decided to use it to implement access to the user database.
 
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
+import functools
 import os
 import pickle
 import re
@@ -148,6 +149,7 @@ from json import JSONDecoder
 import numpy as np
 import scipy.signal
 import datajoint as dj
+import numpy.lib.stride_tricks as stride_tricks
 
 from common import json_parse, check_date
 
@@ -434,8 +436,6 @@ class DataBaseManager:
         Returns:
             None if successful, else a brief error message.
         """
-        if old_password == new_password:
-            return None
         with self._db_lock:
             error_msg = sgl_auth.change_password(username, old_password, new_password)
         return error_msg
@@ -1035,7 +1035,7 @@ class DataBaseManager:
             return None
 
     def trials_for_neuron(self, neuron_key: Dict[str, AttributeValue],
-                          proto_hash: Optional[str] = None) -> Optional[List[int]]:
+                          proto_hash: Optional[str] = None, complete_reps_only: bool = False) -> Optional[List[int]]:
         """
         Get the indices of all trials, or a subset thereof, presented to the specified neural unit.
 
@@ -1043,6 +1043,7 @@ class DataBaseManager:
             neuron_key: At a minimum, this dictionary must uniquely identify a recorded neural unit in the database.
             proto_hash: If this identifies a trial protocol in the database, then return only the indices of the trials
                 belonging to that protocol. Default = None.
+            complete_reps_only: If True, omit from result any trials that did not run to completion. Default = False.
         Returns:
             The list of indices of the relevant trials. The trial index indicates its presentation order during the
                 experiment session. The index plus the neural unit's session key is sufficient information to retrieve
@@ -1053,13 +1054,16 @@ class DataBaseManager:
             trial_table: dj.Table = _table_map[DBTable.TRIAL]
             response_table: dj.Table = _table_map[DBTable.TRIAL_NEURONAL]
             neuron_pk = {k: neuron_key[k] for k in ti.primary_key_of(DBTable.SESSION_NEURON, False)}
-            query = (trial_table & (response_table & neuron_pk)).proj('proto_hash')
+            trial_restriction = dict()
+            if isinstance(proto_hash, str):
+                trial_restriction['proto_hash'] = proto_hash
+            if complete_reps_only:
+                trial_restriction['trial_success'] = True
+            query = (trial_table & (response_table & neuron_pk)) \
+                if len(trial_restriction) == 0 else ((trial_table & trial_restriction) & (response_table & neuron_pk))
             with self._db_lock:
                 relevant_trials = query.fetch(as_dict=True)
-            if isinstance(proto_hash, str):
-                return [t['trial_idx'] for t in relevant_trials if t['proto_hash'] == proto_hash]
-            else:
-                return [t['trial_idx'] for t in relevant_trials]
+            return [t['trial_idx'] for t in relevant_trials]
         except Exception:
             return None
 
@@ -1118,6 +1122,83 @@ class DataBaseManager:
                 behavior=behavioral_field,
                 neuronal=neuronal_field
             )
+            return trial_data
+        except Exception:
+            return None
+
+    def retrieve_trial_reps_for_neuron(self, neuron_key: Dict[str, AttributeValue], proto_hash: str,
+                                       complete_reps: bool = True) -> Optional[List[TrialData]]:
+        """
+        Retrieve data for all reps of the specified trial protocol during which the specified neural unit was recorded.
+        NOTE that this method could take a significant amount of time depending on the number of trial reps that must be
+        retrieved from the database.
+
+        Args:
+            neuron_key: At a minimum, this dictionary must uniquely identify a recorded neural unit in the database.
+            proto_hash: The MD5 hash uniquely identifying a trial protocol in the database.
+            complete_reps: If True, omit from result any trials that did not run to completion. Default = True.
+        Returns:
+            A list of trial data container. The list will be empty if no reps were found. Returns None if an error
+                occurs while retrieving the information.
+        """
+        try:
+            trial_table: dj.Table = _table_map[DBTable.TRIAL]
+            behavior_table: dj.Table = _table_map[DBTable.TRIAL_BEHAVIORAL]
+            neuronal_table: dj.Table = _table_map[DBTable.TRIAL_NEURONAL]
+            protocol_table: dj.Table = _table_map[DBTable.TRIAL_PROTOCOL]
+
+            neuron_pk = {k: neuron_key[k] for k in ti.primary_key_of(DBTable.SESSION_NEURON, False)}
+            trial_restriction = {k: neuron_key[k] for k in ti.primary_key_of(DBTable.SESSION)}
+            trial_restriction['proto_hash'] = proto_hash
+            if complete_reps:
+                trial_restriction['trial_success'] = True
+            query_neuron = neuronal_table & neuron_key
+            query_trials = trial_table & trial_restriction
+
+            with self._db_lock:
+                proto_info = (protocol_table & {'proto_hash': proto_hash}).fetch1()
+                # NOTE: we only want trials for which specified neuron is recorded
+                relevant_trials = (query_trials & query_neuron).fetch(as_dict=True)
+                neuronal_responses = (query_neuron & query_trials).fetch(as_dict=True)
+                behavioral_responses = (behavior_table & (query_neuron & query_trials)).fetch(as_dict=True)
+
+            relevant_trials = sorted(relevant_trials, key=lambda k: k['trial_idx'], reverse=True)
+            neuronal_responses = sorted(neuronal_responses, key=lambda k: k['trial_idx'], reverse=True)
+            behavioral_responses = sorted(behavioral_responses, key=lambda k: k['trial_idx'], reverse=True)
+            proto_def: maestro.Protocol = pickle.loads(proto_info['proto_def'])
+
+            trial_data: List[TrialData] = list()
+            while len(relevant_trials) > 0:
+                trial_info = relevant_trials.pop()
+                neuronal_response = neuronal_responses.pop()
+                neuronal_field = {neuronal_response['unit_id']: neuronal_response['spike_times']}
+                behavioral_field: Dict[str, np.ndarray] = dict()
+                while (len(behavioral_responses) > 0) and \
+                        (behavioral_responses[-1]['trial_idx'] == trial_info['trial_idx']):
+                    response = behavioral_responses.pop()
+                    behavioral_field[response['response_id']] = response['response_trace']
+
+                trial_data.append(TrialData(
+                    experimenter=neuron_pk['experimenter'],
+                    subj_id=neuron_pk['subj_id'],
+                    session_date=neuron_pk['session_date'],
+                    session_sfx=neuron_pk['session_sfx'],
+                    trial_idx=trial_info['trial_idx'],
+                    protocol=proto_def,
+                    filename=trial_info['trial_filename'],
+                    duration_ms=trial_info['trial_dur'],
+                    record_start_ms=trial_info['trial_record_start'],
+                    success=trial_info['trial_success'],
+                    rewarded=trial_info['trial_rewarded'],
+                    reward1_ms=trial_info['trial_rew1'],
+                    reward2_ms=trial_info['trial_rew2'],
+                    vstab_win_len_ms=trial_info['vstab_win_len'],
+                    timestamp_sec=trial_info['trial_ts'],
+                    trial_rvs=pickle.loads(trial_info['trial_rvs']),
+                    behavior=behavioral_field,
+                    neuronal=neuronal_field
+                ))
+
             return trial_data
         except Exception:
             return None
@@ -3042,30 +3123,29 @@ class TrialData:
                 vevel = vevel - self.estimate_velocity_baseline_offset('VEVEL')
         else:
             vevel = np.zeros(self.duration_ms, dtype=np.float32)
+
         speed = np.sqrt(hevel ** 2 + vevel ** 2)
         acceleration = np.diff(speed) / 0.001   # sampling rate = 1KHz!!
         acceleration = np.append(acceleration, np.nan)
         acceleration = np.abs(acceleration)
-        state = "not_saccading"
+
+        in_saccade = np.intersect1d(np.where(speed > t_vel)[0], np.where(acceleration > t_acc)[0])
+        in_saccade = functools.reduce(
+            np.union1d, (in_saccade, np.where(speed > t_vel_max)[0], np.where(acceleration > t_acc_max)[0]))
+
+        saccading = False
         onset_indices = []
         offset_indices = []
-        stopping_index = 0
-        for i in range(len(speed)):
-            if (state == "not_saccading") and (((speed[i] > t_vel) and (acceleration[i] > t_acc)) or
-                                               (acceleration[i] > t_acc_max) or (speed[i] > t_vel_max)):
-                state = "saccading"
-                onset_indices.append(max(0, i - pre_ticks))
-            elif (state == "saccading") and ((speed[i] < t_vel) or (acceleration[i] < t_acc)):
-                stopping_index = i + post_ticks
-                state = "stopping"
-            elif (state == "stopping") and (speed[i] > t_vel) and (acceleration[i] > t_acc):
-                state = "saccading"
-            if (state == "stopping") and (i >= stopping_index):
-                state = "not_saccading"
-                offset_indices.append(i)
-        # Make sure we have the same number of samples
-        if len(offset_indices) < len(onset_indices):
-            offset_indices.append(len(speed))
+        for i in range(1, len(in_saccade)):
+            if in_saccade[i] == in_saccade[i-1] + 1:
+                if not saccading:
+                    onset_indices.append(max(0, in_saccade[i-1]-pre_ticks))
+                    saccading = True
+            elif saccading and (in_saccade[i] >= in_saccade[i-1]+post_ticks):
+                offset_indices.append(in_saccade[i-1] + post_ticks)
+                saccading = False
+        if saccading:
+            offset_indices.append(min(len(speed), in_saccade[-1]+post_ticks))
 
         for i in range(len(offset_indices)):
             hevel[onset_indices[i]:offset_indices[i]] = np.nan
@@ -3085,23 +3165,30 @@ class TrialData:
             response_id: Must be 'HEVEL', 'VEVEL', or 'HDVEL'.
 
         Returns:
-            Estimated baseline offset in the specified behavioral trace. If the specified behavioral signal, or its
-                position counterpart, was not recorded, the offset cannot be estimated and 0 is returned.
+            Estimated baseline offset in the specified behavioral trace. Returns 0 if the offset cannot be estimated for
+                whatever reason (missing velocity or position signal, signal trace is less than 200ms, or cannot find
+                a 100-ms contiguous segment meeting requirements stated above).
         """
-        if (response_id.find('VEL') == -1) or not (response_id in self.behavior):
+        if (response_id.find('VEL') == -1) or (not (response_id in self.behavior)) or (len(self.behavior) < 200):
             return 0
         pos_id = 'HEPOS' if response_id.find('H') > -1 else 'VEPOS'
         if not (pos_id in self.behavior):
             return 0
+
         pos = self.behavior[pos_id]
+        pos_chunks_ok = np.where(
+            np.apply_along_axis(lambda x: np.nanmax(x)-np.nanmin(x) < 0.1, 1,
+                                stride_tricks.sliding_window_view(pos, window_shape=100)))[0]
+        if len(pos_chunks_ok) == 0:
+            return 0
         vel = self.behavior[response_id]
-        start = 0
-        delta = 100
-        while start + delta <= len(pos):
-            chunk_pos = pos[start:start+delta]
-            chunk_vel = vel[start:start+delta]
-            if (np.nanmax(chunk_pos) - np.nanmin(chunk_pos) <= 0.1) and \
-                    (np.nanmax(chunk_vel) - np.nanmin(chunk_vel) <= 2):
-                return np.nanmean(chunk_vel)
-            start += 1
-        return 0
+        vel_chunks_ok = np.where(
+            np.apply_along_axis(lambda x: np.nanmax(x)-np.nanmin(x) < 2, 1,
+                                stride_tricks.sliding_window_view(vel, window_shape=100)))[0]
+        if len(vel_chunks_ok) == 0:
+            return 0
+        chunks_ok = np.intersect1d(pos_chunks_ok, vel_chunks_ok)
+        if len(chunks_ok) == 0:
+            return 0
+        start = chunks_ok[0]
+        return np.nanmean(vel[start:start+100])

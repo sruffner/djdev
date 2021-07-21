@@ -273,6 +273,8 @@ def change_password(username: str, old_password: str, new_password: str) -> Opti
     Returns:
         None if password was successfully changed; else a brief error description.
     """
+    if old_password == new_password:
+        return "Password is unchanged. Enter a new password."
     error_msg = _validate_password(new_password, new_password)
     if error_msg is not None:
         return f"New password in invalid ({error_msg})"
