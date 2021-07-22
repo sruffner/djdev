@@ -180,7 +180,7 @@ def display_page(pathname, n_intervals, current_href):
     # or doesn't have the required access. When that happens, redirect to the home page.
     if (trigger_id == _AUTH_INTV_ID) and (n_intervals is not None):
         url_parts = urlparse(current_href) if isinstance(current_href, str) else ""
-        if (url_parts.path == '/explore') or (url_parts.path == '/neurons'):
+        if url_parts.path in ['/explore', '/neurons', '/home', '/']:
             return dash.no_update, dash.no_update, False
         can_curate = can_commit = is_admin = is_logged_in = False
         if flask_login.current_user.is_authenticated:
@@ -225,6 +225,7 @@ def display_page(pathname, n_intervals, current_href):
             redirect = not is_admin
         else:
             layout = home.serve_layout(can_curate, can_commit)
+            redirect = not (pathname in ['/', '/home'])   # eg, someone enters a bogus path manually
     update_href = dash.no_update
     if redirect:
         url_parts = urlparse(current_href)
