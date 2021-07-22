@@ -29,7 +29,6 @@ command "python ./index.py". The Dash application instance is created in app.py.
 @created: oct2020
 @author: sruffner
 """
-import sys
 from urllib.parse import urlparse, urlunparse
 
 import dash
@@ -294,8 +293,4 @@ def login_callback(*args):
 
 
 if __name__ == '__main__':
-    mgr = DataBaseManager()
-    msg = mgr.on_startup()
-    if msg:
-        print(f"===> {msg}", flush=True)
     app.run_server(host='0.0.0.0', port='8050', debug=True)

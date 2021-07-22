@@ -881,17 +881,13 @@ class _MappingSubPanel(_BasePanel):
 
 
 class UserPanel(_BasePanel):
-    """This panel provides interactive access to the manual table listing users in the Lisberger lab database."""
-
+    """ This panel provides interactive access to the manual table listing users in the Lisberger lab database. """
     def __init__(self, app: dash.Dash):
         super().__init__(app, ti.DBTable.USER, 'usr')
 
 
 class RigPanel(_BasePanel):
-    """
-    This panel provides interactive access to experiment rigs in the lab database
-    """
-
+    """ This panel provides interactive access to experiment rigs in the lab database. """
     def __init__(self, app: dash.Dash):
         super().__init__(app, ti.DBTable.RIG, 'rig')
 
@@ -968,7 +964,6 @@ class SubjectPanel(_BasePanel):
     subject table. That subpanel automatically expands whenever a subject is selected and collapses when the
     selection is cleared (for example, when a subject is deleted).
     """
-
     def __init__(self, app: dash.Dash):
         self._implant_subpanel = SubjectImplantPanel(app)
         super().__init__(app, ti.DBTable.SUBJECT, 'subj')
@@ -1008,86 +1003,46 @@ class SubjectPanel(_BasePanel):
             return self._implant_subpanel.layout(), is_open
 
 
-class BrainRegionPanel(_BasePanel):
-    """
-    This panel provides interactive access to the various brain regions characterized in the lab database, along with
-    the neuron types associated with those brain regions (a many-to-many relationship).
-    """
-
+class BrainAreaPanel(_BasePanel):
+    """ This panel provides interactive access to the various brain regions characterized in the lab database. """
     def __init__(self, app: dash.Dash):
-        subpanels = [BrainRegionPanel.NeuronTypePanel(app)]
-        super().__init__(app, ti.DBTable.BRAIN_AREA, 'brain', subpanels)
+        super().__init__(app, ti.DBTable.BRAIN_AREA, 'brain')
 
-    def _columns(self) -> List[ti.Column]:
-        """
-        Override excludes a column for the auto-incrementing primary key and adds a column that displays the
-        neuron types associated with the brain region.
-        """
-        return [ti.Column('ba_name', 'Brain Region', '300px', False),
-                ti.Column('assoc_ntypes', 'Associated Neuron Types', '300px', False)]
 
-    def _rows(self) -> List[Dict[str, ti.AttributeValue]]:
-        """ Override appends an additional column reflecting the neuron types associated with each brain region. """
-        rows = super()._rows()
-        area_to_ntypes = self._subpanels[0].current_mappings()
-        for row in rows:
-            if row['ba_id'] in area_to_ntypes:
-                row['assoc_ntypes'] = ', '.join([alias.label for alias in area_to_ntypes[row['ba_id']]])
-            else:
-                row['assoc_ntypes'] = ''
-        return rows
-
-    def _to_row_alias(self, row: Dict[str, ti.AttributeValue]) -> _RowAlias:
-        super()._to_row_alias(row)  # to validate argument
-        return _RowAlias({'ba_id': row['ba_id']}, row['ba_name'], None)
-
-    class NeuronTypePanel(_MappingSubPanel):
-        def __init__(self, app: dash.Dash):
-            super().__init__(app, ti.DBTable.BRAIN_AREA_TO_NEURON_TYPE, 'ntyp')
-
-        def _to_row_alias(self, row: Dict[str, ti.AttributeValue]) -> _RowAlias:
-            super()._to_row_alias(row)  # to validate argument
-            return _RowAlias({'nt_id': row['nt_id']}, row['nt_name'], None)
+class NeuronTypePanel(_BasePanel):
+    """ This panel provides interactive access to the various neuron types characterized in the lab database. """
+    def __init__(self, app: dash.Dash):
+        super().__init__(app, ti.DBTable.NEURON_TYPE, 'n_typ')
 
 
 class StudyPanel(_BasePanel):
     """
-    This panel provides interactive access to research projects in the lab database, along with the publications and
-    research keywords associated with those projects.
+    This panel provides interactive access to research projects in the lab database, along with the publications
+    associated with those projects.
     """
-
     def __init__(self, app: dash.Dash):
-        subpanels = [StudyPanel.PublicationPanel(app), StudyPanel.KeywordPanel(app)]
+        subpanels = [StudyPanel.PublicationPanel(app)]
         super().__init__(app, ti.DBTable.STUDY, 'study', subpanels)
 
     def _columns(self) -> List[ti.Column]:
-        """
-        Overridden to add a column indicating how many publications are associated with the study. Also, the
-        study description column is labelled 'Description - Keywords', and the keywords related to a study are listed
-        in the tooltip for each description cell.
-        """
+        """ Overridden to add a column indicating how many publications are associated with the study. """
         return([ti.Column('study_title', 'Project Title', '200px', False),
                 ti.Column('study_lead', 'Prj Lead', '100px', False),
-                ti.Column('study_desc', 'Description - Keywords', '700px', False),
+                ti.Column('study_desc', 'Description', '700px', False),
                 ti.Column('n_pubs', 'Pubs', '50px', False)])
 
     def _rows(self) -> List[Dict[str, ti.AttributeValue]]:
         """
-        Override to include information in cross-reference tables: The number of related publications is displayed in
-        the 'n_pubs' column. Keywords related to a research project are stored as as a comma-separated list in an
-        undisplayed column, and that keyword list is included in the tooltip for the 'study_desc' column. Publications
-        related to a project are listed in abbreviated form in a Markdown string in another undisplayed column, and
-        that serves as the tooltip for the 'n_pubs' column.
+        Override to include information in the publication cross-reference table: The number of related publications for
+        a study is displayed in the 'n_pubs' column. The related publications are listed in abbreviated form in a
+        Markdown string in another undisplayed column, and that serves as the tooltip for the 'n_pubs' column.
         """
         rows = super()._rows()
         study_to_pub = self._subpanels[0].current_mappings()
-        study_to_key = self._subpanels[1].current_mappings()
         for row in rows:
             study_id = row['study_id']
             row['n_pubs'] = str(len(study_to_pub[study_id])) if study_id in study_to_pub else "0"
-            row['keywords'] = row['n_pubs_tip'] = ""
-            if study_id in study_to_key:
-                row['keywords'] = ', '.join([alias.label for alias in study_to_key[study_id]])
+            row['n_pubs_tip'] = ""
             if study_id in study_to_pub:
                 row['n_pubs_tip'] = ""
                 for item in [alias.label for alias in study_to_pub[study_id]]:
@@ -1099,17 +1054,16 @@ class StudyPanel(_BasePanel):
 
     def _tooltip_data_for(self, data: List[Dict[str, ti.AttributeValue]]) -> List[dict]:
         """
-        Overridden to prepare tooltips for selected columns. For the 'study_desc' column, the tip lists the keywords
-        related to the study, followed by the full description text. For the 'n_pubs' column, the tip lists the
-        publication citations in an abbreviated format. The keyword and publication lists are prepared and stored in
-        undisplayed columns in _rows().
+        Overridden to prepare tooltips for selected columns. For the 'study_desc' column, the tip lists the full text of
+        the description. For the 'n_pubs' column, the tip lists the publication citations in an abbreviated format. The
+        publication citations are prepared and stored in an undisplayed column in _rows().
         """
         tips = []
         for row in data:
-            desc = 'N/A' if len(row['study_desc']) == 0 else row['study_desc'].replace('\n', '  \n')
-            keywords = 'N/A' if not row['keywords'] else row['keywords']
-            tip = f"**Keywords**: {keywords}\n\n**Description**: {desc}"
-            entry = {'study_desc': {'value': tip, 'type': 'markdown'}}
+            entry = dict()
+            if len(row['study_desc']) > 0:
+                desc = row['study_desc'].replace('\n', ' \n')
+                entry['study_desc'] = {'value': f"{desc}", 'type': 'markdown'}
             if row['n_pubs_tip']:
                 entry['n_pubs'] = {'value': row['n_pubs_tip'], 'type': 'markdown'}
             tips.append(entry)
@@ -1161,11 +1115,3 @@ class StudyPanel(_BasePanel):
                 else:
                     citation = (citation[:50] + '...')
             return _RowAlias({'pub_id': row['pub_id']}, citation, row['citation'] if truncated else None)
-
-    class KeywordPanel(_MappingSubPanel):
-        def __init__(self, app: dash.Dash):
-            super().__init__(app, ti.DBTable.STUDY_TO_KEY, 'key')
-
-        def _to_row_alias(self, row: Dict[str, ti.AttributeValue]) -> _RowAlias:
-            super()._to_row_alias(row)  # to validate argument
-            return _RowAlias({'kw_id': row['kw_id']}, row['keyword'], None)

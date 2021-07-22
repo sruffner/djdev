@@ -9,9 +9,11 @@ import pages.curate_panels as cp
 user_panel = cp.UserPanel(app)
 subj_panel = cp.SubjectPanel(app)
 rig_panel = cp.RigPanel(app)
-brain_panel = cp.BrainRegionPanel(app)
+brain_panel = cp.BrainAreaPanel(app)
+n_type_panel = cp.NeuronTypePanel(app)
 study_panel = cp.StudyPanel(app)
-tab_to_panel = {f"{p.id_prefix()}_tab": p for p in [user_panel, subj_panel, rig_panel, brain_panel, study_panel]}
+tab_to_panel = {f"{p.id_prefix()}_tab": p
+                for p in [user_panel, subj_panel, rig_panel, brain_panel, n_type_panel, study_panel]}
 
 tabs_card = dbc.Card(
     [

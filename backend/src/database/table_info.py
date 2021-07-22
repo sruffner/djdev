@@ -167,20 +167,17 @@ class DBTable(DocEnum):
     RIG = 4, "Table of experiment rigs"
     BRAIN_AREA = 5, "Table of brain regions"
     NEURON_TYPE = 6, "Table of neuron types"
-    BRAIN_AREA_TO_NEURON_TYPE = 7, "Cross-reference table: Brain region to neuron type"
-    STUDY = 8, "Table of research projects/studies"
-    KEYWORD = 9, "Table of research keywords"
-    PUB = 10, "Table of research publications"
-    STUDY_TO_KEY = 11, "Cross-reference table: Research study to keyword"
-    STUDY_TO_PUB = 12, "Cross-reference table: Research study to publication"
-    SESSION = 13, "Table of experiment sessions"
-    SESSION_EPHYS = 14, "Part table: Electrophysiology recording metadata for an experiment session"
-    SESSION_NEURON = 15, "Part table: Neural units recorded during an experiment session"
-    TRIAL_PROTOCOL = 16, "Table of trial protocol definitions"
-    TRIAL = 17, "Table of individual trial response data"
-    TRIAL_EVENT = 18, "Part table: Marker events recorded in a trial"
-    TRIAL_BEHAVIORAL = 19, "Part table: Behavioral responses recorded in a trial"
-    TRIAL_NEURONAL = 20, "Part table: Neural unit responses recorded in a trial"
+    STUDY = 7, "Table of research projects/studies"
+    PUB = 8, "Table of research publications"
+    STUDY_TO_PUB = 9, "Cross-reference table: Research study to publication"
+    SESSION = 10, "Table of experiment sessions"
+    SESSION_EPHYS = 11, "Part table: Electrophysiology recording metadata for an experiment session"
+    SESSION_NEURON = 12, "Part table: Neural units recorded during an experiment session"
+    TRIAL_PROTOCOL = 13, "Table of trial protocol definitions"
+    TRIAL = 14, "Table of individual trial response data"
+    TRIAL_EVENT = 15, "Part table: Marker events recorded in a trial"
+    TRIAL_BEHAVIORAL = 16, "Part table: Behavioral responses recorded in a trial"
+    TRIAL_NEURONAL = 17, "Part table: Neural unit responses recorded in a trial"
 
     def is_mapping_table(self) -> bool:
         """ Return True for a cross-reference table. """
@@ -402,13 +399,6 @@ _table_info: Dict[DBTable, _TableInfo] = {
                 'Enter a concise name or abbreviation for neuron cell type (unique, 3-50 characters)')
         }),
 
-    DBTable.BRAIN_AREA_TO_NEURON_TYPE: _TableInfo(
-        '', '', None, True, False,
-        attributes={
-            'ba_id': AttrInfo(AttrTypeEnum.FKEY, 'Area ID', True, DBTable.BRAIN_AREA, 'ba_id'),
-            'nt_id': AttrInfo(AttrTypeEnum.FKEY, 'Type ID', True, DBTable.NEURON_TYPE, 'nt_id')
-        }),
-
     DBTable.STUDY: _TableInfo(
         'Research projects', 'project', None, False, True,
         attributes={
@@ -423,16 +413,6 @@ _table_info: Dict[DBTable, _TableInfo] = {
                 'Enter a description of the research project (optional, up to 2048 chars)')
         }),
 
-    DBTable.KEYWORD: _TableInfo(
-        'Research keywords', 'keyword', None, False, True,
-        attributes={
-            'kw_id': AttrInfo(AttrTypeEnum.AUTO, 'ID#', True),
-            'keyword': AttrInfo(
-                AttrTypeEnum.TEXT, 'Keyword', False, None, None, None, '550px', [3, 50], r'^[\w .-]{3,50}$',
-                'May only contain Unicode word characters, digits, and select punctuation',
-                'Enter new, unique keyword or phrase (3-50 characters)')
-        }),
-
     DBTable.PUB: _TableInfo(
         'Research publications', 'publication', None, False, True,
         attributes={
@@ -443,13 +423,6 @@ _table_info: Dict[DBTable, _TableInfo] = {
             'doi': AttrInfo(
                 AttrTypeEnum.TEXT, 'DOI', False, None, None, None, '100px', [0, 100], r'[\s\S]*', None,
                 "Enter publication's digital object ID (optional; 100 chars max)")
-        }),
-
-    DBTable.STUDY_TO_KEY: _TableInfo(
-        '', '', None, True, False,
-        attributes={
-            'study_id': AttrInfo(AttrTypeEnum.FKEY, 'Study', True, DBTable.STUDY, 'study_id'),
-            'kw_id': AttrInfo(AttrTypeEnum.FKEY, 'Keyword', True, DBTable.KEYWORD, 'kw_id')
         }),
 
     DBTable.STUDY_TO_PUB: _TableInfo(

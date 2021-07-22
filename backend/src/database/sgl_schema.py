@@ -41,9 +41,9 @@ development efforts
 
 A dynamic web application will serve as the primary interface to the DJ-administered lab database and its associated
 raw data repository. This web application will allow an authorized user to perform a variety of tasks:
-    1. Add new entities to the various "metadata" tables in the schema -- Lab, User, Subject, Rig, Study, Publication,
-    BrainArea, NeuronType, and so on. All of the changes in these relatively small, simple tables are recorded in a
-    log file in $DATA_ROOT/logs so that the database can be reconstructed from scratch.
+    1. Add new entities to the various "metadata" tables in the schema -- User, Subject, and so on. All of the changes
+    in these relatively small, simple tables are recorded in a  log file in $DATA_ROOT/logs so that the database can be
+    reconstructed from scratch.
     2. Upload the raw data files from an experiment session and digest them via helper scripts and the pipeline code.
     This is the most complex and time-consuming task. For each experiment a new Session entity is inserted into the
     database, plus any new TrialProtocols discovered. If neural activity was recorded during the session, an entity
@@ -51,20 +51,16 @@ raw data repository. This web application will allow an authorized user to perfo
     session, an entity is added to the Trial table and its part tables to store the behavioral and neural responses
     during each trial, all aligned on trial start. The Trial table and its parts is by far the largest table in the lab
     database, and it is the only table that is 'auto-populated'.
-    3. (LATER) Explore the lab database, show summary reports for a given experiment session, perform certain analyses
-    on selected datasets, export selected datasets for external use.
+    3. Explore the lab database, show summary reports for a given experiment session, perform certain analyses on
+    selected datasets, export selected datasets for external use.
 
 To simplify initial development, we are making a number of assumptions:
     1) Any electrophysiological recordings are performed with the Omniplex system recording "wide-band" data in a
     single large PL2 file. Later we'll develop methods to extract neural data from the older Plexon MAP system, from
     Plexon MAP and Omniplex "clips", and from neural response data recorded directly in the Maestro trial data files.
     2) The experimenter must supply their "spike sorting" results. This is because every researcher seems to use their
-    own spike sorting algorithm, and in some situations "by eye" spike editing happens. TODO: We still need to specify
-    the exact format for the spike train data. Anticipate that spike occurrence times will be in the Omniplex timeline.
-    Need to fully identify the Omniplex channel from which the spike train was extracted. In order to map spikes from a
-    neural unit to the timeline of any particular trial, we need to read the large PL2 files, which will contain the
-    trial sync pulses (record start, stop, trial name, etc)
-
+    own spike sorting algorithm, and in some situations "by eye" spike editing happens. Currently, neural unit
+    information and spike train data is supplied in a pickle file. See manager.py for details.
 
 Created on Wed Jun  3 14:13:38 2020
 
@@ -162,44 +158,15 @@ class NeuronType(dj.Manual):
 
 
 @schema
-class BrainAreaNeuronType(dj.Manual):
-    definition = """
-    # Neuron types in a particular brain regions (a given neuron type may be found in more than one brain area)
-    -> BrainArea
-    -> NeuronType
-    """
-
-
-@schema
 class Study(dj.Manual):
     definition = """
     # Research projects/studies conducted in the laboratory
     study_id: int auto_increment        # Opaque ID# for brevity (not intended for display)
     ---
     study_title : varchar(50)           # Abbreviated project title. Must be unique.
-    (study_lead) -> User                # Lab member with primary responsibility for the study
+    -> User.proj(study_lead='username') # Lab member with primary responsibility for the study
     study_desc : varchar(2048)          # A fuller description of the project
     unique index (study_title)
-    """
-
-
-@schema
-class Keyword(dj.Manual):
-    definition = """
-    # Keywords categorizing laboratory research
-    kw_id : int auto_increment          # Opaque ID# for brevity (not intended for display)
-    ---
-    keyword : varchar(80)             # The keyword or phrase. Must be unique.
-    unique index (keyword)
-    """
-
-
-@schema
-class StudyKeyword(dj.Manual):
-    definition = """
-    # Keywords associated with particular research studies in the laboratory
-    -> Study
-    -> Keyword
     """
 
 
@@ -252,14 +219,14 @@ class Session(dj.Manual):
     """
     definition = """
     # Experimental sessions conducted in the laboratory
-    (experimenter) -> User              # The user conducting the experiment
-    -> Subject                          # The animal subject for the session
-    session_date : date                 # Date of session
-    session_sfx : tinyint unsigned      # To distinguish multiple sessions on the same date (range [0..9])
+    -> User.proj(experimenter='username')  # The user conducting the experiment
+    -> Subject                             # The animal subject for the session
+    session_date : date                    # Date of session
+    session_sfx : tinyint unsigned         # To distinguish multiple sessions on the same date (range [0..9])
     ---
-    -> Rig                              # The lab rig on which experiment session was conducted
-    -> Study                            # The research project with which this session is associated
-    session_notes : varchar(2048)       # Notes about session
+    -> Rig                                 # The lab rig on which experiment session was conducted
+    -> Study                               # The research project with which this session is associated
+    session_notes : varchar(2048)          # Notes about session
     """
 
     class EPhys(dj.Part):
@@ -286,14 +253,14 @@ class Session(dj.Manual):
         definition = """
         # Distinct neural units culled from extracellular recordings during an experimental session
         -> master
-        unit_id : smallint                  # Unique ID assigned to unit
+        unit_id : smallint                     # Unique ID assigned to unit
         ---
-        unit_channel : varchar(10)          # ID/label for source channel on which unit was recorded
-        (unit_type) -> NeuronType           # Identified neuron type
-        unit_rate : float                   # Mean firing rate of neural unit while held (in Hz)
-        unit_spikes : int unsigned          # total number of spikes recorded
-        unit_snr : float                    # Signal-to-noise ratio (indication of quality of recording?)
-        unit_template : blob                # Average spike waveform template
+        unit_channel : varchar(10)             # ID/label for source channel on which unit was recorded
+        -> NeuronType.proj(unit_type='nt_id')  # Identified neuron type
+        unit_rate : float                      # Mean firing rate of neural unit while held (in Hz)
+        unit_spikes : int unsigned             # total number of spikes recorded
+        unit_snr : float                       # Signal-to-noise ratio (indication of quality of recording?)
+        unit_template : blob                   # Average spike waveform template
         """
 
 

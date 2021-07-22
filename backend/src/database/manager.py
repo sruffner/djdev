@@ -168,11 +168,8 @@ _table_map: Dict[DBTable, dj.Table] = {
     DBTable.RIG: sgl.Rig(),
     DBTable.BRAIN_AREA: sgl.BrainArea(),
     DBTable.NEURON_TYPE: sgl.NeuronType(),
-    DBTable.BRAIN_AREA_TO_NEURON_TYPE: sgl.BrainAreaNeuronType(),
     DBTable.STUDY: sgl.Study(),
-    DBTable.KEYWORD: sgl.Keyword(),
     DBTable.PUB: sgl.Publication(),
-    DBTable.STUDY_TO_KEY: sgl.StudyKeyword(),
     DBTable.STUDY_TO_PUB: sgl.StudyPublication(),
     DBTable.SESSION: sgl.Session(),
     DBTable.SESSION_EPHYS: sgl.Session.EPhys(),
@@ -214,65 +211,6 @@ class DataBaseManager:
             """ Lock object guarding access to the database itself. """
             self._session_commit_lock: threading.Lock = threading.Lock()
             """ Lock object used to queue the session commit tasks. """
-
-    def on_startup(self) -> Optional[str]:
-        """
-        Perform any operations that must take place when the backend server starts up.
-
-        Currently, this method will 'seed' the database if it is empty and a JSON seed file is found. Otherwise, it does
-        nothing.
-
-        Returns:
-            None if successful, else an error description. On failure, the database is unusable and the backend
-            server should cease operation.
-        """
-        return self._seed_database_if_empty()
-
-    def _seed_database_if_empty(self) -> Optional[str]:
-        """
-        Seed the lab database if it is empty and a JSON seed file 'seed_data.txt' is available in the backend's code
-        base at './assets/seed_data.txt'. The database is assumed to be empty if the "Users" table is empty.
-
-        The seed file contains a sequence of JSON objects separated by whitespace (a linefeed or CRLF pair). Each object
-        defines an entity to be added to the lab database. It has the following format:
-            { "table": "<table name>", "entry": {<entry definition>}}
-        The <table name> must exactly match one of nine manual tables in the SGL database schema: "User", "Subject",
-        "SubjectImplant", "Rig", "BrainArea", "NeuronType", "Study", "Publication", and "Keyword".
-        The <entry definition> is the set of attribute name-value pairs defining the new table "row". For example, to
-        add a new user:
-            { "table": "User", "entry": {"username": "sruffner", "full_name": "Scott A Ruffner",
-            "contact_email": "sruffner@srscicomp.com", "role": "Administrator"}
-
-        THIS METHOD IS INTENDED ONLY FOR USE DURING DEVELOPMENT, so that we can populate some of the manual tables with
-        some entries after dropping and recreating the database.
-
-        The entries listed in the seed file are assumed to be presented in a valid order. For example, a subject is
-        added to the Subject table before any implants for that subject are added to the SubjectImplant table. Also,
-        each entry's attribute name-value pairs are assumed to be valid. If not, the add operation may fail.
-
-        Returns:
-            None if successful (or database was not empty, or no seed file found); else an error description.
-        """
-        if self.num_table_rows(DBTable.USER) > 0:
-            return None
-
-        name_to_table_id = {
-            "User": DBTable.USER, "Subject": DBTable.SUBJECT, "SubjectImplant": DBTable.IMPLANT,
-            "Rig": DBTable.RIG, "BrainArea": DBTable.BRAIN_AREA, "NeuronType": DBTable.NEURON_TYPE,
-            "Study": DBTable.STUDY, "Publication": DBTable.PUB, "Keyword": DBTable.KEYWORD
-        }
-        json_decoder = JSONDecoder()
-        try:
-            with open('./assets/seed_data.txt', 'r') as file_obj:
-                for add_dict in json_parse(file_obj, json_decoder):
-                    if isinstance(add_dict, dict) and ("table" in add_dict) and ("entry" in add_dict) \
-                            and (add_dict["table"] in name_to_table_id):
-                        err_msg = self.insert_into_table(name_to_table_id[add_dict["table"]], add_dict["entry"])
-                        if err_msg:
-                            raise Exception(err_msg)
-        except Exception as e:
-            return f"Failed to seed database: {e}"
-        return None
 
     @staticmethod
     def _log_file_path() -> Path:
