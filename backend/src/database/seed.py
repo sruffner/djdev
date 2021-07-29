@@ -14,11 +14,15 @@ object defines an entity to be added to the lab database. It has the following f
  The <table name> must exactly match one of eight manual tables in the SGL database schema: "User", "Subject",
  "SubjectImplant", "Rig", "BrainArea", "NeuronType", "Study", and "Publication". The <entry definition> is the set of
  attribute name-value pairs defining the new table "row". For example, to add a new user:
-    { "table": "User", "entry": {"username": "sruffner", "full_name": "Scott A Ruffner",
-      "contact_email": "sruffner@srscicomp.com", "role": "Administrator"}
+    { "table": "User", "entry": {"username": "sruffner", "access": "admin", "full_name": "Scott A Ruffner",
+      "contact_email": "sruffner@srscicomp.com"}
 
 In typical usage, this script will be invoked immediately after resetting the database with reset.py. It will take no
-action if the database is not empty. The database is considered empty if the User table is empty.
+action if the database is not empty.
+
+The script will require user input for each entry added to the User table. That table stores the encrypted password of
+each registered portal user, and we do not want to store plain-text passwords in any code or other file that may end up
+in the project Gitlab repository. For each user registered by the script, it will prompt for that user's password.
 
 Usage: Bring up the Docker Compose application that includes the 'db' and 'backend' services in the normal way. Stop
 the 'backend' service with 'docker-compose stop backend'. Run this script as a one-time command against the 'backend'
@@ -30,6 +34,9 @@ service with 'docker-compose restart backend'.
 """
 import sys
 import os
+from getpass import getpass
+from typing import Optional
+
 import datajoint as dj
 
 # DataJoint configuration parameters required to connect to the database. In the portal backend server, these are
@@ -49,14 +56,14 @@ from database.table_info import DBTable
 
 # here is the seed data IAW the current lab database schema defined in sgl_schema.py
 _seed_list = [
-    {"table": "User", "entry": {"username": "sruffner", "full_name": "Scott A Ruffner",
-                                "contact_email": "sruffner@srscicomp.com", "role": "Administrator"}},
-    {"table": "User", "entry": {"username": "dherzfeld", "full_name": "David J Herzfeld",
-                                "contact_email": "david.herzfeld@duke.edu", "role": "Post Doctoral Researcher"}},
-    {"table": "User", "entry": {"username": "nhall", "full_name": "Nathan Hall",
-                                "contact_email": "nathan.halld@duke.edu", "role": "Post Doctoral Researcher"}},
-    {"table": "User", "entry": {"username": "sgl", "full_name": "Stephen G Lisberger",
-                                "contact_email": "lisberger@neuro.duke.edu", "role": "Principal Investigator"}},
+    {"table": "User", "entry": {"username": "sruffner", "access": "admin", "full_name": "Scott A Ruffner",
+                                "contact_email": "sruffner@srscicomp.com"}},
+    {"table": "User", "entry": {"username": "dherzfeld", "access": "admin", "full_name": "David J Herzfeld",
+                                "contact_email": "david.herzfeld@duke.edu"}},
+    {"table": "User", "entry": {"username": "nhall", "access": "commit", "full_name": "Nathan Hall",
+                                "contact_email": "nathan.halld@duke.edu"}},
+    {"table": "User", "entry": {"username": "sgl", "access": "download", "full_name": "Stephen G Lisberger",
+                                "contact_email": "lisberger@neuro.duke.edu"}},
 
     {"table": "Rig", "entry": {"rig_id": "Rig 1", "rig_loc": "Vivarium (right front)"}},
     {"table": "Rig", "entry": {"rig_id": "Rig 2", "rig_loc": "Vivarium (right back)"}},
@@ -152,6 +159,33 @@ _seed_list = [
 ]
 
 
+def _prompt_for_password(username: str) -> Optional[str]:
+    """
+    Request a password for a portal user account to be added to the laboratory database. The method will prompt for the
+    password twice to guard against accidental typos and verify that it meets requirements. If not, it will prompt
+    again until an acceptable password is entered. It also gives the user the option to abort the script entirely by
+    entering 'q' after the password prompt.
+
+    Args:
+        username: The username for the new account.
+    Returns:
+        A valid password for the account, or None if the user elected to abort the script.
+    """
+    while True:
+        new_password = getpass(f"Enter the password for user '{username}', or 'q' to abort script > ")
+        if new_password == 'q':
+            return None
+        confirm_new = getpass('Reenter password to confirm > ')
+        if confirm_new != new_password:
+            print("   Password mismatch... Try again.", file=sys.stdout, flush=True)
+        else:
+            res = db_mgr.validate_password(new_password)
+            if res is None:
+                return new_password
+            else:
+                print(f"   {str(res)}... Try again.", file=sys.stdout, flush=True)
+
+
 if __name__ == '__main__':
     print("seed.py: Seed empty Lisberger lab database with some initial table entries (DEV USE ONLY)...\n\n",
           file=sys.stdout, flush=True)
@@ -161,14 +195,29 @@ if __name__ == '__main__':
         "Rig": DBTable.RIG, "BrainArea": DBTable.BRAIN_AREA, "NeuronType": DBTable.NEURON_TYPE,
         "Study": DBTable.STUDY, "Publication": DBTable.PUB
     }
+
     db_mgr = DataBaseManager()
-    if db_mgr.num_table_rows(DBTable.USER) > 0:
-        print("The database is not empty (at least one user found). No action taken!", file=sys.stdout, flush=True)
+    err_msg = db_mgr.database_empty()
+    if err_msg is not None:
+        print(f"ERROR: {str(err_msg)}.\n  The database must be completely empty prior to seeding. Aborting...",
+              file=sys.stdout, flush=True)
+        exit(0)
+
     try:
         for add_dict in _seed_list:
             if isinstance(add_dict, dict) and ("table" in add_dict) and ("entry" in add_dict) \
                     and (add_dict["table"] in name_to_table_id):
-                err_msg = db_mgr.insert_into_table(name_to_table_id[add_dict["table"]], add_dict["entry"])
+                table_id = name_to_table_id[add_dict['table']]
+                entry = add_dict['entry']
+                # special case: Registering a new user. Need to prompt for password.
+                if table_id == DBTable.USER:
+                    password = _prompt_for_password(entry['username'])
+                    if password is None:
+                        raise Exception(f"Aborted script on request.")
+                    err_msg = db_mgr.register_new_portal_user(
+                        entry['username'], password, entry['access'], entry['full_name'], entry['contact_email'])
+                else:
+                    err_msg = db_mgr.insert_into_table(table_id, entry)
                 if err_msg:
                     raise Exception(err_msg)
         print(f"Done. Database seeded with {len(_seed_list)} table entries.", file=sys.stdout, flush=True)

@@ -84,7 +84,7 @@ def serve_layout() -> html.Div:
 
     # alert raised when system fails to save a profile change - displays a brief error message. Otherwise hidden.
     form_groups.append(dbc.FormGroup(
-        dbc.Alert("", id=_PROFILE_ALERT_ID, dismissable=True, duration=10000, fade=True, is_open=False)
+        dbc.Alert("", id=_PROFILE_ALERT_ID, dismissable=True, fade=True, is_open=False)
     ))
 
     profile_card = dbc.Card([
@@ -114,7 +114,7 @@ def serve_layout() -> html.Div:
 
     # alert raised when a password change fails - displays a brief error message. Otherwise hidden.
     form_groups.append(dbc.FormGroup(
-        dbc.Alert("", id=_PWD_ALERT_ID, dismissable=True, duration=10000, fade=True, is_open=False)
+        dbc.Alert("", id=_PWD_ALERT_ID, dismissable=True, fade=True, is_open=False)
     ))
 
     password_card = dbc.Card([

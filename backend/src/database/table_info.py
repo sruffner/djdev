@@ -195,6 +195,11 @@ class DBTable(DocEnum):
         """ Return True for a part table. """
         return not (_table_info[self].parent is None)
 
+    def allow_delete(self) -> bool:
+        """ Return True if user-initiated deletions from table are permitted. User-initiated deletions are not
+        permitted for the Session, Trial, and TrialProtocol tables (and their part tables). """
+        return self.value < DBTable.SESSION.value
+
 
 @dataclass(frozen=True)
 class Column:
@@ -231,6 +236,8 @@ class AttrTypeEnum(DocEnum):
     BLOB = 7, "An opaque binary blob, using a Numpy array or bytes array as a value"
     AUTO = 8, "An auto-incrementing integer-valued key (must be a primary key)"
     FKEY = 9, "A foreign key (parent table and attribute ID within that table must be specified"
+    PWD = 10, "A string-valued attribute that serves as a password."
+    TIME = 11, "A timestamp (date and time to the second, localized)."
 
 
 @dataclass(frozen=True)
@@ -265,6 +272,8 @@ class AttrInfo:
 
         'placeholder' - Brief string intended as placeholder for attribute value in an input widget; it should
         characterize the domain of valid attribute values. Not applicable to all attribute types.
+
+        'nullable' - If True, the attribute is nullable, meaning it need not be specified.
     """
     type: AttrTypeEnum
     label: str
@@ -277,6 +286,7 @@ class AttrInfo:
     regex: Optional[str] = None
     regex_hint: Optional[str] = None
     placeholder: Optional[str] = None
+    nullable: bool = False
 
 
 @dataclass(frozen=True)
@@ -309,12 +319,17 @@ class _TableInfo:
 
 _table_info: Dict[DBTable, _TableInfo] = {
     DBTable.USER: _TableInfo(
-        'Lab members', 'member', None, False, True,
+        'Registered portal users', 'user', None, False, False,
         attributes={
             'username': AttrInfo(
                 AttrTypeEnum.TEXT, 'Username', True, None, None, None, '100px', [3, 20], r"^[a-z]{1}[a-z0-9]{2,19}$",
                 'Contains an invalid character or does not start with lowercase a-z',
                 'Enter username (unique, lowercase a-z or digit, 3-20 characters)'),
+            'password': AttrInfo(
+                AttrTypeEnum.PWD, 'Password', False, None, None, None, '0px', [8, 32]),
+            'access': AttrInfo(
+                AttrTypeEnum.ENUM, 'Access Level', False, None, None,
+                ["admin", "commit", "download"], '75px'),
             'full_name': AttrInfo(
                 AttrTypeEnum.TEXT, 'Full Name', False, None, None, None, '150px', [3, 50],
                 r"^[A-Z][a-zA-Z'-]{3,}(?: [A-Z][a-zA-Z'-]*){0,2}$",
@@ -324,9 +339,15 @@ _table_info: Dict[DBTable, _TableInfo] = {
                 AttrTypeEnum.TEXT, 'Email Address', False, None, None, None, '200px', [7, 80],
                 r'^[A-Za-z0-9._+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,6}$',
                 'Does not appear to be a valid email address', 'Enter email address (80 chars max)'),
-            'role': AttrInfo(
-                AttrTypeEnum.ENUM, 'Role', False, None, None,
-                ["Principal Investigator", "Post Doctoral Researcher", "Graduate Student", "Administrator"], '150px')
+            'title': AttrInfo(
+                AttrTypeEnum.TEXT, 'Position', False, None, None, None, '150px', [0, 50], r'[\s\S]*', None,
+                "Enter title/position (optional, 0-50 chars; eg, 'PostDoc')", True),
+            'organization': AttrInfo(
+                AttrTypeEnum.TEXT, 'Organization', False, None, None, None, '150px', [0, 50], r'[\s\S]*', None,
+                "Enter organization name (optional, 0-50 chars; eg, 'Duke University')", True),
+            'registered': AttrInfo(AttrTypeEnum.TIME, 'Registered On', False),
+            'last_login': AttrInfo(AttrTypeEnum.TIME, 'Last Login', False),
+            'pwd_changed': AttrInfo(AttrTypeEnum.TIME, 'Last Password Change', False)
         }),
 
     DBTable.SUBJECT: _TableInfo(

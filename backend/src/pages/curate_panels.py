@@ -880,12 +880,6 @@ class _MappingSubPanel(_BasePanel):
         return error_msg if error_msg else ""
 
 
-class UserPanel(_BasePanel):
-    """ This panel provides interactive access to the manual table listing users in the Lisberger lab database. """
-    def __init__(self, app: dash.Dash):
-        super().__init__(app, ti.DBTable.USER, 'usr')
-
-
 class RigPanel(_BasePanel):
     """ This panel provides interactive access to experiment rigs in the lab database. """
     def __init__(self, app: dash.Dash):

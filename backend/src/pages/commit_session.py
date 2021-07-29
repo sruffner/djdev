@@ -30,9 +30,10 @@ import dash_html_components as html
 import dash_core_components as dcc
 import dash_bootstrap_components as dbc
 import dash_uploader as du
+import flask_login
 from dash.dependencies import Input, Output, State
 import plotly.express as px
-from app import app
+from app import app, load_authorized_user
 import json
 import uuid
 
@@ -363,7 +364,16 @@ class _SessionCommitter:
                     client_state['stage'] = 1
                     client_state['task_id'] = ""
 
-            ok, task_id_or_err = session_builder.initiate_session_commit()
+            # must pass login username to initiate session commit
+            username = ""
+            if flask_login.current_user.is_authenticated:
+                portal_user = load_authorized_user(flask_login.current_user.get_id())
+                if (portal_user is None) or not portal_user.can_commit_to_database():
+                    return dash.no_update
+                else:
+                    username = portal_user.get_id()
+
+            ok, task_id_or_err = session_builder.initiate_session_commit(username)
             if ok:
                 client_state = {'stage': 2, 'task_id': task_id_or_err}
                 return json.dumps(client_state)

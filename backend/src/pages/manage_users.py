@@ -21,8 +21,7 @@ import flask_login
 from app import app, PortalUser, load_authorized_user
 
 import database.table_info as ti
-from database import sgl_auth
-from database.manager import DataBaseManager
+from database.manager import DataBaseManager, ACCESS_LEVELS, DOWNLOAD_ACCESS
 
 _USER_TABLE_ID: str = "user-account-table"
 """ The ID assigned to the Dash DataTable presenting all user accounts registered on the Lisberger lab portal. """
@@ -33,6 +32,7 @@ _USER_TABLE_COLS: List[ti.Column] = [
     ti.Column('access', 'Privileges', '60px', False),
     ti.Column('registered', 'Registered', '75px', False),
     ti.Column('last_login', 'Last Login', '150px', False),
+    ti.Column('pwd_changed', 'Password Updated', '75px', False)
 ]
 """ Defined columns for the user accounts table. Multiple attributes listed in 'profile' column. """
 
@@ -42,7 +42,7 @@ _DELETE_BTN: str = "delete-btn"
 """ ID of button that deletes a selected user account. """
 _UPDATE_ACCESS_DROP: str = "update-access-drop"
 """ ID of DropdownMenu widget used to change the access level of a selected user account. """
-_ACCESS_DROP_ITEMS: List[str] = [f"{level}-drop-item" for level in sgl_auth.ACCESS_LEVELS]
+_ACCESS_DROP_ITEMS: List[str] = [f"{level}-drop-item" for level in ACCESS_LEVELS]
 """ IDs of the items in the DropdownMenu widget used to chang eh access level of a selected user account. """
 _OP_ALERT_ID: str = "op-alert"
 """ ID of Bootstrap Alert that displays error message at top of page after a user account management operation. """
@@ -78,6 +78,7 @@ def _fetch_user_table_rows() -> Union[str, List[Dict[str, str]]]:
     if isinstance(rows, list):
         for row in rows:
             row['registered'] = str(row['registered']).split()[0]  # only want the registration date
+            row['pwd_changed'] = str(row['pwd_changed']).split()[0]  # same for last password change
             row['last_login'] = "Never" if (row['last_login'] is None) else str(row['last_login'])
             row['profile'] = f"**{row['full_name']}** ({row['contact_email']})\n" \
                              f"{row['title'] if row['title'] is not None else '--'}, " \
@@ -142,7 +143,7 @@ def serve_layout() -> html.Div:
         dbc.InputGroupAddon("Set access", addon_type="prepend"),
         dbc.DropdownMenu(
             children=[dbc.DropdownMenuItem(k.split('-')[0], id=k, n_clicks=0) for k in _ACCESS_DROP_ITEMS],
-            id=_UPDATE_ACCESS_DROP, label=sgl_auth.READONLY_ACCESS, color='primary', disabled=True)
+            id=_UPDATE_ACCESS_DROP, label=DOWNLOAD_ACCESS, color='primary', disabled=True)
     ], className='ml-2')
     edit_row_inline_form = dbc.Form(
         [
@@ -174,8 +175,8 @@ def serve_layout() -> html.Div:
     form_groups.append(dbc.FormGroup([dbc.Label("Email Address", width=2), dbc.Col(entry_widget, width=10)], row=True))
     entry_widget = dbc.Select(
         id=_ACCESS_SELECT_ID,
-        options=[{"label": opt, "value": opt} for opt in sgl_auth.ACCESS_LEVELS],
-        value=sgl_auth.READONLY_ACCESS
+        options=[{"label": opt, "value": opt} for opt in ACCESS_LEVELS],
+        value=DOWNLOAD_ACCESS
     )
     form_groups.append(dbc.FormGroup([dbc.Label("Access Level", width=2), dbc.Col(entry_widget, width=10)], row=True))
     entry_widget = dbc.Input(
@@ -231,7 +232,7 @@ def select_row_callback(selection, rows):
         portal_user = load_authorized_user(flask_login.current_user.get_id())
 
     if (row is None) or (portal_user is None) or (not portal_user.is_admin()):
-        return True, sgl_auth.READONLY_ACCESS, True
+        return True, DOWNLOAD_ACCESS, True
     else:
         is_admin = (row['access'] == 'admin')
         return is_admin, row['access'], is_admin
@@ -325,14 +326,14 @@ def register_user_callback(*args):
         return tuple(out)
 
     if trigger_id == _REG_MODAL_ID:
-        out = ["", "", "", sgl_auth.READONLY_ACCESS, "", "", "", "success", False]
+        out = ["", "", "", DOWNLOAD_ACCESS, "", "", "", "success", False]
     else:
         if args[6] != args[7]:
             out[6:9] = ['Password mismatch. Try again.', 'danger', True]
         else:
             error_msg = DataBaseManager().register_new_portal_user(args[2], args[6], args[5], args[3], args[4])
             if error_msg is None:
-                out = ["", "", "", sgl_auth.READONLY_ACCESS, "", "", "User registered successfully.", 'success', True]
+                out = ["", "", "", DOWNLOAD_ACCESS, "", "", "User registered successfully.", 'success', True]
             else:
                 out[6:9] = [error_msg, 'danger', True]
     return tuple(out)

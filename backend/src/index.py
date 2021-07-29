@@ -107,14 +107,13 @@ def _serve_layout() -> html.Div:
     login_btn_style = None
     drop_menu_style = dict(display='none')
     drop_menu_label = "Welcome"
-    can_curate = can_commit = is_admin = False
+    can_commit = is_admin = False
     if flask_login.current_user.is_authenticated:
         portal_user = load_authorized_user(flask_login.current_user.get_id())
         if portal_user is not None:
             login_btn_style = dict(display='none')
             drop_menu_style = None
             drop_menu_label = f"Welcome, {portal_user.first_name()}"
-            can_curate = portal_user.can_curate_database()
             can_commit = portal_user.can_commit_to_database()
             is_admin = portal_user.is_admin()
 
@@ -130,12 +129,12 @@ def _serve_layout() -> html.Div:
                             children=[
                                 dbc.DropdownMenuItem("What do you want to do?", header=True),
                                 dbc.DropdownMenuItem("Explore the database", href="/explore"),
-                                dbc.DropdownMenuItem("Curate lab information (access restricted)", id=_LINK_CURATE_ID,
-                                                     href="/curate", disabled=not can_curate),
+                                dbc.DropdownMenuItem(divider=True),
                                 dbc.DropdownMenuItem("Commit experiment session (access restricted)",
                                                      id=_LINK_COMMIT_ID, href="/commit_session",
                                                      disabled=not can_commit),
-                                dbc.DropdownMenuItem(divider=True),
+                                dbc.DropdownMenuItem("Curate lab information (administrators only)", id=_LINK_CURATE_ID,
+                                                     href="/curate", disabled=not is_admin),
                                 dbc.DropdownMenuItem("Manage user accounts (administrators only)", href='/manage_users',
                                                      id=_LINK_USERS_ID, disabled=not is_admin),
                                 dbc.DropdownMenuItem(divider=True),
@@ -181,15 +180,14 @@ def display_page(pathname, n_intervals, current_href):
         url_parts = urlparse(current_href) if isinstance(current_href, str) else ""
         if url_parts.path in ['/explore', '/neurons', '/home', '/']:
             return dash.no_update, dash.no_update, False
-        can_curate = can_commit = is_admin = is_logged_in = False
+        can_commit = is_admin = is_logged_in = False
         if flask_login.current_user.is_authenticated:
             portal_user = load_authorized_user(flask_login.current_user.get_id())
             if portal_user:
                 is_logged_in = True
-                can_curate = portal_user.can_curate_database()
                 can_commit = portal_user.can_commit_to_database()
                 is_admin = portal_user.is_admin()
-        if ((url_parts.path == '/curate') and not can_curate) or \
+        if ((url_parts.path == '/curate') and not is_admin) or \
                 ((url_parts.path == '/commit_session') and not can_commit) or \
                 ((url_parts.path == '/manage_users') and not is_admin) or (not is_logged_in):
             url_parts = [(part if i != 2 else '/home') for i, part in enumerate(url_parts)]
@@ -202,17 +200,16 @@ def display_page(pathname, n_intervals, current_href):
     elif pathname == '/neurons':
         layout = neurons.serve_layout()
     else:
-        can_curate = can_commit = is_admin = is_logged_in = False
+        can_commit = is_admin = is_logged_in = False
         if flask_login.current_user.is_authenticated:
             portal_user = load_authorized_user(flask_login.current_user.get_id())
             if portal_user:
                 is_logged_in = True
-                can_curate = portal_user.can_curate_database()
                 can_commit = portal_user.can_commit_to_database()
                 is_admin = portal_user.is_admin()
         if pathname == '/curate':
-            layout = curate.layout if can_curate else None
-            redirect = not can_curate
+            layout = curate.layout if is_admin else None
+            redirect = not is_admin
         elif pathname == '/commit_session':
             layout = commit_session.layout if can_commit else None
             redirect = not can_commit
@@ -223,7 +220,7 @@ def display_page(pathname, n_intervals, current_href):
             layout = manage_users.serve_layout() if is_admin else None
             redirect = not is_admin
         else:
-            layout = home.serve_layout(can_curate, can_commit)
+            layout = home.serve_layout(is_admin, can_commit)
             redirect = not (pathname in ['/', '/home'])   # eg, someone enters a bogus path manually
     update_href = dash.no_update
     if redirect:
@@ -267,7 +264,7 @@ def login_callback(*args):
             out[3] = f"Welcome, {portal_user.first_name()}"
             out[4] = None
             out[5] = dict(display='none')
-            out[6] = not portal_user.can_curate_database()
+            out[6] = not portal_user.is_admin()
             out[7] = not portal_user.can_commit_to_database()
             out[8] = not portal_user.is_admin()
             out[9] = ""

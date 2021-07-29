@@ -6,14 +6,13 @@ from app import app
 
 import pages.curate_panels as cp
 
-user_panel = cp.UserPanel(app)
 subj_panel = cp.SubjectPanel(app)
 rig_panel = cp.RigPanel(app)
 brain_panel = cp.BrainAreaPanel(app)
 n_type_panel = cp.NeuronTypePanel(app)
 study_panel = cp.StudyPanel(app)
 tab_to_panel = {f"{p.id_prefix()}_tab": p
-                for p in [user_panel, subj_panel, rig_panel, brain_panel, n_type_panel, study_panel]}
+                for p in [subj_panel, rig_panel, brain_panel, n_type_panel, study_panel]}
 
 tabs_card = dbc.Card(
     [
@@ -22,7 +21,7 @@ tabs_card = dbc.Card(
                 [dbc.Tab(label=panel.tab_label(), tab_id=tab_id) for tab_id, panel in tab_to_panel.items()],
                 id="tabs",
                 card=True, persistence=True, persistence_type="session",
-                active_tab=f"{user_panel.id_prefix()}_tab",
+                active_tab=f"{subj_panel.id_prefix()}_tab",
             )
         ),
         dbc.CardBody(id="sel-tab-content", children=[])

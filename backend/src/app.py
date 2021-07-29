@@ -45,8 +45,7 @@ if 'MYSQL_ROOT_PASSWORD' not in os.environ:
 dj.config['database.password'] = os.environ['MYSQL_ROOT_PASSWORD']
 
 # We have to put this AFTER configuring DJ, as importing manager.py will trigger initiating the DB connection
-from database.manager import DataBaseManager
-import database.sgl_auth as sgl_auth
+from database.manager import DataBaseManager, ADMIN_ACCESS, COMMIT_ACCESS
 
 # Setup for Flask-Login. Note we restrict session lifetimes to 24 hours.
 # TODO: We need to work on app configuration and put the SECRET_KEY in a safe place. One idea is to generate it on
@@ -72,13 +71,10 @@ class PortalUser(flask_login.UserMixin):
         return self.user_record['full_name'].split()[0]
 
     def is_admin(self) -> bool:
-        return self.user_record['access'] == 'admin'
-
-    def can_curate_database(self) -> bool:
-        return self.user_record['access'] in sgl_auth.CURATE_ACCESS
+        return self.user_record['access'] == ADMIN_ACCESS
 
     def can_commit_to_database(self) -> bool:
-        return self.user_record['access'] in sgl_auth.CONTRIBUTE_ACCESS
+        return self.user_record['access'] in COMMIT_ACCESS
 
     def full_name(self) -> str:
         return self.user_record['full_name']

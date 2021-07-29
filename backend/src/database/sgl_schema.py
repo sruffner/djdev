@@ -89,12 +89,18 @@ schema = dj.schema('sgl', connection=db_connection)
 @schema
 class User(dj.Manual):
     definition = """
-    # Members of a laboratory
+    # Registered users of the Lisberger lab portal
     username : varchar(20)              # Network login name
     ---
-    full_name : varchar(50)             # Full name of lab member. Recommend format as would appear in publication
-    contact_email : varchar(80)        # Email address
-    role : enum("Principal Investigator", "Post Doctoral Researcher", "Graduate Student", "Administrator")
+    password : char(93)                 # Password hash
+    access : enum("admin", "commit", "download")   # level of access to restricted portal functions
+    full_name : varchar(50)             # Full name
+    contact_email : varchar(80)         # Email address
+    title = NULL : varchar(50)          # Position description or title, eg, 'PostDoc, Lisberger Lab'
+    organization = NULL : varchar(50)   # University, research center, etc
+    registered : timestamp              # date/time that user was registered as an authorized user
+    last_login = NULL : timestamp       # date/time of user's last login
+    pwd_changed : timestamp             # date/time of user's last password change
     """
 
 

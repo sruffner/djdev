@@ -93,20 +93,25 @@ changes to the database since inception. Then, to rebuild the database from scra
 in the file one at a time.
 
 For any addition to a manual table, the entry identifies the table and includes the "row" added (as a dictionary). For
-any deletion from a table, the entry is similar, except the row need only be identified by the primary key. When an
-experiment session is committed, many entries are added to the database, and the session archive and a pickle file
-containing pre-processed information are saved to the backing repository. Rather than log every database entry, a
+any deletion from a table, the entry is similar, except the row need only be identified by the primary key. When one or
+more secondary attributes of a table row are updated, the entry includes the table identifier, and the 'row' contains
+the primary key identifying the row affected, plus additional key-value pairs for the updated secondary attributes;
+secondary attributes not included in 'row' are left unchanged.
+
+When an experiment session is committed, many entries are added to the database, and the session archive and a pickle
+file containing pre-processed information are saved to the backing repository. Rather than log every database entry, a
 session commit is marked by a simple entry containing the information needed to locate the files in the backing
 repository. All the information needed to re-commit the experiment session is in those files -- including session
 metadata, trial protocols, neural unit data, and the original recorded data files.
 
-The lab database schema also includes some "mapping" or cross-reference tables such as BrainAreaNeuronType. We restrict
+The lab database schema also currently includes one "mapping" or cross-reference table -- StudyPublication. We restrict
 the nature of these tables and the two tables they "associate": the associated tables' primary keys are both single
-auto-incrementing integer keys. The mapping table has a primary key consisting of the those two foreign keys and nothing
+auto-incrementing integer keys. The mapping table has a primary key consisting of those two foreign keys and nothing
 else, and the table has no non-primary attributes.
 
 Summary of the log entry types:
     1) Add row to manual-entry table: {'op': 'add', 'table': DBTable, 'row': Dict}
+    2) Update row of manual-entry table: {'op': 'update', 'table': DBTable, 'row': Dict}
     2) Delete from manual-entry table: {'op': 'delete', 'table': DBTable, 'restriction': Dict}
     3) Mapping table update: {'op': 'mapping', 'table': DBTable, 'src_pk': int, 'dst_pks': Set[int]}
     4) Session commit: {'op': 'session', 'username': str, 'subj_id': str, 'date': 'YYYY-MM-DD', 'suffix': int}
@@ -136,7 +141,7 @@ import sys
 from copy import deepcopy
 import dash_bootstrap_components as dbc
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from queue import Queue
 from typing import Optional, Dict, Any, Set, List, IO, Tuple, Union
@@ -145,20 +150,19 @@ import time
 import shutil
 import uuid
 import zipfile
-from json import JSONDecoder
 import numpy as np
 import scipy.signal
 import datajoint as dj
 import numpy.lib.stride_tricks as stride_tricks
+from werkzeug.security import generate_password_hash, check_password_hash
 
-from common import json_parse, check_date
+from common import check_date
 
 import database.table_info as ti
 from database.table_info import DBTable, AttributeValue, AttrTypeEnum
 import database.maestro as maestro
 import database.PL2 as PL2
 import database.sgl_schema as sgl
-import database.sgl_auth as sgl_auth
 
 
 _table_map: Dict[DBTable, dj.Table] = {
@@ -181,6 +185,19 @@ _table_map: Dict[DBTable, dj.Table] = {
     DBTable.TRIAL_NEURONAL: sgl.Trial.NeuronalResponse()
 }
 """ Maps enumerated database table ID to the corresponding DataJoint table class in the Lisberger lab schema. """
+
+PASSWORD_HASH_METHOD = 'pbkdf2:sha256:10000'
+""" Method used to generate hashed passwords that are stored in DB """
+USER_PROFILE_KEYS = {'full_name', 'contact_email', 'title', 'organization'}
+""" Set of attributes that are part of an authorized user's editable profile. """
+ACCESS_LEVELS = ['admin', 'commit', 'download']
+""" List of all defined access levels. """
+ADMIN_ACCESS: str = ACCESS_LEVELS[0]
+""" Access level with full administrative privleges on portal. """
+DOWNLOAD_ACCESS: str = ACCESS_LEVELS[2]
+""" The most restrictive access level only allows user to download data sets from the portal. """
+COMMIT_ACCESS: List[str] = ACCESS_LEVELS[:-1]
+""" List of access levels that allow user to contribute experiment sessions to the lab database. """
 
 
 class DataBaseManager:
@@ -213,7 +230,7 @@ class DataBaseManager:
             """ Lock object used to queue the session commit tasks. """
 
     @staticmethod
-    def _log_file_path() -> Path:
+    def log_file_path() -> Path:
         """ Get file system path for the database updates log file. """
         return Path(os.environ['DJDEV_ROOT_REPO'], 'logs', 'update_log')
 
@@ -227,7 +244,10 @@ class DataBaseManager:
         try:
             with self._log_lock:
                 DataBaseManager._ensure_logs_directory_exists()
-                with open(DataBaseManager._log_file_path(), 'ab') as file:
+                # NEVER store user's encrypted password in the log!
+                if table_id == DBTable.USER:
+                    row.pop('password', None)
+                with open(DataBaseManager.log_file_path(), 'ab') as file:
                     pickle.dump({'op': 'add', 'table': table_id, 'row': row}, file)
         except Exception as err:
             error_msg = f"Failed to post 'add' entry to database update log: {str(err)}"
@@ -239,10 +259,26 @@ class DataBaseManager:
         try:
             with self._log_lock:
                 DataBaseManager._ensure_logs_directory_exists()
-                with open(DataBaseManager._log_file_path(), 'ab') as file:
+                with open(DataBaseManager.log_file_path(), 'ab') as file:
                     pickle.dump({'op': 'delete', 'table': table_id, 'restriction': restriction}, file)
         except Exception as err:
             error_msg = f"Failed to post 'delete' entry to database update log: {str(err)}"
+        return error_msg
+
+    def _log_update_table_row(self, table_id: DBTable, row: Dict[str, AttributeValue]) -> Optional[str]:
+        error_msg: Optional[str] = None
+        try:
+            with self._log_lock:
+                DataBaseManager._ensure_logs_directory_exists()
+                # NEVER store user's encrypted password in the log!
+                if table_id == DBTable.USER:
+                    row.pop('password', None)
+                    if len(row) == 1:
+                        return None
+                with open(DataBaseManager.log_file_path(), 'ab') as file:
+                    pickle.dump({'op': 'update', 'table': table_id, 'row': row}, file)
+        except Exception as err:
+            error_msg = f"Failed to post 'update' entry to database update log: {str(err)}"
         return error_msg
 
     def _log_mapping_table_update(self, table_id: DBTable, src_pk_val: int, map_set: Set[int]) -> Optional[str]:
@@ -250,7 +286,7 @@ class DataBaseManager:
         try:
             with self._log_lock:
                 DataBaseManager._ensure_logs_directory_exists()
-                with open(DataBaseManager._log_file_path(), 'ab') as file:
+                with open(DataBaseManager.log_file_path(), 'ab') as file:
                     pickle.dump({'op': 'mapping', 'table': table_id, 'src_pk': src_pk_val, 'dst_pks': map_set}, file)
         except Exception as err:
             error_msg = f"Failed to post 'mapping' entry to database update log: {str(err)}"
@@ -261,25 +297,44 @@ class DataBaseManager:
         try:
             with self._log_lock:
                 DataBaseManager._ensure_logs_directory_exists()
-                with open(DataBaseManager._log_file_path(), 'ab') as file:
+                with open(DataBaseManager.log_file_path(), 'ab') as file:
                     pickle.dump({'op': 'session', 'username': user, 'subj_id': subject, 'date': session_date,
                                  'suffix': suffix}, file)
         except Exception as err:
             error_msg = f"Failed to post 'session' entry to database update log: {str(err)}"
         return error_msg
 
-    def authenticate_portal_user(self, username: str, password: str) -> Optional[str]:
+    def authenticate_portal_user(self, username: str, password: str, admin_only: bool = False) -> Optional[str]:
         """
         Authenticate the user account on the Lisberger lab portal with the specified name and password.
 
         Args:
             username: The username for the account.
             password: The (plaintext) password for the account.
+            admin_only: If True, require that the user account have 'admin'-level privileges. Default is False.
         Returns:
             None if account was authenticated; else a brief error description (invalid username, etc.)
         """
-        with self._db_lock:
-            error_msg = sgl_auth.authenticate_user(username, password)
+        table: dj.Table = _table_map[DBTable.USER]
+        pk = dict(username=username)
+        error_msg = None
+        try:
+            with self._db_lock:
+                hashed_password, access = (table & pk).fetch1('password', 'access')
+            if not check_password_hash(hashed_password, password):
+                error_msg = "Incorrect password"
+            if admin_only and (access != 'admin'):
+                error_msg = "Admin-level access required"
+        except Exception:
+            error_msg = 'Unrecognized username or database error'
+
+        # when a user is authenticated, update their last login timestamp, but don't fail if this update fails, as
+        # this is not crucial.
+        if error_msg is None:
+            last_login = datetime.now().isoformat(sep=' ', timespec='seconds')  # 'YYYY-MM-DD HH:MM:SS'
+            entry = dict(username=username, last_login=last_login)
+            self.update_table_row(DBTable.USER, entry)
+
         return error_msg
 
     def get_portal_user_record(self, username: str) -> Union[str, Dict[str, str]]:
@@ -293,9 +348,11 @@ class DataBaseManager:
             If successful, returns the user account record. For security reasons, the user's encrypted password is
                 removed from the record. Otherwise, returns a brief error description.
         """
-        with self._db_lock:
-            user_record = sgl_auth.get_user(username)
-        return user_record
+        res = self.fetch_rows(DBTable.USER, dict(username=username))
+        if len(res) != 1:
+            return f"User account record not found for '{username}', or database error"
+        res[0].pop('password', None)
+        return res[0]
 
     def get_all_portal_user_records(self) -> Union[str, List[Dict[str, str]]]:
         """
@@ -304,10 +361,11 @@ class DataBaseManager:
 
         Returns:
             If successful, returns the user account records. For security reasons, the user's encrypted password is
-                removed from each record. Otherwise, returns a brief error description.
+                removed from each record. Returns an empty list if there no registered users OR if an error occurs.
         """
-        with self._db_lock:
-            user_records = sgl_auth.get_all_users()
+        user_records = self.fetch_rows(DBTable.USER)
+        for rec in user_records:
+            rec.pop('password', None)
         return user_records
 
     def register_new_portal_user(self, username: str, password: str, access: str, full_name: str,
@@ -325,24 +383,67 @@ class DataBaseManager:
         Returns:
             None if successful, else a brief error description.
         """
-        with self._db_lock:
-            error_msg = sgl_auth.insert_user(username, password, password, access, full_name, contact_email)
-        return error_msg
+        error_msg = self._check_user(username, password, access, full_name, contact_email)
+        if error_msg is None:
+            now = datetime.now().isoformat(sep=' ', timespec='seconds')
+            row = dict(username=username, password=generate_password_hash(password, method=PASSWORD_HASH_METHOD),
+                       access=access, full_name=full_name, contact_email=contact_email, registered=now, pwd_changed=now)
+            error_msg = self.insert_into_table(DBTable.USER, row)
+        return None if (error_msg is None) else f"Failed to register new user {username}: {error_msg}"
+
+    def _check_user(self, username: str, password: str, access: str, full_name: str, email: str) -> Optional[str]:
+        """
+        Helper method for register_new_portal_user() validates required information for a new user account.
+
+        Returns:
+            None if user information is valid; else a brief error description
+        """
+        error_msg = DataBaseManager.validate_password(password)
+        if error_msg is not None:
+            return error_msg
+        if access not in ACCESS_LEVELS:
+            return f"Invalid access level: {access}"
+        if not (5 <= len(full_name) <= 50):
+            return "Full name must have 5-50 characters"
+        if (len(email) > 80) or \
+                (re.fullmatch(r'^[A-Za-z0-9._+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,6}$', email) is None):
+            return "Email address is too long or otherwise invalid"
+        if re.fullmatch(r'^[a-z][a-z0-9]{2,19}$', username) is None:
+            return "Invalid username"
+        if self.row_exists(DBTable.USER, dict(username=username)):
+            return "Username is already taken"
+        return None
+
+    @staticmethod
+    def validate_password(password: str) -> Optional[str]:
+        """
+        Enforce restrictions on the password for a user registered on the Lisberger lab portal. The password must be
+        8-32 characters long and contain at least one digit and at least one capital letter.
+
+        Args:
+            password: The (plain-text) password ot validate.
+        Returns:
+            None if password if valid, else a brief error description
+        """
+        if not (8 <= len(password) <= 32):
+            return "Password must have 8-32 characters"
+        elif (re.search(r"[\d]+", password) is None) and (re.search(r"[A-Z]+", password) is None):
+            return 'Password must contain at least 1 digit and at least 1 uppercase character'
+        return None
 
     def remove_portal_user(self, username: str) -> Optional[str]:
         """
-        Permanently remove the specified user account from the Lisberger lab data portal.
+        Permanently remove the specified user account from the Lisberger lab data portal. Note that a user record cannot
+        be removed if other tables are dependent on that record through a foreign key relationship (eg, any user that
+        has committed experiment sessions cannot be removed).
 
         Args:
             username: Username for user account to be removed.
         Returns:
             None if successful, else a brief error description
         """
-        if username is None:
-            return "Username not specified"
-        with self._db_lock:
-            error_msg = sgl_auth.delete_user(username)
-        return error_msg
+        return "Username not specified" if (username is None) else \
+            self.delete_from_table(DBTable.USER, dict(username=username))
 
     def update_portal_user_profile(
             self, username: str, full_name: str, email: str, title: str, org: str) -> Optional[str]:
@@ -358,9 +459,13 @@ class DataBaseManager:
         Returns:
             None if successful, else a brief error message.
         """
-        with self._db_lock:
-            error_msg = sgl_auth.update_user_profile(username, full_name, email, title, org)
-        return error_msg
+        entry = dict(username=username)
+        keys = ['full_name', 'contact_email', 'title', 'organization']
+        values = [full_name, email, title, org]
+        for i, k in enumerate(keys):
+            if isinstance(values[i], str):
+                entry[k] = None if (len(values[i]) == 0) else values[i]
+        return None if len(entry) == 1 else self.update_table_row(DBTable.USER, entry)
 
     def change_portal_user_password(self, username: str, old_password: str, new_password: str) -> Optional[str]:
         """
@@ -374,8 +479,24 @@ class DataBaseManager:
         Returns:
             None if successful, else a brief error message.
         """
-        with self._db_lock:
-            error_msg = sgl_auth.change_password(username, old_password, new_password)
+        if old_password == new_password:
+            return "Password is unchanged. Enter a new password."
+        error_msg = DataBaseManager.validate_password(new_password)
+        if error_msg is not None:
+            return f"New password in invalid ({error_msg})"
+        table: dj.Table = _table_map[DBTable.USER]
+        entry = dict(username=username)
+        try:
+            with self._db_lock:
+                hashed_password = (table & entry).fetch1('password')
+            if not check_password_hash(hashed_password, old_password):
+                error_msg = "Incorrect password"
+            else:
+                entry['password'] = generate_password_hash(new_password, method=PASSWORD_HASH_METHOD)
+                entry['pwd_changed'] = datetime.now().isoformat(sep=' ', timespec='seconds')  # 'YYYY-MM-DD HH:MM:SS'
+                error_msg = self.update_table_row(DBTable.USER, entry, log=False)  # we don't log password changes
+        except Exception:
+            error_msg = 'Unrecognized username or database error'
         return error_msg
 
     def change_portal_user_access_level(self, username: str, access: str) -> Optional[str]:
@@ -384,14 +505,14 @@ class DataBaseManager:
 
         Args:
             username: Username of the account.
-            access: The desired access level. Must be one of 'admin' > 'curate' > 'contribute' > 'readonly'.
+            access: The desired access level. Must be one of 'admin' > 'commit' > 'download'.
 
         Returns:
             None if successful, else a brief error description.
         """
-        with self._db_lock:
-            error_msg = sgl_auth.change_access(username, access)
-        return error_msg
+        if access not in ACCESS_LEVELS:
+            return f"Invalid access level: {access}"
+        return self.update_table_row(DBTable.USER, dict(username=username, access=access))
 
     def entry_form(self, table_id: DBTable, include_attrs: Optional[List[str]] = None,
                    initial_entry: Optional[Dict[str, AttributeValue]] = None,
@@ -411,6 +532,8 @@ class DataBaseManager:
         always omitted because it is not user-specified), and initial values may be specified for each attribute. The
         form optionally includes a Bootstrap Alert component in which an error message can be displayed when the user
         enters an invalid value in the form.
+
+        Do NOT use with the registered users table, DBTable.USER!!!!
 
         So that you can use the input widgets on the form in a Dash callback, the 'id' of each widget is set to
         "<attr.id>-input", where <attr.id> is the ID of the table attribute displayed/edited in that widget.
@@ -675,6 +798,9 @@ class DataBaseManager:
         """
         if not (table_id in _table_map):
             return f"Unrecognized database table ID: {str(table_id)}"
+        err_msg = self.check_row(table_id, row)
+        if err_msg is not None:
+            return err_msg
         try:
             table: dj.Table = _table_map[table_id]
             with self._db_lock, table.connection.transaction:
@@ -687,17 +813,53 @@ class DataBaseManager:
             return f"Insert failed: table={str(table_id)}, value={row} ===> {str(e)}"
         return None
 
-    def delete_from_table(self, table_id: DBTable, restriction: Optional[Dict[str, AttributeValue]] = None,
-                          log: bool = True) -> Optional[str]:
+    def update_table_row(self, table_id: DBTable, row: Dict[str, AttributeValue], log: bool = True) -> Optional[str]:
         """
-        Delete one or more rows from a specified table in the laboratory database, and log the change in the repository
-        database updates log. If the log update fails after deletion, the deletion is rolled back to maintain
-        consistency between the database and the backup repository.
+        Update a single row in the specified table of the lab database. Only secondary attributes may be updated with
+        this method, as updating a primary key attribute could destroy database integrity.
 
         Args:
             table_id: ID of database table
-            restriction:  A dictionary of attribute ID-value pairs that describes the row or rows to delete. If this is
-                None, the entire contents of the table are deleted!
+            row: A dictionary of attribute ID-value pairs that identifies the row to update; additional key-value
+                pairs identify the secondary attribute values to be updated and their new assigned values.
+            log: If True, the row update is logged in the backup updates log. Default = True.
+
+        Returns:
+            None if successful; else a user-facing description of the error (row does not exist, bad attribute value,
+                database error).
+        """
+        if not (table_id in _table_map):
+            return f"Unrecognized database table ID: {str(table_id)}"
+        try:
+            self._validate_update_row(table_id, row)
+            table: dj.Table = _table_map[table_id]
+            with self._db_lock, table.connection.transaction:
+                table.update1(row)
+                if log:
+                    err_msg = self._log_update_table_row(table_id, row)
+                    if err_msg:
+                        raise Exception(err_msg)
+        except (Exception, ValueError) as e:
+            return f"Row update failed: table={str(table_id)} ===> {str(e)}"
+        return None
+
+    def delete_from_table(
+            self, table_id: DBTable, row_pk: Dict[str, AttributeValue], log: bool = True) -> Optional[str]:
+        """
+        Delete a single row from a specified table in the laboratory database, and log the change in the repository
+        database updates log. If the log update fails after deletion, the deletion is rolled back to maintain
+        consistency between the database and the backup repository.
+
+        In DataJoint, deletion of a table row will, in turn, delete any rows in other database tables that are
+        dependent on the deleted entity through a foreign key relationship. We never want this to happen, so any
+        deletion which would cause other table deletions is forbidden. A practical example of this would be removing a
+        lab portal user who is no longer active but has committed many experiment sessions to the database. All of those
+        sessions (including all the trial datasets) would be removed if that user was removed.
+
+        Args:
+            table_id: ID of database table
+            row_pk: This dictionary must contain, at a minimum, the primary key attribute ID-value pairs that uniquely
+                identify a single table row. Any other attributes are ignored.
             log: If True, the deletion is logged in the backup updates log. Default = True.
 
         Returns:
@@ -705,18 +867,62 @@ class DataBaseManager:
         """
         if not (table_id in _table_map):
             return f"Unrecognized database table ID: {str(table_id)}"
+        if not table_id.allow_delete():
+            return f"User-initiated deletions from this table are not permitted: {str(table_id)}"
         try:
             table: dj.Table = _table_map[table_id]
+            table_pk = ti.primary_key_of(table_id, False)
+            restriction = {key: row_pk[key] for key in table_pk}
+            if not self._check_row_deletion(table_id, restriction):
+                raise Exception("Row deletion would trigger forbidden cascade deletes in database")
             with self._db_lock, table.connection.transaction:
-                query = (table & restriction) if restriction else table
-                query.delete()
+                (table & restriction).delete()
                 if log:
                     err_msg = self._log_delete_from_table(table_id, restriction)
                     if err_msg:
                         raise Exception(err_msg)
+        except KeyError:
+            return f"Delete failed: table={str(table_id)} ===> Incomplete primary key"
         except Exception as e:
-            return f"Delete failed: table={str(table_id)}, restrict={restriction} ===> {str(e)}"
+            return f"Delete failed: table={str(table_id)} ===> {str(e)}"
         return None
+
+    def _check_row_deletion(self, table_id: DBTable, row_pk: Dict[str, AttributeValue]) -> bool:
+        """
+        Helper method for delete_from_table(). It checks whether or not the row deletion would result in a cascade
+        deletion in other tables within the lab database. The following foreign-key relations are checked for possible
+        cascade deletions. If a relation exists, the deletion is forbidden.
+            User, Subject, Rig, Study -> Session.
+            User -> Study.
+            BrainArea -> Session.EPhys
+            NeuronType -> Session.Neuron
+        Some foreign-key relations are not checked because the cascade deletions are permssible, or because deletions
+        in the independent table are not allowed: Subject -> SubjectImplant; Study, Publication -> StudyPub; Session,
+        TrialProtocol -> Trial; Session.Neuron -> Trial.NeuronalResponse.
+
+        Args:
+            table_id: ID of the database table.
+            row_pk: The primary key of the table row to be deleted
+        Returns:
+            True if row deletion is safe; False if it would trigger a forbidden cascade deletion elsewhere in database.
+        """
+        # we have to be careful here because a number of primary keys are renamed when used as foreign keys!
+        with self._db_lock:
+            if table_id == DBTable.USER:
+                if len(_table_map[DBTable.SESSION] & {'experimenter': row_pk['username']}) > 0:
+                    return False
+                elif len(_table_map[DBTable.STUDY] & {'study_lead': row_pk['username']}) > 0:
+                    return False
+            elif table_id in [DBTable.SUBJECT, DBTable.RIG, DBTable.STUDY]:
+                if len(_table_map[DBTable.SESSION] & row_pk) > 0:
+                    return False
+            elif table_id == DBTable.BRAIN_AREA:
+                if len(_table_map[DBTable.SESSION_EPHYS] & row_pk) > 0:
+                    return False
+            elif table_id == DBTable.NEURON_TYPE:
+                if len(_table_map[DBTable.SESSION_NEURON] & {'unit_type': row_pk['nt_id']}) > 0:
+                    return False
+        return True
 
     def row_exists(self, table_id: DBTable, row_pk: Dict[str, AttributeValue]) -> bool:
         """
@@ -788,13 +994,32 @@ class DataBaseManager:
         for attr_id in ti.attributes_of(table_id, omit_master):
             attr_info = ti.attribute_info(table_id, attr_id)
             if attr_info.type != AttrTypeEnum.AUTO:
-                if attr_id not in row:
-                    raise Exception(f"Missing attribute: {attr_id}")
-                self._validate_attribute_value(table_id, attr_id, row[attr_id])
+                self._validate_attribute_value(table_id, attr_id, row[attr_id] if attr_id in row else None)
             elif attr_id in row:
                 row.pop(attr_id, None)
 
-    def _validate_attribute_value(self, table_id: DBTable, attr_id: str, attr_value: AttributeValue) -> None:
+    def _validate_update_row(self, table_id: DBTable, row: Dict[str, AttributeValue]) -> None:
+        """
+        Validate the values of any non-primary attributes in an existing row that is to be updated in place in the
+        specified database table. No primary key values are checked -- since primary key attributes may not be updated
+        in place. Also, existence of the row is not checked, since any attempt to update a non-existent table row will
+        obviously fail.
+
+        Args:
+            table_id: ID of the database table.
+            row: A dictionary containing one or more non-primary attribute-value pairs to be validated. It need not
+                include every non-primary attribute, and any dictionary keys that do not correspond to a table attribute
+                are simply ignored.
+
+        Raises:
+            ValueError: If 'row' contains an invalid value for any non-primary attribute of the table specified.
+        """
+        for attr_id in ti.attributes_of(table_id):
+            attr_info = ti.attribute_info(table_id, attr_id)
+            if (not attr_info.pkey) and (attr_id in row):
+                self._validate_attribute_value(table_id, attr_id, row[attr_id])
+
+    def _validate_attribute_value(self, table_id: DBTable, attr_id: str, attr_value: Optional[AttributeValue]) -> None:
         """Validate the proposed value for an attribute in the underlying table.
 
         Validation of the attribute value depends on the attribute type, AttrTypeEnum:
@@ -812,21 +1037,29 @@ class DataBaseManager:
             FKEY: The attribute value must identify an existing entity in the parent table.
             AUTO: An auto-incrementing PK. This type of attribute is ignored. Its value is set by the database on
                 insert, NOT by the user.
+            PWD: Special attribute referring to the user's encrypted password in the User table. The password has to
+                be validated prior to encryption. This is NEVER checked.
+            TIME: Timestamp attributes are never set manually by user, so they are not checked.
 
         Args:
             table_id: ID of the database table.
             attr_id: The attribute ID.
-            attr_value: The proposed value for the attribute.
+            attr_value: The proposed value for the attribute. Could be None for nullable attributes.
 
         Raises:
             ValueError: If the proposed attribute value is not valid in any way. The error description is intended to
             provide a user-facing description of the problem.
         """
         attr_info = ti.attribute_info(table_id, attr_id)
+        if attr_info.type in [AttrTypeEnum.AUTO, AttrTypeEnum.PWD, AttrTypeEnum.TIME]:
+            return
+        if attr_value is None:
+            if attr_info.nullable:
+                return
+            else:
+                raise ValueError(f"Missing attribute: {attr_info.label}")
         if not isinstance(attr_value, (str, bool, int, float, date, np.ndarray, bytes)):
             raise ValueError(f"Attribute value is an unsupported data type: '{attr_info.label}'")
-        if attr_info.type == AttrTypeEnum.AUTO:
-            return
         if attr_info.pkey:
             if isinstance(attr_value, str) and (attr_value == ""):
                 raise ValueError(f"Missing value for primary key attribute: '{attr_info.label}'")
@@ -1141,17 +1374,25 @@ class DataBaseManager:
         except Exception:
             return None
 
-    def initiate_session_commit(self) -> Tuple[bool, str]:
+    def initiate_session_commit(self, username: str) -> Tuple[bool, str]:
         """
-        Initiate a session commit task on the lab database server. The method creates the temporary staging directory
-        for the task, spawns a background thread to perform the work, and returns a unique ID assigned to the task. The
-        client must supply this task ID in all future requests involving the commit task.
+        Initiate a session commit task on the lab database server. The client must be authenticated and have 'commit'
+        privileges to initiate a commit. If so, the method creates the temporary staging directory for the task, spawns
+        a background thread to perform the work, and returns a unique ID assigned to the task. The client must supply
+        this task ID in all future requests involving the commit task.
+
+        Args:
+            username: The username of the registered portal user requesting the session commit.
 
         Returns:
             A 2-element tuple. The first element is True only if a new commit task was successfully started on the
                 server. If so, the second element is the assigned task ID; if not, it is a brief user-facing error
-                description (too many commits in progress, unable to create staging directory, etc).
+                description (invalid username, too many commits in progress, unable to create staging directory, etc).
         """
+        user_record = self.get_portal_user_record(username)
+        if (not isinstance(user_record, dict)) or not (user_record['access'] in COMMIT_ACCESS):
+            return False, 'Login username invalid, or user lacks required access'
+
         with self.task_list_lock:
             if len(self.running_tasks) >= DataBaseManager._MAX_WORKERS:
                 return False, "Server is too busy; try again later"
@@ -1163,7 +1404,7 @@ class DataBaseManager:
             except Exception as err:
                 return False, f"Failed to create staging directory on server: {str(err)}"
 
-            worker = ProcessArchiveThread(task_id)
+            worker = ProcessArchiveThread(task_id, username)
             self.running_tasks[task_id] = worker
             worker.start()
             return True, task_id
@@ -1805,86 +2046,25 @@ class DataBaseManager:
             # TODO: Need to log this error to an admin log so it can be addressed
             pass
 
-    def reconstruct_database_from_log(self) -> bool:
+    def database_empty(self) -> Optional[str]:
         """
-        FOR ADMIN USE ONLY: THIS METHOD MUST NEVER BE CALLED WHILE THE BACKEND SERVER IS RUNNING AND PROCESSING EXTERNAL
-        CLIENT REQUESTS!
-
-        Reconstruct the entire content of the Lisberger lab database from the database update log entries and the
-        experiment data archive files stored in the backing repository.
-
-        See file header for a description of the database update log, the folder structure of the backing repository,
-        and how reconstruction is possible by "processing" the update log entries in sequence.
-
-        If the database becomes corrupted for whatever reason, this method provides a mechanism for repopulating it
-        from scratch without user intervention. The database update log contains an entry for every change made to the
-        database: addition or deletion of a row in any of the "manual" tables, an update to a "mapping" table, and a
-        session commit. The last is a complex task that involves many additions to the database. It is possible to
-        reproduce a session commit without user intervention because the repository stores the original session data
-        archive along with a pickle file containing all of the information required to do the commit.
-
-        During normal backend operation, all database changes are recorded in the database update log file. Here we
-        are processing the log entries in sequence to restore the database contents. The contents of the repository and
-        the update log itself are left unchanged. The database MUST be empty prior to beginning the rebuild; the method
-        will fail if it finds any entries in the database tables.
+        Utility method verifies whether or not all tables in the Lisberger lab database are empty.
 
         Returns:
-            True if database reconstruction was successful; else False. Progress messages -- and a final error or
-                success indicator are printed to the console.
+            None if database is empty; else an error message indicating first table found that is not empty.
         """
-        # ensure database update log exists.
-        log_file_path = DataBaseManager._log_file_path()
-        if not log_file_path.is_file():
-            print(f"ERROR: No database log file found at {str(log_file_path)}", file=sys.stdout, flush=True)
-            return False
-
-        print(f"Starting database reconstruction from repository using log file at {str(log_file_path)}...",
-              file=sys.stdout, flush=True)
-
-        # first, verify that database is empty
-        for table_id in _table_map.keys():
-            n = self.num_table_rows(table_id)
-            if n != 0:
-                print(f"ERROR: Found {n} rows in {ti.table_label(table_id)} table. "
-                      f"Database must be empty prior to reconstruction!", file=sys.stdout, flush=True)
-                return False
-
-        try:
-            num_entries = 0
-            with open(log_file_path, 'rb') as file:
-                while True:
-                    try:
-                        entry = pickle.load(file)
-                        num_entries += 1
-                        print(f"Processing log entry #{num_entries}: \n    {entry}", file=sys.stdout, flush=True)
-                        if entry['op'] == 'add':
-                            err_msg = self.insert_into_table(entry['table'], entry['row'], log=False)
-                        elif entry['op'] == 'delete':
-                            err_msg = self.delete_from_table(entry['table'], entry['restriction'], log=False)
-                        elif entry['op'] == 'mapping':
-                            err_msg = self.update_mapping_table(
-                                entry['table'], entry['src_pk'], entry['dst_pks'], log=False)
-                        elif entry['op'] == 'session':
-                            err_msg = DataBaseManager._reconstruct_session(entry)
-                        else:
-                            err_msg = f"Invalid log entry"
-
-                        if err_msg is not None:
-                            raise Exception(err_msg)
-                    except EOFError:
-                        break
-        except Exception as e:
-            print(f"ERROR: Exception occurred while reconstructing lab database: {str(e)}", file=sys.stdout, flush=True)
-            print("Manual reconstruction of database content required. Consult this script's progress log to "
-                  "assist in that reconstruction.", file=sys.stdout, flush=True)
-            return False
-
-        print("Reconstruction completed successfully!", file=sys.stdout, flush=True)
-        return True
+        with self._db_lock:
+            for table_id in _table_map.keys():
+                if len(_table_map[table_id]) > 0:
+                    return f"Found non-empty database table: {str(table_id)}"
+        return None
 
     @staticmethod
-    def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]:
+    def reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]:
         """
+        THIS IS A HELPER METHOD FOR THE ADMINISTRATIVE SCRIPT IN reconstruct.py. NEVER INVOKE THIS METHOD WHEN THE
+        PORTAL APP IS RUNNING!
+
         Commit an experiment session during scripted reconstruction of the lab database content from entries in the
         database log file and experiment data archives stored in the backing repository.
 
@@ -2235,8 +2415,10 @@ class ProcessArchiveThread(threading.Thread):
     To cancel the session commit, call cancel(). This method sets a flag to inform the worker thread and returns
     immediately. The worker thread will stop its work in progress and remove the staging directory in its entirety.
     """
-    def __init__(self, task_id: str):
+    def __init__(self, task_id: str, username: str):
         super(ProcessArchiveThread, self).__init__(name=f"ProcessArchive-{task_id}")
+        self.username: str = username
+        """ The username for the authenticated user account that initiated the session commit task. """
         self.staging_dir: Path = DataBaseManager.get_staging_directory_for(task_id)
         """ The temporary staging directory for the session commit task. ZIP archive gets uploaded here. """
         self.zip_path: Optional[Path] = None
@@ -2485,36 +2667,15 @@ class ProcessArchiveThread(threading.Thread):
                             raise Exception(f"Missing Omniplex start/stop timestamps for {key}")
 
                 # initialize session metadata. We get the session date from the Maestro trials, and we may get the
-                # subject ID from the ZIP archive file name or a Maestro data file name. Some metadata must be supplied
-                # by the user.
-                self.session_info = dict()
-                self.session_info['experimenter'] = None
+                # subject ID from the ZIP archive file name or a Maestro data file name.
                 subject_choices = db_mgr.fetch_attribute_values(DBTable.SUBJECT, 'subj_id')
+                subj_id_found: Optional[str] = None
+                test_str = ','.join([self.zip_path.name.lower(), sample_maestro_file_name.lower()])
                 for choice in subject_choices:
-                    if choice.lower() in ','.join([self.zip_path.name.lower(), sample_maestro_file_name.lower()]):
-                        self.session_info['subj_id'] = choice
+                    if choice.lower() in test_str:
+                        subj_id_found = choice
                         break
-                if 'subj_id' not in self.session_info:
-                    self.session_info['subj_id'] = None
-                self.session_info['session_date'] = session_date
-                self.session_info['session_sfx'] = None
-                self.session_info['rig_id'] = None
-                self.session_info['study_id'] = None
-                self.session_info['session_notes'] = ""
-
-                # if neural units were recorded, initialize metadata about session's electrophysiological recording.
-                # User edits this metadata in stage 3. We only support Omniplex system right now, and we infer sampling
-                # rate from the length of a unit's spike template waveform, which spans 10ms.
-                if len(self.units) > 0:
-                    channel_ids = {unit.channel for unit in self.units}
-                    self.ephys_info = dict()
-                    self.ephys_info['ephys_src'] = 'Omniplex'
-                    self.ephys_info['probe_type'] = 'single' if len(channel_ids) == 1 else '32-channel'
-                    self.ephys_info['sampling_rate'] = len(self.units[0].template) / 0.01
-                    self.ephys_info['probe_x'] = None
-                    self.ephys_info['probe_y'] = None
-                    self.ephys_info['probe_depth'] = None
-                    self.ephys_info['ba_id'] = None
+                self._initialize_session_metadata(session_date=session_date, subj_id=subj_id_found)
 
         except Exception as err:
             error_msg = f"Error: {str(err)}"
@@ -2745,6 +2906,79 @@ class ProcessArchiveThread(threading.Thread):
             template[i] *= to_volts * 1.0e6
             out.append(OmniplexUnit(filename, channel_id, spikes[i], firing_rate, snr, template[i]))
         return out
+
+    def _initialize_session_metadata(self, session_date: Optional[date] = None, subj_id: Optional[str] = None) -> None:
+        """
+        Helper method for _preprocess_session_archive(). It looks up the experiment session most recently committed to
+        the database by the user committing the current session, and uses metadata from that previous session to fill in
+        reasonable defaults for the current session. If this is the user's first session commit, at least some session
+        metadata will be left uninitialized.
+
+        (NOTE there's an implicit assumption here that the user committing the current session is, in fact, the person
+        that conducted that session.)
+
+        Args:
+            session_date: The session date as extracted from the header of a Maestro data file.
+            subj_id: The ID of the experiment subject, if matched in the session archive filename or the name of a
+                Maestro data file in that archive.
+        """
+        # get most recent session committed by user (if one exists)
+        recent_session: Optional[Dict[str, AttributeValue]] = None
+        recent_ephys: Optional[Dict[str, AttributeValue]] = None
+        db_mgr = DataBaseManager()
+        sessions_for_user = sorted(db_mgr.fetch_proj(DBTable.SESSION, [], dict(experimenter=self.username)),
+                                   key=lambda s: (s['session_date'], s['session_sfx']), reverse=True)
+        if len(sessions_for_user) > 0:
+            pk = sessions_for_user[0]
+            res = db_mgr.fetch_rows(DBTable.SESSION, pk)
+            if len(res) > 0:
+                recent_session = res[0]
+                res = db_mgr.fetch_rows(DBTable.SESSION_EPHYS, pk)
+                if len(res) > 0:
+                    recent_ephys = res[0]
+
+        # to initialize session suffix, we need to check if there are any sessions already committed by user with the
+        # same subject on the same date. If we don't know subject or date, we can't do this and we use 0 for the suffix.
+        session_sfx = 0
+        if isinstance(session_date, date) and isinstance(subj_id, str):
+            restriction = dict(experimenter=self.username, subj_id=subj_id, session_date=session_date)
+            res = db_mgr.fetch_proj(DBTable.SESSION, [], restriction)
+            if 0 < len(res) < 10:
+                used = [k['session_sfx'] for k in res]
+                for i in range(10):
+                    if i not in used:
+                        session_sfx = i
+                        break
+
+        # initialize all neural units to neuron type "Unspecified" if it exists in database -- it should!
+        unspecified_id: Optional[int] = None
+        res = db_mgr.fetch_rows(DBTable.NEURON_TYPE, dict(nt_name="Unspecified"))
+        if len(res) == 1:
+            unspecified_id = res[0]['nt_id']
+
+        # prepare the Session and, if applicable, Session.EPhys entries. We only support Omniplex system, and we
+        # infer sampling rate from the length of a unit's spike template waveform, which spans 10ms
+        self.session_info = dict()
+        self.session_info['experimenter'] = self.username
+        self.session_info['subj_id'] = subj_id
+        self.session_info['session_date'] = session_date
+        self.session_info['session_sfx'] = session_sfx
+        self.session_info['rig_id'] = None if (recent_session is None) else recent_session['rig_id']
+        self.session_info['study_id'] = None if (recent_session is None) else recent_session['study_id']
+        self.session_info['session_notes'] = ""
+
+        if len(self.units) > 0:
+            for unit in self.units:
+                unit.neuron_type = unspecified_id
+            channel_ids = {unit.channel for unit in self.units}
+            self.ephys_info = dict()
+            self.ephys_info['ephys_src'] = 'Omniplex'
+            self.ephys_info['probe_type'] = 'single' if len(channel_ids) == 1 else '32-channel'
+            self.ephys_info['sampling_rate'] = len(self.units[0].template) / 0.01
+            self.ephys_info['probe_x'] = None if (recent_ephys is None) else recent_ephys['probe_x']
+            self.ephys_info['probe_y'] = None if (recent_ephys is None) else recent_ephys['probe_y']
+            self.ephys_info['probe_depth'] = None if (recent_ephys is None) else recent_ephys['probe_depth']
+            self.ephys_info['ba_id'] = None if (recent_ephys is None) else recent_ephys['ba_id']
 
 
 def _validate_neural_unit_data(unit_data: Dict[str, List[Any]], pl2_filenames: List[str]) -> bool:
