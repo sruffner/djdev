@@ -8,19 +8,18 @@ menu in the navigation bar along the top of the browser page.
 User authentication/login is implemented using the Flask-Login library. It is ASSUMED that the Dash app is hosted
 behind a reverse proxy that implements SSL so that all requests and responses are encrypted.
 
-There are currently 4 different "access levels" for authenticated users; the access level determine what routes in this
+There are currently 3 different "access levels" for authenticated users; the access level determine what routes in this
 "multi-page" app are accessible to the client:
-    1) Anonymous user: "/home", "/explore", and "/neurons".
-    2) Authenticated "readonly" user: Same routes as (1), with the ability to download data set. Also has access to
+    1) Anonymous user: "/explore", and "/neurons".
+    2) Authenticated "download" user: Same routes as (1), with the ability to download data sets. Also has access to
         "/user_profile" (by which the user can edit their own profile or change their password).
-    3) Authenticated "contribute" user: Same routes as (2), plus "/commit_session".
-    4) Authenticated "curate" user: Same routes as (3), plus "/curate".
-    5) Authenticated "admin" user: All routes.
+    3) Authenticated "commit" user: Same routes as (2), plus "/commit_session".
+    4) Authenticated "admin" user: All routes.
 Since a user could choose to access this app across multiple tabs in the browser, then later logout on any one of the
 tabs, the other tabs could expose content to which the client should no longer have access. All restricted pages must
 handle this scenario. There's also the possibility that the user could leave open the browser tab(s) and the user
 session subsequently expires. For this reason, a Dash Interval component fires once every 10 seconds to check the
-client's authentication status and redirect to "/home" if the client is logged out or otherwise lacks the required
+client's authentication status and redirect to "/explore" if the client is logged out or otherwise lacks the required
 access level for the current page content.
 
 Note the "__main__"" entry point at the end of the file. The portal application is started in Python with the
@@ -40,7 +39,7 @@ import flask_login
 
 from app import app, load_authorized_user
 from database.manager import DataBaseManager
-from pages import home, curate, commit_session, explore, neurons, user_profile, manage_users
+from pages import curate, commit_session, explore, neurons, user_profile, manage_users
 
 
 _LOGIN_MODAL_ID = "login-modal"
@@ -119,7 +118,7 @@ def _serve_layout() -> html.Div:
 
     navbar = dbc.Navbar(
         [
-            html.A(dbc.NavbarBrand("Lisberger Data Portal"), href="/home"),
+            html.A(dbc.NavbarBrand("Lisberger Data Portal"), href="/explore"),
             dbc.Row(
                 [
                     dbc.Col(dbc.Button("Login", id=_LOGIN_ID, color="info", style=login_btn_style, n_clicks=0),
@@ -178,7 +177,7 @@ def display_page(pathname, n_intervals, current_href):
     # or doesn't have the required access. When that happens, redirect to the home page.
     if (trigger_id == _AUTH_INTV_ID) and (n_intervals is not None):
         url_parts = urlparse(current_href) if isinstance(current_href, str) else ""
-        if url_parts.path in ['/explore', '/neurons', '/home', '/']:
+        if url_parts.path in ['/explore', '/neurons', '/']:
             return dash.no_update, dash.no_update, False
         can_commit = is_admin = is_logged_in = False
         if flask_login.current_user.is_authenticated:
@@ -190,7 +189,7 @@ def display_page(pathname, n_intervals, current_href):
         if ((url_parts.path == '/curate') and not is_admin) or \
                 ((url_parts.path == '/commit_session') and not can_commit) or \
                 ((url_parts.path == '/manage_users') and not is_admin) or (not is_logged_in):
-            url_parts = [(part if i != 2 else '/home') for i, part in enumerate(url_parts)]
+            url_parts = [(part if i != 2 else '/explore') for i, part in enumerate(url_parts)]
             return dash.no_update, urlunparse(url_parts), True
         return dash.no_update, dash.no_update, False
 
@@ -220,12 +219,12 @@ def display_page(pathname, n_intervals, current_href):
             layout = manage_users.serve_layout() if is_admin else None
             redirect = not is_admin
         else:
-            layout = home.serve_layout(is_admin, can_commit)
-            redirect = not (pathname in ['/', '/home'])   # eg, someone enters a bogus path manually
+            layout = explore.layout
+            redirect = not (pathname in ['/', '/explore'])   # eg, someone enters a bogus path manually
     update_href = dash.no_update
     if redirect:
         url_parts = urlparse(current_href)
-        update_href = urlunparse([(part if i != 2 else '/home') for i, part in enumerate(url_parts)])
+        update_href = urlunparse([(part if i != 2 else '/explore') for i, part in enumerate(url_parts)])
     return layout, update_href, redirect
 
 
@@ -269,7 +268,7 @@ def login_callback(*args):
             out[8] = not portal_user.is_admin()
             out[9] = ""
             out[10] = False
-            out[11] = '/home'
+            out[11] = '/explore'
         else:
             out[9] = error_msg
             out[10] = True
@@ -285,7 +284,7 @@ def login_callback(*args):
         out[6] = True
         out[7] = True
         out[8] = True
-        out[11] = '/home'
+        out[11] = '/explore'
     return tuple(out)
 
 
