@@ -155,8 +155,8 @@ class _BasePanel:
         pfx = self._prefix
         layout = [
             html.Div(id=f"{pfx}_table_div", children=[self._data_table()]),
-            dbc.Alert("", id=f"{self._prefix}_alert", color="danger", dismissable=True, duration=10000, fade=True,
-                      is_open=False, className="mt-3 mb-1"),
+            dbc.Alert("", id=f"{self._prefix}_alert", color="danger", dismissable=True, is_open=False,
+                      className="mt-3 mb-1"),
             dbc.Button("Add", id=f"add_{pfx}_btn", color="primary", className="mr-2 mt-3"),
             dbc.Button("Remove", id=f"del_{pfx}_btn", color="primary", className="mr-2 mt-3", disabled=True),
             dbc.Modal(
@@ -208,8 +208,8 @@ class _BasePanel:
                 if i < (len(assoc_form_grps) - 1):
                     form_kids.append(html.Hr())
             form_kids.append(
-                dbc.Alert("", id=f"{self._prefix}_xref_alert", color="success", dismissable=True, duration=10000,
-                          fade=True, is_open=False, className="mt-2 mb-1")
+                dbc.Alert("", id=f"{self._prefix}_xref_alert", color="success", dismissable=True, is_open=False,
+                          className="mt-2 mb-1")
             )
             layout.append(
                 dbc.Button("Related " + ", ".join(related_btn_labels),

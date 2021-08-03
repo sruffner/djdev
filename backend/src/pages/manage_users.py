@@ -116,7 +116,7 @@ def _table_of_user_accounts(user_is_admin: bool) -> html.Div:
         style_table={'height': '500px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
     )
 
-    alert = dbc.Alert(error_msg, id=_OP_ALERT_ID, color='danger', dismissable=True, duration=10000, fade=True,
+    alert = dbc.Alert(error_msg, id=_OP_ALERT_ID, color='danger', dismissable=True, fade=True,
                       is_open=(error_msg is not None), className="mb-3")
     return html.Div([alert, data_table])
 
@@ -192,8 +192,7 @@ def serve_layout() -> html.Div:
     form_groups.append(dbc.FormGroup([dbc.Label("", width=2), dbc.Col(entry_widget, width=10)], row=True))
 
     form_groups.append(dbc.FormGroup(
-        dbc.Alert("", id=_REG_ALERT_ID, color='danger', dismissable=True, duration=10000, fade=True, is_open=False,
-                  className='ml-3'),
+        dbc.Alert("", id=_REG_ALERT_ID, color='danger', dismissable=True, fade=True, is_open=False, className='ml-3'),
         row=True
     ))
     user_form = dbc.Form(form_groups)
