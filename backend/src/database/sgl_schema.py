@@ -71,19 +71,10 @@ from __future__ import annotations  # Needed in Python 3.7y to type-hint a metho
 from typing import Dict, Any, Optional
 
 import datajoint as dj
-import time
-import warnings
 
-# On first import, we connect to the database and declare the schema (if it is not already defined in database)
-while True:
-    try:
-        db_connection = dj.conn()
-        break
-    except Exception as connection_error: 
-        warnings.warn(RuntimeWarning(
-            "Unable to connect to the database with error {0}. Trying again in 5s.".format(connection_error)))
-        time.sleep(5)
-schema = dj.schema('sgl', connection=db_connection)
+# NOTE: DataJoint must already be configured and connected to the MySQL database, or this function call will trigger
+# an interactive connection attampt.
+schema = dj.schema('sgl')
 
 
 @schema

@@ -17,41 +17,13 @@ import pickle
 import sys
 from pathlib import Path
 import os
-from typing import Optional
-import datajoint as dj
-import time
 
 
 if __name__ == '__main__':
-    print("print_log.py: Summary of update log history for the Lisberger lab database...\n\n",
+    print("print_log.py: Summary of update log history for the Lisberger lab database...\n",
           file=sys.stdout, flush=True)
 
-    # Even though this script does not access the database, we need to do this because we're running it off the
-    # 'backend' service. For some reason, the module-level code in database.sgl_schema that makes the initial
-    # database connection will happen even though this module does NOT import sgl_schema.py!
-    print("==> Attempting to connect to the database...")
-    dj.config['database.host'] = 'db'
-    dj.config['database.user'] = 'root'
-    dj.config['safemode'] = False
-    dj.config['enable_python_native_blobs'] = True
-    if 'MYSQL_ROOT_PASSWORD' not in os.environ:
-        print("====> ERROR: The environment variable MYSQL_ROOT_PASSWORD is missing... BYE!", flush=True)
-        exit(1)
-    dj.config['database.password'] = os.environ['MYSQL_ROOT_PASSWORD']
-
-    n_tries = 0
-    db_connection: Optional[dj.Connection] = None
-    while n_tries < 12:
-        try:
-            db_connection = dj.conn()
-            break
-        except Exception as err:
-            print(f"    Failed to connect ({str(err)}). Trying again in 5 seconds...", flush=True)
-            time.sleep(5)
-    if db_connection is None:
-        print("====> ERROR: Failed to connect to the database for 60+ seconds. Giving up.", flush=True)
-        exit(1)
-
+    print("\n****** Update log history ******\n", file=sys.stdout, flush=True)
     log_file_path = Path(os.environ['DJDEV_ROOT_REPO'], 'logs', 'update_log')
     if not log_file_path.is_file():
         print(f"=====> Error: No log file found at {str(log_file_path)}", file=sys.stdout, flush=True)
@@ -67,7 +39,7 @@ if __name__ == '__main__':
                     except EOFError:
                         break
         except Exception as e:
-            print(f"Exception occurred while printing update log history: {str(e)}", file=sys.stdout, flush=True)
+            print(f"=====> Error occurred while printing update log history: {str(e)}", file=sys.stdout, flush=True)
 
     print("\n\nBYE!", file=sys.stdout, flush=True)
     exit(0)

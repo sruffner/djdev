@@ -1,61 +1,40 @@
 """
 app.py: Create and configure the Dash application instance for the Lisberger lab data portal.
 
-TODO: Configuration really needs work. The DataJoint configuration appears in multiple files -- see reset.py,
- reconstruct.py, sgl_schema.py, sgl_auth.py. We also need to be smarter about setting up the initial database
- connection.
-
 @created: oct2020
 @author: sruffner
 """
-from datetime import timedelta
 from typing import Dict, Optional
 
 import dash
 import dash_bootstrap_components as dbc
-import datajoint as dj
 import dash_uploader as du
-import os
-from pathlib import Path
 import flask_login
+from config import get_config, AppConfig
 
-# bootstrap theme
-ext_ss = [dbc.themes.SPACELAB]
-
-app = dash.Dash(__name__, external_stylesheets=ext_ss)
-
+cfg: AppConfig = get_config()
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.SPACELAB])
 server = app.server
-app.config.suppress_callback_exceptions = True
+
+app.config.suppress_callback_exceptions = cfg.dash_suppress_callback_exceptions
 
 # configure Dash uploader to upload to staging directory in backend container
-if 'DJDEV_ROOT_REPO' not in os.environ:
-    raise RuntimeError('The environment variable DJDEV_ROOT_REPO is required.')
-upload_dir = Path(os.environ['DJDEV_ROOT_REPO'], 'staging')
-du.configure_upload(app, str(upload_dir))
+du.configure_upload(app, cfg.dash_upload_dir)
 
-# DataJoint configuration.
-# TODO: This and the initial DB connection attempt needs to go in a separate file. I repeat this code in some other
-#  places -- see sgl_auth.py, reconstruct.py, reset.py.
-dj.config['database.host'] = 'db'
-dj.config['database.user'] = 'root'
-dj.config['safemode'] = False
-dj.config['enable_python_native_blobs'] = True
-if 'MYSQL_ROOT_PASSWORD' not in os.environ:
-    raise RuntimeError('The environment variable MYSQL_ROOT_PASSWORD is required.')
-dj.config['database.password'] = os.environ['MYSQL_ROOT_PASSWORD']
+# configure DataJoint and connect to MySQL server. Must abort if connection is not established!
+if not cfg.init_database_connection():
+    raise RuntimeError('Unable to connect to database!')
 
-# We have to put this AFTER configuring DJ, as importing manager.py will trigger initiating the DB connection
+# We have to put this import AFTER configuring DJ and connecting to the database, since it will trigger a DB query
 from database.manager import DataBaseManager, ADMIN_ACCESS, COMMIT_ACCESS
 
-# Setup for Flask-Login. Note we restrict session lifetimes to 24 hours.
-# TODO: We need to work on app configuration and put the SECRET_KEY in a safe place. One idea is to generate it on
-#  first use and store in a file that is always git-ignored....
-server.permanent_session_lifetime = timedelta(hours=24)
-server.config.update(SECRET_KEY=os.urandom(12))
+# Setup for Flask-Login
+server.permanent_session_lifetime = cfg.flask_permanent_session_lifetime
+server.config.update(SECRET_KEY=cfg.flask_secret_key)
 login_manager = flask_login.LoginManager()
 login_manager.init_app(server)
-login_manager.login_view = '/home'
-login_manager.refresh_view = '/home'
+login_manager.login_view = '/explore'
+login_manager.refresh_view = '/explore'
 login_manager.needs_refresh_message = "Session timed out, please login again."
 login_manager.needs_refresh_message_category = "info"
 

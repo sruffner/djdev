@@ -32,27 +32,19 @@ backend service with 'docker-compose restart backend'.
 """
 import pickle
 import sys
-import os
 from getpass import getpass
-
-import datajoint as dj
-
-# DataJoint configuration parameters required to connect to the database. In the portal backend server, these are
-# found in app.py. THESE NEED TO BE SETUP BEFORE THE CONNECTION ATTEMPT THAT OCCURS WHEN IMPORTING sgl_schema.py
-# via the from...import statement that follows
 from werkzeug.security import generate_password_hash
 
-from database.table_info import DBTable
+from config import get_config
 
-dj.config['database.host'] = 'db'
-dj.config['database.user'] = 'root'
-dj.config['safemode'] = False
-dj.config['enable_python_native_blobs'] = True
-if 'MYSQL_ROOT_PASSWORD' not in os.environ:
-    print("====> ERROR: The environment variable MYSQL_ROOT_PASSWORD is missing!", flush=True)
-dj.config['database.password'] = os.environ['MYSQL_ROOT_PASSWORD']
+# configure DataJoint and connect to MySQL server. Must abort if connection is not established!
+cfg = get_config()
+if not cfg.init_database_connection():
+    raise RuntimeError('Unable to connect to database!')
 
+# We have to put this import AFTER configuring DJ and connecting to the database, since it will trigger a DB query
 from database.manager import DataBaseManager, PASSWORD_HASH_METHOD
+from database.table_info import DBTable
 
 
 def _prompt_for_password(username: str) -> str:
