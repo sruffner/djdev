@@ -95,6 +95,7 @@ def _table_of_neurons() -> dt.DataTable:
                  for col in _NEURON_TABLE_COLS],
         data=rows,
         row_selectable='single',
+        cell_selectable=False,
         selected_rows=[],
         style_header={'fontWeight': 'bold'},
         style_cell={'textAlign': 'left', 'whiteSpace': 'normal', 'height': 'auto', 'lineHeight': '18px'},
@@ -953,6 +954,22 @@ def serve_layout() -> html.Div:
         ])
     ])
     return layout
+
+
+# this clientside callback highlights all cells in the selected row
+app.clientside_callback(
+    """
+    function(rows) {
+        let style = [];
+        if (Array.isArray(rows) && (rows.length > 0) && Number.isInteger(rows[0])) {
+            style = [{"if": {"row_index": rows[0]}, "background-color": "rgba(176, 196, 222, 0.5)"}];
+        }
+        return style;
+    }
+    """,
+    Output(_NEURON_TABLE_ID, "style_data_conditional"),
+    Input(_NEURON_TABLE_ID, "selected_rows")
+)
 
 
 @app.callback([Output(_COLLAPSE_ID, "is_open"), Output(_SUMMARY_TAB_ID, "children"),

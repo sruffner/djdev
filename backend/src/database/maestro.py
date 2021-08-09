@@ -2614,6 +2614,7 @@ class Protocol(NamedTuple):
         segment_table = dt.DataTable(
             columns=columns,
             data=rows,
+            cell_selectable=False,
             style_header={'fontWeight': 'bold', 'textAlign': 'center'},
             style_cell={'textAlign': 'center', 'whiteSpace': 'normal', 'height': 'auto', 'lineHeight': '18px'},
             style_cell_conditional=[

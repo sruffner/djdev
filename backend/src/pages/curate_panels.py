@@ -280,10 +280,18 @@ class _BasePanel:
                      for col in cols],
             data=rows,
             row_selectable='single',
+            cell_selectable=False,
             selected_rows=[],
             style_header={'fontWeight': 'bold'},
             style_cell={'textAlign': 'left', 'whiteSpace': 'normal', 'height': 'auto', 'lineHeight': '18px'},
             style_data={'whiteSpace': 'pre-wrap'},
+            style_data_conditional=[
+                {
+                    "if": {"state": "active"},  # 'active' | 'selected'
+                    "backgroundColor": "rgba(135, 206, 250, 0.4)",
+                    "border": "1px solid blue",
+                },
+            ],
             style_cell_conditional=[{'if': {'column_id': col.id}, 'width': col.width} for col in cols],
             tooltip_data=tooltips, tooltip_duration=None,
             css=css_selectors,
@@ -458,8 +466,23 @@ class _BasePanel:
             app (dash.Dash): The Dash application object. This is used to apply the Dash callback decorator to each
             callback function
         """
-
         pfx = self._prefix
+
+        # this clientside callback highlights all cells in the selected row
+        app.clientside_callback(
+            """
+            function(rows) {
+                let style = [];
+                if (Array.isArray(rows) && (rows.length > 0) && Number.isInteger(rows[0])) {
+                    style = [{"if": {"row_index": rows[0]}, "background-color": "rgba(176, 196, 222, 0.5)"}];
+                }
+                return style;
+            }
+            """,
+            Output(f"{pfx}_table", "style_data_conditional"),
+            Input(f"{pfx}_table", "selected_rows")
+        )
+
         num_xref_dropdowns = 0
 
         input_vector = [Input(f"del_{pfx}_btn", "n_clicks"), Input(f"{pfx}_entry_done_btn", "n_clicks")]
