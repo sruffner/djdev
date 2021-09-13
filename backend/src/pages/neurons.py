@@ -939,9 +939,9 @@ def serve_layout() -> html.Div:
     """ Rendering of a tabbed panel in which a selected neuron's summary and response data are displayed. """
 
     markdown = dcc.Markdown(
-        '''Click on the radio button next to a row in the table to display a two-tab detail panel for the selected 
-        neural unit. Hover or click on the **Filter** button to filter the list of units by neuron type, recorded date,
-        researcher, or subject.'''
+        '''Click on the radio button next to a row in the table to display a detail panel for the selected neural 
+        unit. Hover or click on the **Filter** button to filter the list of units by neuron type, spike count, 
+        recorded date, researcher, or subject.'''
     )
     layout = html.Div([
         dbc.Container([
@@ -1117,6 +1117,7 @@ def update_filter_result_count(*args):
     if trigger_id == _DATE_PICKER_ID and args[9] == _FILTER_UNUSED:
         raise dash.exceptions.PreventUpdate
 
-    restrictions = _filter_restrictions(args[6], args[7], args[8], args[9], args[11], int(args[10]))
+    min_spikes = 0 if (args[10] is None) else int(args[10])
+    restrictions = _filter_restrictions(args[6], args[7], args[8], args[9], args[11], min_spikes)
     rows = _fetch_neurons(restrictions)
     return f"{len(rows)} units found", [], rows
