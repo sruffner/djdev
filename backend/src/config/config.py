@@ -14,6 +14,7 @@ TODO: Implement a secure way to get the Flask secret key (right now we generate 
 """
 from __future__ import annotations  # Needed in Python 3.7 to type-hint a method with the type of enclosing class
 
+import logging
 import os
 import sys
 import time
@@ -87,16 +88,20 @@ class AppConfig:
         dj.config['safemode'] = self.dj_safemode
         dj.config['enable_python_native_blobs'] = self.dj_enable_python_native_blobs
 
+        logger = logging.getLogger(__name__)
         n_tries = 0
         db_connection: Optional[dj.Connection] = None
         while n_tries < 12:
+            n_tries = n_tries + 1
             try:
                 db_connection = dj.conn()
                 break
             except Exception as err:
-                print(f"    Failed to connect to MySQL server ({str(err)}). Trying again in 5 seconds...",
-                      file=sys.stdout, flush=True)
-                time.sleep(5)
+                if n_tries < 12:
+                    logger.warning(f"Failed to connect to MySQL server. Trying again in 5s. [{str(err)}]")
+                    time.sleep(5)
         if db_connection is None:
-            print(f"ERROR: Failed to establish connection to MySQL server!", file=sys.stdout, flush=True)
+            logger.error(f"Failed to establish connection to MySQL server after {n_tries} attempts. Giving up.")
+        else:
+            logger.info(f"Connected to MySQL server after {n_tries} attempts.")
         return db_connection is not None

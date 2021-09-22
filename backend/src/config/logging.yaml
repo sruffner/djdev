@@ -1,0 +1,26 @@
+---
+version: 1
+disable_existing_loggers: False
+formatters:
+  simple:
+    format: "[%(asctime)s] %(name)s: %(levelname)s - %(message)s"
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: DEBUG
+    formatter: simple
+    stream: ext://sys.stdout
+
+loggers:
+  # Via convention, since Dash is instantiated in app.py with Dash(__name___, ...), Dash and Flask use the 'app'
+  # logger. We don't want detailed DEBUG messages from them, so we configure the logger accordingly.
+  app:
+    level: INFO
+  # We're setting root logger and handler to DEBUG, but we don't want those details from DataJoint library!
+  datajoint:
+    level: ERROR
+
+root:
+  level: DEBUG
+  handlers: [console]

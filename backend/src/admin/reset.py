@@ -24,7 +24,7 @@ import sys
 
 import datajoint as dj
 
-from config import get_config
+from config.config import get_config
 
 if __name__ == '__main__':
     print("reset.py: Drops the Lisberger lab database...", file=sys.stdout, flush=True)

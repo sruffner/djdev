@@ -28,6 +28,7 @@ command "python ./index.py". The Dash application instance is created in app.py.
 @created: oct2020
 @author: sruffner
 """
+import logging
 from urllib.parse import urlparse, urlunparse
 
 import dash
@@ -40,6 +41,9 @@ import flask_login
 from app import app, load_authorized_user
 from database.manager import DataBaseManager
 from pages import curate, commit_session, explore, neurons, user_profile, manage_users
+
+
+logger = logging.getLogger(__name__)
 
 
 _LOGIN_MODAL_ID = "login-modal"
@@ -258,6 +262,7 @@ def login_callback(*args):
             else:
                 flask_login.login_user(portal_user)
         if portal_user:  # successful login!
+            logger.info(f"{username} logged in successfully")  # TODO: Are we OK with usernames in logs?
             out[0] = False
             out[1] = out[2] = ""
             out[3] = f"Welcome, {portal_user.first_name()}"
@@ -270,6 +275,7 @@ def login_callback(*args):
             out[10] = False
             out[11] = '/explore'
         else:
+            logger.warning(f"Unsuccessful login attempt ({error_msg})")
             out[9] = error_msg
             out[10] = True
     elif trigger_id == _LOGIN_CANCEL_ID:
@@ -277,6 +283,8 @@ def login_callback(*args):
         out[1] = out[2] = ""
         out[10] = False
     elif trigger_id == _LOGOUT_ID:
+        if flask_login.current_user.is_authenticated:
+            logger.info(f"{flask_login.current_user.get_id()} logging out")  # TODO: Are we OK with usernames in logs?
         flask_login.logout_user()
         out[3] = "Welcome"
         out[4] = dict(display='none')
@@ -289,4 +297,5 @@ def login_callback(*args):
 
 
 if __name__ == '__main__':
+    logger.info("Starting portal app on Flask development server.")
     app.run_server(host='0.0.0.0', port='8050', debug=True)

@@ -28,7 +28,7 @@ from datetime import datetime
 from getpass import getpass
 from typing import Optional
 
-from config import get_config
+from config.config import get_config
 
 # configure DataJoint and connect to MySQL server. Must abort if connection is not established!
 cfg = get_config()

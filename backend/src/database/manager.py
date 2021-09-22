@@ -156,7 +156,7 @@ import datajoint as dj
 import numpy.lib.stride_tricks as stride_tricks
 from werkzeug.security import generate_password_hash, check_password_hash
 
-from common import check_date
+from utils.common import check_date
 
 import database.table_info as ti
 from database.table_info import DBTable, AttributeValue, AttrTypeEnum

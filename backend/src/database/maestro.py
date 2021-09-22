@@ -30,7 +30,7 @@ import dash_bootstrap_components as dbc
 import dash_table as dt
 import numpy as np
 
-from common import DocEnum
+from utils.common import DocEnum
 
 
 class DataFileError(Exception):

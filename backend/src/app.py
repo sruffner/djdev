@@ -4,17 +4,25 @@ app.py: Create and configure the Dash application instance for the Lisberger lab
 @created: oct2020
 @author: sruffner
 """
+import logging
 from typing import Dict, Optional
 
 import dash
 import dash_bootstrap_components as dbc
 import dash_uploader as du
 import flask_login
-from config import get_config, AppConfig
+from config.config import get_config, AppConfig
+from config.logging import setup_logging
+
+setup_logging(cfg_file='config/logging.yaml')
 
 cfg: AppConfig = get_config()
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.SPACELAB])
 server = app.server
+
+# Dash adds a stream handler to the 'app' logger. We don't want this.
+logger = logging.getLogger(__name__)
+logger.handlers.clear()
 
 app.config.suppress_callback_exceptions = cfg.dash_suppress_callback_exceptions
 
@@ -79,4 +87,7 @@ def load_authorized_user(username: str) -> Optional[PortalUser]:
         The user object. Returns None if not found.
     """
     user_record = DataBaseManager().get_portal_user_record(username)
-    return None if isinstance(user_record, str) else PortalUser(user_record)
+    if isinstance(user_record, str):
+        logger.warning(f"Authentication error: {user_record}")
+        return None
+    return PortalUser(user_record)

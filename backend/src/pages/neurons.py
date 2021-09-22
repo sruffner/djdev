@@ -33,7 +33,7 @@ from plotly.subplots import make_subplots
 
 import database.table_info as ti
 from app import app
-from common import check_date
+from utils.common import check_date
 from database import stats
 from database.manager import DataBaseManager, TrialData
 from database.table_info import DBTable
