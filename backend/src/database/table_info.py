@@ -346,7 +346,8 @@ _table_info: Dict[DBTable, _TableInfo] = {
                 AttrTypeEnum.TEXT, 'Organization', False, None, None, None, '150px', [0, 50], r'[\s\S]*', None,
                 "Enter organization name (optional, 0-50 chars; eg, 'Duke University')", True),
             'registered': AttrInfo(AttrTypeEnum.TIME, 'Registered On', False),
-            'last_login': AttrInfo(AttrTypeEnum.TIME, 'Last Login', False),
+            'last_login': AttrInfo(AttrTypeEnum.TIME, 'Last Login', False, None, None, None, '50px', None, None,
+                                   None, None, True),
             'pwd_changed': AttrInfo(AttrTypeEnum.TIME, 'Last Password Change', False)
         }),
 
@@ -467,7 +468,8 @@ _table_info: Dict[DBTable, _TableInfo] = {
             'study_id': AttrInfo(AttrTypeEnum.FKEY, 'Study', False, DBTable.STUDY, 'study_id'),
             'session_notes': AttrInfo(
                 AttrTypeEnum.TEXT, 'Notes', False, None, None, None, '500px', [0, 2048], r'[\s\S]*', None,
-                'Enter any notes about this particular session (optional, up to 2048 chars)')
+                'Enter any notes about this particular session (optional, up to 2048 chars)'),
+            'committed': AttrInfo(AttrTypeEnum.TIME, 'Committed On', False)
         }),
 
     DBTable.SESSION_EPHYS: _TableInfo(

@@ -155,7 +155,7 @@ class _SessionCommitter:
     def stage3_body(task_id: str) -> Any:
         session_builder = DataBaseManager()
         session_info = session_builder.get_session_info(task_id)
-        entry_form = session_builder.entry_form(ti.DBTable.SESSION, None, session_info, None)
+        entry_form = session_builder.entry_form(ti.DBTable.SESSION, None, ['committed'], session_info, None)
         session_info_tab_content = dbc.Card(dbc.CardBody(entry_form), className="mt-3")
 
         proto_names = session_builder.get_protocol_candidate_names(task_id)
@@ -174,7 +174,7 @@ class _SessionCommitter:
 
         # note: this tab will be disabled if session does not include neural units recordings
         ephys_info = session_builder.get_ephys_info(task_id)
-        ephys_form = session_builder.entry_form(ti.DBTable.SESSION_EPHYS, None, ephys_info, None)
+        ephys_form = session_builder.entry_form(ti.DBTable.SESSION_EPHYS, None, None, ephys_info, None)
         ephys_info_tab_content = dbc.Card(dbc.CardBody(ephys_form), className="mt-3")
 
         num_units = session_builder.get_num_neural_units(task_id)
@@ -506,7 +506,9 @@ class _SessionCommitter:
                 session_builder.set_neural_unit_type(task_id, -1 if apply_to_all else unit_idx, nt_id)
             return dash.no_update
 
-        state_vector = [State(f"{attr_id}_input", "value") for attr_id in ti.attributes_of(ti.DBTable.SESSION)]
+        # the session's committed timestamp is NOT set by user
+        state_vector = [State(f"{attr_id}_input", "value") for attr_id in ti.attributes_of(ti.DBTable.SESSION)
+                        if not (attr_id == 'committed')]
         state_vector.extend([State(f"{attr_id}_input", "value")
                              for attr_id in ti.attributes_of(ti.DBTable.SESSION_EPHYS)])
         state_vector.append(State('commit_state', 'data'))
@@ -529,8 +531,10 @@ class _SessionCommitter:
             elif n_continue is not None:
                 session_info = dict()
                 ephys_info = None
+                # have to be careful because we're excluding the 'committed' attribute
                 for i, attr_id in enumerate(ti.attributes_of(ti.DBTable.SESSION)):
-                    session_info[attr_id] = args[i]
+                    if not (attr_id == 'committed'):
+                        session_info[attr_id] = args[i]
                 if session_builder.get_ephys_info(task_id) is not None:
                     ofs = len(session_info.items())
                     ephys_info = dict()

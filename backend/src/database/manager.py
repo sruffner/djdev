@@ -134,6 +134,7 @@ decided to use it to implement access to the user database.
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
 import functools
+import logging
 import os
 import pickle
 import re
@@ -164,6 +165,8 @@ import database.maestro as maestro
 import database.PL2 as PL2
 import database.sgl_schema as sgl
 
+
+logger = logging.getLogger(__name__)
 
 _table_map: Dict[DBTable, dj.Table] = {
     DBTable.USER: sgl.User(),
@@ -319,13 +322,15 @@ class DataBaseManager:
         pk = dict(username=username)
         error_msg = None
         try:
+            logger.debug(f"Trying to authenticate {username}")
             with self._db_lock:
                 hashed_password, access = (table & pk).fetch1('password', 'access')
             if not check_password_hash(hashed_password, password):
                 error_msg = "Incorrect password"
             if admin_only and (access != 'admin'):
                 error_msg = "Admin-level access required"
-        except Exception:
+        except Exception as e:
+            logger.error(f"Unable to authenticate user: {str(e)}")
             error_msg = 'Unrecognized username or database error'
 
         # when a user is authenticated, update their last login timestamp, but don't fail if this update fails, as
@@ -515,6 +520,7 @@ class DataBaseManager:
         return self.update_table_row(DBTable.USER, dict(username=username, access=access))
 
     def entry_form(self, table_id: DBTable, include_attrs: Optional[List[str]] = None,
+                   exclude_attrs: Optional[List[str]] = None,
                    initial_entry: Optional[Dict[str, AttributeValue]] = None,
                    alert_id: Optional[str] = None) -> dbc.Form:
         """
@@ -545,6 +551,8 @@ class DataBaseManager:
                 and, for a part table, any attribute that is part of the master table's primary key. Otherwise, only the
                 attributes identified in this list  -- that are indeed valid attributes of the table and are not among
                 the exceptions above -- are exposed on the form.
+            exclude_attrs: If not None, the form will exclude any table attributes named in this list. However, it will
+                ignore any attempt to exclude a primary key attribute.
             initial_entry: If not None, this dictionary contains initial values for the attributes, keyed by attribute
                 ID. If present, it must contain a key-value pair for each table attribute that is included on the form.
             alert_id: If not None, this is the ID assigned to the Alert component included along the bottom of the form;
@@ -564,6 +572,8 @@ class DataBaseManager:
             if include_attrs and not (attr_id in include_attrs):
                 continue
             attr_info = ti.attribute_info(table_id, attr_id)
+            if exclude_attrs and (attr_id in exclude_attrs) and (not attr_info.pkey):
+                continue
             if (attr_info.type == AttrTypeEnum.AUTO) or (attr_info.type == AttrTypeEnum.BLOB):
                 continue
             elif attr_info.type == AttrTypeEnum.ENUM:
@@ -1890,6 +1900,7 @@ class DataBaseManager:
                 worker.msg_q.put_nowait(f"Inserting session entry and any new trial protocols into database...")
                 session_table = sgl.Session()
                 with self._db_lock, session_table.connection.transaction:
+                    worker.session_info['committed'] = datetime.now().isoformat(sep=' ', timespec='seconds')
                     session_table.insert1(worker.session_info, replace=False)
                     session_inserted = True
                     if worker.ephys_info is not None:
@@ -2957,7 +2968,8 @@ class ProcessArchiveThread(threading.Thread):
             unspecified_id = res[0]['nt_id']
 
         # prepare the Session and, if applicable, Session.EPhys entries. We only support Omniplex system, and we
-        # infer sampling rate from the length of a unit's spike template waveform, which spans 10ms
+        # infer sampling rate from the length of a unit's spike template waveform, which spans 10ms. The 'commmitted'
+        # timestamp is only set when the session is actually committed to the database.
         self.session_info = dict()
         self.session_info['experimenter'] = self.username
         self.session_info['subj_id'] = subj_id

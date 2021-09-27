@@ -16,7 +16,6 @@ from __future__ import annotations  # Needed in Python 3.7 to type-hint a method
 
 import logging
 import os
-import sys
 import time
 from dataclasses import dataclass
 from datetime import timedelta

@@ -224,6 +224,7 @@ class Session(dj.Manual):
     -> Rig                                 # The lab rig on which experiment session was conducted
     -> Study                               # The research project with which this session is associated
     session_notes : varchar(2048)          # Notes about session
+    committed : timestamp                  # When session was committed to database
     """
 
     class EPhys(dj.Part):

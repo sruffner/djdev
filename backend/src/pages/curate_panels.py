@@ -248,7 +248,7 @@ class _BasePanel:
         Returns:
             A Dash Bootstrap Form component.
         """
-        return DataBaseManager().entry_form(self._table_id, self._attributes_exposed(), None,
+        return DataBaseManager().entry_form(self._table_id, self._attributes_exposed(), None, None,
                                             f"{self._prefix}_entry_alert")
 
     def _data_table(self) -> dt.DataTable:
