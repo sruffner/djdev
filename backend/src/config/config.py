@@ -6,9 +6,6 @@ needed. While some configuration parameters are unlikely to change, others may b
 scenario (development vs production), and others need to be safeguarded in some fashion -- like the secret key for
 Flask sessions or the username/password for the MySQL server.
 
-TODO: Implement a secure way to get the Flask secret key (right now we generate a new one each time the app starts),
-    the database user/password for DataJoint.
-
 @created: aug2021
 @author: sruffner
 """
@@ -41,7 +38,14 @@ def get_config() -> AppConfig:
         if 'MYSQL_ROOT_PASSWORD' not in os.environ:
             raise RuntimeError('The environment variable MYSQL_ROOT_PASSWORD is required.')
         mysql_password = os.environ['MYSQL_ROOT_PASSWORD']
-        get_config.config = AppConfig(dash_upload_dir=upload_dir, dj_database_password=mysql_password)
+        if 'MYSQL_HOSTNAME' not in os.environ:
+            raise RuntimeError('The environment variable MYSQL_HOSTNAME is required.')
+        mysql_host = os.environ['MYSQL_HOSTNAME']
+        if 'FLASK_SECRET_KEY' not in os.environ:
+            raise RuntimeError('The environment variable FLASK_SECRET_KEY is required.')
+        secret_key = os.environ['FLASK_SECRET_KEY']
+        get_config.config = AppConfig(dash_upload_dir=upload_dir, dj_database_password=mysql_password,
+                                      dj_database_host=mysql_host, flask_secret_key=secret_key)
     return get_config.config
 
 
@@ -66,8 +70,12 @@ class AppConfig:
     """ Enable/disable python native blobs in DataJoint. """
     flask_permanent_session_lifetime: timedelta = timedelta(hours=24)
     """ Flask session lifetime. Flask-Login uses this to timeout client login sessions. """
-    flask_secret_key: bytes = os.urandom(12)
-    """ Flask-Login library uses sessions for authentication, so the Flask secret key must be set. """
+    flask_secret_key: str = os.urandom(12).hex()
+    """ 
+    Flask-Login library uses sessions for authentication, so the Flask secret key must be set. NOTE that this should be
+    set from a secret, not set to a new value every time the app is started -- as that will invalidate existing Flask
+    sessions.
+    """
 
     def init_database_connection(self) -> bool:
         """

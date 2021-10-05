@@ -1,0 +1,137 @@
+# This YAML defines the deployment of the Lisberger lab portal application to the single-node Kubernetes cluster
+# enabled on Docker Desktop on a development workstation. It most closely resembles the Docker Compose deployment
+# on the same workstation, AND utilizes images that have been built or cached in the local Docker Desktop image
+# repository. It currently deploys to the 'default' namespace.
+#
+# The application is deployed in a single pod with independent containers for the MySQL database and the Dash-based
+# portal backend using the Flask development server. A persistent volume and associated volume claim, both sized at 5GB,
+# are reserved for the DB, while a PV and PVC of 30GB are reserved for the backend. The volumes are mapped to the same
+# local paths as in the Docker Compose deployment, in order to work with the same existing DB and repository files.
+#
+# This deployment definition is ONLY for testing on the local development workstation in Docker Kubernetes. A true
+# production deployment must resolve, at a minimum, these issues:
+#  1) Environmental variables -- some of which are secrets -- are exposed in this YAML file.
+#  2) The portal backend runs on the internal Flask WSGI server, which is NOT intended for production.
+#  3) The storage allocations for the database and portal repository in the production deployment will have to be
+#     significantly larger than what is defined here.
+#  4) We use a NodePort-type Service to expose the Dash app on port 31050 of the local host machine. HTTPS is NOT
+#     implemented, so the URL to access the portal app is http://localhost:31050. This is obviously not secure for
+#     production, nor for testing on Duke OKD.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-db
+  labels:
+    type: local
+    app: sgl-portal
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: "/Users/sruffner/srsc/projects/pycharm/djdev/data"
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-backend
+  labels:
+    type: local
+    app: sgl-portal
+spec:
+  capacity:
+    storage: 30Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual
+  hostPath:
+    path: "/Users/sruffner/srsc/projects/pycharm/djdev/repository"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-db
+  labels:
+    app: sgl-portal
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-backend
+  labels:
+    app: sgl-portal
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sgl-portal-svc
+  labels:
+    app: sgl-portal
+spec:
+  type: NodePort
+  selector:
+    app: sgl-portal
+  ports:
+    - protocol: TCP
+      port: 8050
+      targetPort: 8050
+      nodePort: 31050
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-app-local-dev
+  labels:
+    app: sgl-portal
+spec:
+  containers:
+  - name: sgl-db
+    image: datajoint/mysql:5.7
+    volumeMounts:
+      - name: mysqldata
+        mountPath: /var/lib/mysql
+    env:
+      - name: MYSQL_ROOT_PASSWORD
+        value: coltrane
+  - name: sgl-backend
+    image: djdev_backend
+    imagePullPolicy: Never  # we're getting this from Docker repo on localhost, not from DockerHub
+    ports:
+      - containerPort: 8050
+    volumeMounts:
+      - name: backend-repo
+        mountPath: /repository
+    env:
+      - name: MYSQL_HOSTNAME
+        value: 127.0.0.1
+      - name: MYSQL_ROOT_PASSWORD
+        value: coltrane
+      - name: DJDEV_ROOT_REPO
+        value: /repository
+      - name: FLASK_SECRET_KEY
+        value: "d93137a7386ff8eb7b6441f6d311cd21a3d0f5d62ad71014"
+  volumes:
+    - name: mysqldata
+      persistentVolumeClaim:
+        claimName: pvc-db
+    - name: backend-repo
+      persistentVolumeClaim:
+        claimName: pvc-backend

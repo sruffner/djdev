@@ -26,6 +26,8 @@ services:
     environment:
       - MYSQL_ROOT_PASSWORD=coltrane
       - DJDEV_ROOT_REPO=/repository
+      - MYSQL_HOSTNAME=db
+      - FLASK_SECRET_KEY=d93137a7386ff8eb7b6441f6d311cd21a3d0f5d62ad71014
 
 networks:
   sgl_network:
