@@ -9,5 +9,5 @@ include:
 build_backend:
   variables:
     THE_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME
-    THE_DOCKERFILE: backend/src/Dockerfile
+    THE_DOCKERFILE: backend/Dockerfile
   extends: .kaniko_build
