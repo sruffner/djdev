@@ -10,11 +10,10 @@
 #
 # This deployment definition is ONLY for testing on the local development workstation in Docker Kubernetes. A true
 # production deployment must resolve, at a minimum, these issues:
-#  1) Environmental variables -- some of which are secrets -- are exposed in this YAML file.
-#  2) The portal backend runs on the internal Flask WSGI server, which is NOT intended for production.
-#  3) The storage allocations for the database and portal repository in the production deployment will have to be
+#  1) The portal backend runs on the internal Flask WSGI server, which is NOT intended for production.
+#  2) The storage allocations for the database and portal repository in the production deployment will have to be
 #     significantly larger than what is defined here.
-#  4) We use a NodePort-type Service to expose the Dash app on port 31050 of the local host machine. HTTPS is NOT
+#  3) We use a NodePort-type Service to expose the Dash app on port 31050 of the local host machine. HTTPS is NOT
 #     implemented, so the URL to access the portal app is http://localhost:31050. This is obviously not secure for
 #     production, nor for testing on Duke OKD.
 apiVersion: v1
