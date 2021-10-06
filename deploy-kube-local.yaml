@@ -110,7 +110,10 @@ spec:
         mountPath: /var/lib/mysql
     env:
       - name: MYSQL_ROOT_PASSWORD
-        value: coltrane
+        valueFrom:
+          secretKeyRef:
+            name: sgl-secret
+            key: mysql_root_password
   - name: sgl-backend
     image: djdev_backend
     imagePullPolicy: Never  # we're getting this from Docker repo on localhost, not from DockerHub
@@ -122,12 +125,18 @@ spec:
     env:
       - name: MYSQL_HOSTNAME
         value: 127.0.0.1
-      - name: MYSQL_ROOT_PASSWORD
-        value: coltrane
       - name: DJDEV_ROOT_REPO
         value: /repository
+      - name: MYSQL_ROOT_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: sgl-secret
+            key: mysql_root_password
       - name: FLASK_SECRET_KEY
-        value: "d93137a7386ff8eb7b6441f6d311cd21a3d0f5d62ad71014"
+        valueFrom:
+          secretKeyRef:
+            name: sgl-secret
+            key: flask_secret_key
   volumes:
     - name: mysqldata
       persistentVolumeClaim:

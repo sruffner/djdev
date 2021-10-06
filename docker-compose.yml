@@ -3,8 +3,7 @@ services:
   db:
     container_name: sgl_db
     image: datajoint/mysql:5.7
-    environment:
-      - MYSQL_ROOT_PASSWORD=coltrane
+    env_file: ./environment/.env-compose  # This file is excluded from Git.
     volumes:
       - ./data:/var/lib/mysql
     networks:
@@ -23,11 +22,7 @@ services:
       - db
     networks:
       - sgl_network
-    environment:
-      - MYSQL_ROOT_PASSWORD=coltrane
-      - DJDEV_ROOT_REPO=/repository
-      - MYSQL_HOSTNAME=db
-      - FLASK_SECRET_KEY=d93137a7386ff8eb7b6441f6d311cd21a3d0f5d62ad71014
+    env_file: ./environment/.env-compose  # This file is excluded from Git.
 
 networks:
   sgl_network:
