@@ -1,0 +1,13 @@
+stages:
+  - build
+
+
+include:
+  - project: 'utility/project-templates/ci-templates'
+    file: '/docker.yml'
+
+build_backend:
+  variables:
+    THE_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME
+    THE_DOCKERFILE: backend/src/Dockerfile
+  extends: .kaniko_build
