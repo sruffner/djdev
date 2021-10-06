@@ -10,7 +10,7 @@ build_backend:
   variables:
     THE_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME
   before_script:
-    - echo "Trying to change CI_PROJECT_DIR $CI_PROJECT_DIR ...""
+    - echo "Trying to change CI_PROJECT_DIR $CI_PROJECT_DIR ..."
     - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/backend"
     - echo "New value is $CI_PROJECT_DIR"
   extends: .kaniko_build
