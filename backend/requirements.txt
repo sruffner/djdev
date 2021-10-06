@@ -2,7 +2,7 @@ appnope==0.1.0
 backcall==0.2.0
 Brotli==1.0.9
 certifi==2020.6.20
-click==7.1.2
+click==8.0.1
 configparser==5.0.1
 cycler==0.10.0
 dash==1.19.0
@@ -22,7 +22,7 @@ ipython==7.18.1
 ipython-genutils==0.2.0
 itsdangerous==1.1.0
 jedi==0.17.2
-Jinja2==2.11.2
+Jinja2==2.11.3
 kiwisolver==1.2.0
 MarkupSafe==1.1.1
 matplotlib==3.3.4
@@ -33,7 +33,7 @@ pandas==1.2.3
 parso==0.7.1
 pexpect==4.8.0
 pickleshare==0.7.5
-Pillow==8.0.0
+Pillow==8.3.2
 plotly==4.14.3
 prompt-toolkit==3.0.8
 ptyprocess==0.6.0
@@ -47,7 +47,7 @@ retrying==1.3.3
 six==1.15.0
 tqdm==4.50.2
 traitlets==5.0.4
-urllib3==1.25.10
+urllib3==1.26.7
 wcwidth==0.2.5
 Werkzeug==1.0.1
 
