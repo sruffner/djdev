@@ -11,9 +11,17 @@ build_backend:
   variables:
     THE_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME
   before_script:
-    - echo "Trying to change CI_PROJECT_DIR $CI_PROJECT_DIR ..."
     - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/backend"
-    - echo "New value is $CI_PROJECT_DIR"
+    - echo "$CI_PROJECT_DIR"
+  extends: .kaniko_build
+
+build_mysql:
+  stage: build
+  variables:
+    THE_IMAGE: ${CI_REGISTRY_IMAGE}/mysql:$CI_COMMIT_REF_NAME
+  before_script:
+    - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/mysql"
+    - echo "$CI_PROJECT_DIR"
   extends: .kaniko_build
 
 scan_backend:
@@ -22,4 +30,8 @@ scan_backend:
     THE_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME
   extends: .docker_scan
 
-
+scan_mysql:
+  stage: scan
+  variables:
+    THE_IMAGE: ${CI_REGISTRY_IMAGE}/mysql:$CI_COMMIT_REF_NAME
+  extends: .docker_scan
