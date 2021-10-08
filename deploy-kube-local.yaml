@@ -3,7 +3,7 @@
 # on the same workstation, AND utilizes images that have been built or cached in the local Docker Desktop image
 # repository. It currently deploys to the 'default' namespace.
 #
-# The application is deployed in a single pod with independent containers for the MySQL database and the Dash-based
+# The application is deployed in a single pod with independent containers for the MariaDB database and the Dash-based
 # portal backend using the Flask development server. A persistent volume and associated volume claim, both sized at 5GB,
 # are reserved for the DB, while a PV and PVC of 30GB are reserved for the backend. The volumes are mapped to the same
 # local paths as in the Docker Compose deployment, in order to work with the same existing DB and repository files.
@@ -31,7 +31,7 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: manual
   hostPath:
-    path: "/Users/sruffner/srsc/projects/pycharm/djdev/data"
+    path: "/Users/sruffner/srsc/projects/pycharm/djdev/db_mount"
 ---
 apiVersion: v1
 kind: PersistentVolume
@@ -48,7 +48,7 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   storageClassName: manual
   hostPath:
-    path: "/Users/sruffner/srsc/projects/pycharm/djdev/repository"
+    path: "/Users/sruffner/srsc/projects/pycharm/djdev/repo_mount"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -103,16 +103,17 @@ metadata:
 spec:
   containers:
   - name: sgl-db
-    image: datajoint/mysql:5.7
+    image: djdev_db
+    imagePullPolicy: Never  # we're getting this from Docker repo on localhost, not from DockerHub
     volumeMounts:
-      - name: mysqldata
-        mountPath: /var/lib/mysql
+      - name: db-data
+        mountPath: /bitnami/mariadb
     env:
-      - name: MYSQL_ROOT_PASSWORD
+      - name: MARIADB_ROOT_PASSWORD
         valueFrom:
           secretKeyRef:
             name: sgl-secret
-            key: mysql_root_password
+            key: mariadb_root_password
   - name: sgl-backend
     image: djdev_backend
     imagePullPolicy: Never  # we're getting this from Docker repo on localhost, not from DockerHub
@@ -122,22 +123,22 @@ spec:
       - name: backend-repo
         mountPath: /repository
     env:
-      - name: MYSQL_HOSTNAME
+      - name: MARIADB_HOSTNAME
         value: 127.0.0.1
       - name: DJDEV_ROOT_REPO
         value: /repository
-      - name: MYSQL_ROOT_PASSWORD
+      - name: MARIADB_ROOT_PASSWORD
         valueFrom:
           secretKeyRef:
             name: sgl-secret
-            key: mysql_root_password
+            key: mariadb_root_password
       - name: FLASK_SECRET_KEY
         valueFrom:
           secretKeyRef:
             name: sgl-secret
             key: flask_secret_key
   volumes:
-    - name: mysqldata
+    - name: db-data
       persistentVolumeClaim:
         claimName: pvc-db
     - name: backend-repo

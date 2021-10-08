@@ -2,10 +2,10 @@ version: '3.8'
 services:
   db:
     container_name: sgl_db
-    image: datajoint/mysql:5.7
+    build: mariadb
     env_file: ./environment/.env-compose  # This file is excluded from Git.
     volumes:
-      - ./data:/var/lib/mysql
+      - ./db_mount:/bitnami/mariadb
     networks:
       - sgl_network
   backend:
@@ -17,7 +17,7 @@ services:
     # The second exposes the root repository directory in the file system of the Docker host
     volumes:
       - ./backend/src:/code
-      - ./repository:/repository
+      - ./repo_mount:/repository
     depends_on:
       - db
     networks:

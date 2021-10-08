@@ -35,17 +35,17 @@ def get_config() -> AppConfig:
         if 'DJDEV_ROOT_REPO' not in os.environ:
             raise RuntimeError('The environment variable DJDEV_ROOT_REPO is required.')
         upload_dir = Path(os.environ['DJDEV_ROOT_REPO'], 'staging')
-        if 'MYSQL_ROOT_PASSWORD' not in os.environ:
-            raise RuntimeError('The environment variable MYSQL_ROOT_PASSWORD is required.')
-        mysql_password = os.environ['MYSQL_ROOT_PASSWORD']
-        if 'MYSQL_HOSTNAME' not in os.environ:
-            raise RuntimeError('The environment variable MYSQL_HOSTNAME is required.')
-        mysql_host = os.environ['MYSQL_HOSTNAME']
+        if 'MARIADB_ROOT_PASSWORD' not in os.environ:
+            raise RuntimeError('The environment variable MARIADB_ROOT_PASSWORD is required.')
+        db_password = os.environ['MARIADB_ROOT_PASSWORD']
+        if 'MARIADB_HOSTNAME' not in os.environ:
+            raise RuntimeError('The environment variable MARIADB_HOSTNAME is required.')
+        db_host = os.environ['MARIADB_HOSTNAME']
         if 'FLASK_SECRET_KEY' not in os.environ:
             raise RuntimeError('The environment variable FLASK_SECRET_KEY is required.')
         secret_key = os.environ['FLASK_SECRET_KEY']
-        get_config.config = AppConfig(dash_upload_dir=upload_dir, dj_database_password=mysql_password,
-                                      dj_database_host=mysql_host, flask_secret_key=secret_key)
+        get_config.config = AppConfig(dash_upload_dir=upload_dir, dj_database_password=db_password,
+                                      dj_database_host=db_host, flask_secret_key=secret_key)
     return get_config.config
 
 
@@ -105,10 +105,10 @@ class AppConfig:
                 break
             except Exception as err:
                 if n_tries < 12:
-                    logger.warning(f"Failed to connect to MySQL server. Trying again in 5s. [{str(err)}]")
+                    logger.warning(f"Failed to connect to database server. Trying again in 5s. [{str(err)}]")
                     time.sleep(5)
         if db_connection is None:
-            logger.error(f"Failed to establish connection to MySQL server after {n_tries} attempts. Giving up.")
+            logger.error(f"Failed to establish connection to database server after {n_tries} attempts. Giving up.")
         else:
-            logger.info(f"Connected to MySQL server after {n_tries} attempts.")
+            logger.info(f"Connected to database server after {n_tries} attempts.")
         return db_connection is not None

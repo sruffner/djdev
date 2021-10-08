@@ -15,12 +15,12 @@ build_backend:
     - echo "$CI_PROJECT_DIR"
   extends: .kaniko_build
 
-build_mysql:
+build_mariadb:
   stage: build
   variables:
-    THE_IMAGE: ${CI_REGISTRY_IMAGE}/mysql:$CI_COMMIT_REF_NAME
+    THE_IMAGE: ${CI_REGISTRY_IMAGE}/mariadb:$CI_COMMIT_REF_NAME
   before_script:
-    - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/mysql"
+    - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/mariadb"
     - echo "$CI_PROJECT_DIR"
   extends: .kaniko_build
 
@@ -30,8 +30,8 @@ scan_backend:
     THE_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME
   extends: .docker_scan
 
-scan_mysql:
+scan_mariadb:
   stage: scan
   variables:
-    THE_IMAGE: ${CI_REGISTRY_IMAGE}/mysql:$CI_COMMIT_REF_NAME
+    THE_IMAGE: ${CI_REGISTRY_IMAGE}/mariadb:$CI_COMMIT_REF_NAME
   extends: .docker_scan
