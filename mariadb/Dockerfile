@@ -1,4 +1,4 @@
-FROM bitnami/mariadb:10.6.4-debian-10-r16
+FROM bitnami/mariadb:10.6.5-debian-10-r7
 
 ## Inject custom config file into appropriate place in bitnami/mariadb image
 USER 0
