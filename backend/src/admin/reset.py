@@ -5,11 +5,14 @@ This script is primarily for use during development of the database and web port
 schema defined in sgl_schema.py changes, we really need to drop the entire database and start over. That is the sole
 purpose of this script.
 
-Usage: Bring up the Docker Compose application that includes the 'db' and 'backend' services in the normal way. Stop
-the 'backend' service with 'docker-compose stop backend'. Run this script as a one-time command against the 'backend'
-service: 'docker-compose run backend python -m database.reset'. Once the script completes, resume the normal
-backend service with 'docker-compose restart backend'. As part of the backend server resuming, the Lisberger lab
-schema should be recreated on the DB and possibly reseeded with initial manual table entries.
+It is also useful in the event that the database server crashes and the database must be reconstructed. Call this script
+to ensure the database is reset and completely empty. Then run the reconstruct.py script.
+
+Usage - when deployed on local development machine using Docker Compose:
+    1) docker-compose up  ==> Starts the portal application in the usual manner.
+    2) docker-compose stop backend  ==> Stop the Dash/Flask backend server.
+    3) docker-compose run backend python -m admin.reset  ==> Run this script.
+    4) docker-compose restart backend  ==> To resume normal operation.
 
 NOTE: The main method dynamically imports the database schema in 'sgl_schema.py' after dropping the schema from the
 database. The schema is declared on the database the FIRST time the sgl_schema module is imported in a running

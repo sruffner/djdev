@@ -8,6 +8,19 @@
 # are reserved for the DB, while a PV and PVC of 30GB are reserved for the backend. The volumes are mapped to the same
 # local paths as in the Docker Compose deployment, in order to work with the same existing DB and repository files.
 #
+# Three additional containers in the pod provide a Redis server and two Redis Queue workers (that listen to the default
+# queue). The portal backend uses Redis to store information on in-progress session commit jobs (so that the backend
+# itself remains stateless), and the RQ workers handle two types of background tasks in the workflow for a commit job --
+# preprocessing of an experiment session archive after upload, and pushing session data into the database after the
+# user has reviewed/edited the results from preprocessing.
+#
+# There are some important configuration differences between the "docker-compose deployment" and this one. In the
+# former, the Redis server runs in a container as a "service" named "redis"; as such, it just works to start the RQ
+# workers with "rq worker --url redis://redis:6379", with environment variable REDIS_HOST = "redis". In this deployment,
+# there is no service named "redis". However, since all of the containers are running in a single pod, then the host
+# is really "localhost" or "127.0.0.1". So REDIS_HOST=127.0.0.1 (and the same for MARIADB_HOSTNAME!), and the command
+# that starts the RQ worker is "rq worker --url redis://127.0.0.0:6379".
+#
 # This deployment definition is ONLY for testing on the local development workstation in Docker Kubernetes. A true
 # production deployment must resolve, at a minimum, these issues:
 #  1) The portal backend runs on the internal Flask WSGI server, which is NOT intended for production.
@@ -114,6 +127,64 @@ spec:
           secretKeyRef:
             name: sgl-secret
             key: mariadb_root_password
+  - name: sgl-redis
+    image: redis:6.2.5-alpine
+    ports:
+      - containerPort: 6379
+  - name: sgl-worker1
+    image: djdev_backend
+    imagePullPolicy: Never
+    command: ["rq"]
+    args: ["worker", "--url", "redis://127.0.0.1:6379", "--name", "worker1"]
+    volumeMounts:
+      - name: backend-repo
+        mountPath: /repository
+    env:
+      - name: REDIS_HOST
+        value: 127.0.0.1
+      - name: REDIS_PORT
+        value: "6379"
+      - name: MARIADB_HOSTNAME
+        value: 127.0.0.1
+      - name: DJDEV_ROOT_REPO
+        value: /repository
+      - name: MARIADB_ROOT_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: sgl-secret
+            key: mariadb_root_password
+      - name: FLASK_SECRET_KEY
+        valueFrom:
+          secretKeyRef:
+            name: sgl-secret
+            key: flask_secret_key
+  - name: sgl-worker2
+    image: djdev_backend
+    imagePullPolicy: Never
+    command: ["rq"]
+    args: ["worker", "--url", "redis://127.0.0.1:6379", "--name", "worker2"]
+    volumeMounts:
+      - name: backend-repo
+        mountPath: /repository
+    env:
+      - name: REDIS_HOST
+        value: 127.0.0.1
+      - name: REDIS_PORT
+        value: "6379"
+      - name: MARIADB_HOSTNAME
+        value: 127.0.0.1
+      - name: DJDEV_ROOT_REPO
+        value: /repository
+      - name: MARIADB_ROOT_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: sgl-secret
+            key: mariadb_root_password
+      - name: FLASK_SECRET_KEY
+        valueFrom:
+          secretKeyRef:
+            name: sgl-secret
+            key: flask_secret_key
   - name: sgl-backend
     image: djdev_backend
     imagePullPolicy: Never  # we're getting this from Docker repo on localhost, not from DockerHub
@@ -123,6 +194,10 @@ spec:
       - name: backend-repo
         mountPath: /repository
     env:
+      - name: REDIS_HOST
+        value: 127.0.0.1
+      - name: REDIS_PORT
+        value: "6379"
       - name: MARIADB_HOSTNAME
         value: 127.0.0.1
       - name: DJDEV_ROOT_REPO

@@ -1,5 +1,10 @@
 version: '3.8'
 services:
+  redis:
+    container_name: sgl_redis
+    image: redis:6.2.5-alpine
+    networks:
+      - sgl_network
   db:
     container_name: sgl_db
     build: mariadb
@@ -11,6 +16,7 @@ services:
   backend:
     container_name: sgl_backend
     build: backend
+    image: djdev_backend
     ports:
       - "8050:8050"
     # The first bind mount allows updating backend app during development via Flask reloader module (debug mode).
@@ -20,9 +26,31 @@ services:
       - ./repo_mount:/repository
     depends_on:
       - db
+      - redis
     networks:
       - sgl_network
     env_file: ./environment/.env-compose  # This file is excluded from Git.
-
+  worker1:
+    container_name: sgl_worker1
+    image: djdev_backend
+    command: rq worker --url redis://redis:6379 --name worker1
+    volumes:
+      - ./repo_mount:/repository   # background commit jobs need access to the repository file system!
+    depends_on:
+       - redis
+    networks:
+      - sgl_network
+    env_file: ./environment/.env-compose
+  worker2:
+    container_name: sgl_worker2
+    image: djdev_backend
+    command: rq worker --url redis://redis:6379 --name worker2
+    volumes:
+      - ./repo_mount:/repository   # background commit jobs need access to the repository file system!
+    depends_on:
+       - redis
+    networks:
+      - sgl_network
+    env_file: ./environment/.env-compose
 networks:
   sgl_network:

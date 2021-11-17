@@ -17,8 +17,7 @@ import dash
 from dash.dependencies import Output, Input, State
 
 from app import app, PortalUser, load_authorized_user
-
-from database.manager import DataBaseManager
+from database.user_ops import update_portal_user_profile, change_portal_user_password
 
 _FULL_NAME_ID: str = "full_name_in"
 """ ID of form widget for user's full name. """
@@ -146,7 +145,7 @@ def update_profile_callback(*args):
     if portal_user is None:
         msg = "You must be logged in to update your profile."
     else:
-        msg = DataBaseManager().update_portal_user_profile(portal_user.get_id(), args[1], args[2], args[3], args[4])
+        msg = update_portal_user_profile(portal_user.get_id(), args[1], args[2], args[3], args[4])
     return ("Profile updated.", "success", True) if (msg is None) else (msg, "danger", True)
 
 
@@ -171,5 +170,5 @@ def change_password_callback(*args):
     elif args[2] != args[3]:
         msg = "Reentered password does not match new password. Try again."
     else:
-        msg = DataBaseManager().change_portal_user_password(portal_user.get_id(), args[1], args[2])
+        msg = change_portal_user_password(portal_user.get_id(), args[1], args[2])
     return ("Password changed.", "success", True, "", "", "") if (msg is None) else (msg, "danger", True, "", "", "")

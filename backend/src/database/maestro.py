@@ -2823,6 +2823,9 @@ class ProtocolCandidate:
         self.user_validated = False
         """ Flag set if protocol candidate definition has been marked valid via user interaction."""
 
+    def needs_validation(self) -> bool:
+        return not (self.user_validated or (self.num_reps > 2) or (self.num_reps == 2 and self.matches_existing))
+
     def add_random_variable(self, rv: SegParam) -> bool:
         """
         Add a random variable to the definition of this Maestro trial protocol candidate.

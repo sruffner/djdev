@@ -17,6 +17,7 @@ necessarily the first one).
 @author: sruffner
 @created: 22mar2021
 """
+import logging
 from datetime import date
 from typing import List, Dict, Any, Optional, Union
 
@@ -33,10 +34,16 @@ from plotly.subplots import make_subplots
 
 import database.table_info as ti
 from app import app
+from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_attribute_values, num_table_rows, fetch_one_row
+from database.trial_data_ops import trial_protocols_for_neuron, data_for_trial, retrieve_trial_reps_for_neuron, \
+    TrialData, trials_for_neuron, get_trial_protocol_definition
 from utils.common import check_date
 from database import stats
-from database.manager import DataBaseManager, TrialData
 from database.table_info import DBTable
+
+
+logger = logging.getLogger(__name__)
+
 
 _NEURON_TABLE_ID: str = "neuron_list"
 """ The ID assigned to the Dash DataTable presenting the list of neurons in the database. """
@@ -72,11 +79,15 @@ def _fetch_neurons(restriction: Optional[List[str]]) -> List[Dict[str, ti.Attrib
         A list of dictionaries, one for each neural unit retrieved. Each dictionary includes the unit attributes that
             are displayed in the table of neurons -- see _NEURON_TABLE_COLS.
     """
-    db_mgr = DataBaseManager()
-    rows = db_mgr.fetch_proj(DBTable.SESSION_NEURON, _NEURON_TABLE_ATTRS, restriction)
+    rows = fetch_restrict_proj([DBTable.SESSION_NEURON], [restriction], _NEURON_TABLE_ATTRS)
+    n_types = fetch_rows(DBTable.NEURON_TYPE)
+    users = fetch_rows(DBTable.USER)
+    if (rows is None) or (n_types is None) or (users is None):
+        logger.error("A database error occurred while fetching neural unit information from database", exc_info=True)
+        return []
     # prepare values in "composed" columns
-    neuron_type_map = {r['nt_id']: r['nt_name'] for r in db_mgr.fetch_rows(DBTable.NEURON_TYPE)}
-    user_map = {r['username']: r['full_name'] for r in db_mgr.fetch_rows(DBTable.USER)}
+    neuron_type_map = {r['nt_id']: r['nt_name'] for r in n_types}
+    user_map = {r['username']: r['full_name'] for r in users}
     for row in rows:
         row['nt_name'] = neuron_type_map[row['unit_type']]
         row['full_name'] = user_map[row['experimenter']]
@@ -142,22 +153,22 @@ def _filter_group() -> dbc.Row:
     Returns:
         A Bootstrap Row container holding the "Filter Results" button and filter widgets embedded in a Popover.
     """
-    db_mgr = DataBaseManager()
-    experimenters = list(db_mgr.fetch_proj(DBTable.USER, ['username', 'full_name']))
+    # if None is returned, it's a database error (we're silent about that here)
+    experimenters = fetch_restrict_proj([DBTable.USER], None, ['username', 'full_name']) or []
     experimenters.sort(key=lambda x: x['full_name'])
     experimenters.insert(0, {'username': _FILTER_UNUSED, 'full_name': _FILTER_UNUSED})
-    subjects = db_mgr.fetch_attribute_values(DBTable.SUBJECT, "subj_id")
+    subjects = fetch_attribute_values(DBTable.SUBJECT, "subj_id")
     subjects.sort()
     subjects.insert(0, _FILTER_UNUSED)
-    neuron_types = list(db_mgr.fetch_rows(DBTable.NEURON_TYPE))
+    neuron_types = fetch_rows(DBTable.NEURON_TYPE) or []  # again, protect against a DB error
     neuron_types.sort(key=lambda x: x['nt_name'])
     neuron_types.insert(0, {'nt_id': _FILTER_UNUSED, 'nt_name': _FILTER_UNUSED})
     date_choices = [_FILTER_UNUSED, 'on', 'before', 'after']
 
-    num_neurons = db_mgr.num_table_rows(DBTable.SESSION_NEURON)
+    num_neurons = num_table_rows(DBTable.SESSION_NEURON)
 
     experimenter_row = dbc.Row(dbc.InputGroup([
-        dbc.InputGroupAddon("Experimenter =", addon_type="prepend"),
+        dbc.InputGroupAddon("Experimenter", addon_type="prepend"),
         dbc.Select(id=_FILTER_EXP_ID,
                    options=[{"label": opt['full_name'], "value": opt['username']} for opt in experimenters],
                    value=_FILTER_UNUSED)
@@ -215,11 +226,11 @@ def _unit_summary(row_selected: Dict[str, Any]) -> html.Div:
     """
     # retrieve the sampling rate for the neural recording, then retrieve the full unit record
     try:
-        db_mgr = DataBaseManager()
         primary_key = {k: row_selected[k] for k in ti.primary_key_of(DBTable.SESSION_NEURON, False)}
-        sampling_rate = db_mgr.fetch_attribute_values(DBTable.SESSION_EPHYS, 'sampling_rate', primary_key)[0]
-        unit = db_mgr.fetch_rows(DBTable.SESSION_NEURON, primary_key)[0]
-    except Exception:
+        sampling_rate = fetch_attribute_values(DBTable.SESSION_EPHYS, 'sampling_rate', primary_key)[0]
+        unit = fetch_one_row(DBTable.SESSION_NEURON, primary_key)
+    except Exception as e:
+        logger.error(f"Error while fetching info for unit summary: {str(e)}", exc_info=True)
         return html.Div(dbc.Alert("Failed to retrieve information on selected neuron from the database", is_open=True))
 
     unit_template: np.ndarray = unit['unit_template']
@@ -290,8 +301,10 @@ def _response_panel(row_selected: Dict[str, Any]) -> html.Div:
         An HTML Div that renders the contents of the "Response Data" tab in the neuron detail panel.
     """
 
-    proto_map = DataBaseManager().trial_protocols_for_neuron(row_selected)
-    if proto_map is None:
+    proto_map = trial_protocols_for_neuron(row_selected)
+    if proto_map is None or (len(proto_map) == 0):
+        if proto_map is not None:
+            logger.debug(f"Database inconsistency - Found no trial protocols for {str(row_selected)}")
         return html.Div(dbc.Alert(f"Failed to retrieve trial information for neuron (internal error).", is_open=True))
 
     first_proto_key = next(iter(proto_map.keys()))
@@ -378,7 +391,7 @@ def _single_trial_response_figure(unit_key: Dict[str, Any], trial_idx: int) -> U
     trial_pk = {'experimenter': unit_key['experimenter'], 'subj_id': unit_key['subj_id'],
                 'session_date': unit_key['session_date'], 'session_sfx': unit_key['session_sfx'],
                 'trial_idx': trial_idx}
-    trial_data = DataBaseManager().data_for_trial(trial_pk, unit_ids=[unit_key['unit_id']])
+    trial_data = data_for_trial(trial_pk, unit_ids=[unit_key['unit_id']])
     if trial_data is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial data for trial index {trial_idx}", is_open=True))
 
@@ -523,7 +536,7 @@ def _average_response_figure(unit_key: Dict[str, Any], proto_hash: str) -> Union
             reps of the specified trial protocol. If an error occurs while retrieving or processing response data, the
             method instead returns an HTML Div with an error message.
     """
-    trial_data = DataBaseManager().retrieve_trial_reps_for_neuron(unit_key, proto_hash)
+    trial_data = retrieve_trial_reps_for_neuron(unit_key, proto_hash)
     if trial_data is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial data for neuron (internal error).", is_open=True))
     elif len(trial_data) < 3:
@@ -731,7 +744,7 @@ def _discharge_statistics_panel(unit_key: Dict[str, Any], proto_hash: str) -> ht
         An HTML Div displaying the specified neuron's discharge statistics as described. If an error occurs while
             retrieving response data, the method instead returns an HTML Div with an error message.
     """
-    trial_data = DataBaseManager().retrieve_trial_reps_for_neuron(unit_key, proto_hash)
+    trial_data = retrieve_trial_reps_for_neuron(unit_key, proto_hash)
     if trial_data is None:
         return html.Div(dbc.Alert(f"Failed to retrieve trial data for neuron (internal error).", is_open=True))
     elif len(trial_data) < 3:
@@ -991,13 +1004,12 @@ def on_response_panel_proto_select(proto_hash_value, selected_rows, rows):
     selected_row = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
     if (proto_hash_value is None) or (selected_rows is None):
         raise dash.exceptions.PreventUpdate
-    db_mgr = DataBaseManager()
-    trial_indices = db_mgr.trials_for_neuron(selected_row, proto_hash_value)
+    trial_indices = trials_for_neuron(selected_row, proto_hash_value)
     session_pk = {'experimenter': selected_row['experimenter'], 'subj_id': selected_row['subj_id'],
                   'session_date': selected_row['session_date'], 'session_sfx': selected_row['session_sfx']}
-    total_trials = db_mgr.num_table_rows(DBTable.TRIAL, [session_pk])
+    total_trials = num_table_rows(DBTable.TRIAL, [session_pk])
     options = [{'label': f"Trial {k} of {total_trials}", 'value': str(k)} for k in trial_indices]
-    can_aggregate = (proto_hash_value in DataBaseManager().trial_protocols_for_neuron(selected_row, aggregate=True))
+    can_aggregate = (proto_hash_value in trial_protocols_for_neuron(selected_row, aggregate=True))
     options.append({'label': "Mean firing rate", 'value': 'mfr', 'disabled': not can_aggregate})
     options.append({'label': "Discharge statistics", 'value': 'ds', 'disabled': not can_aggregate})
     sel_value = 'mfr' if can_aggregate else \
@@ -1038,7 +1050,7 @@ def on_response_panel_ds_range(range_value, selected_rows, rows, proto_hash_valu
     return dash.no_update if not ok else \
         _discharge_statistics_figure(
             selected_unit['unit_id'],
-            DataBaseManager().retrieve_trial_reps_for_neuron(selected_unit, proto_hash_value), range_value)
+            retrieve_trial_reps_for_neuron(selected_unit, proto_hash_value), range_value)
 
 
 @app.callback([Output(_RESP_PROTO_VIEW_MODAL_ID, "is_open"), Output(_RESP_PROTO_VIEW_BODY_ID, "children")],
@@ -1051,7 +1063,7 @@ def on_response_panel_show_hide_protocol_definition(*args):
     if trigger_id == _RESP_PROTO_VIEW_CLOSE_ID:
         return False, dash.no_update
     elif trigger_id == _RESP_PROTO_VIEW_OPEN_ID:
-        protocol = DataBaseManager().get_trial_protocol_definition(args[2])
+        protocol = get_trial_protocol_definition(args[2])
         if protocol:
             return True, protocol.display_definition()
     return False, dash.no_update

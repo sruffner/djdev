@@ -24,17 +24,17 @@ The script will require user input for each entry added to the User table. That 
 each registered portal user, and we do not want to store plain-text passwords in any code or other file that may end up
 in the project Gitlab repository. For each user registered by the script, it will prompt for that user's password.
 
-Usage: Bring up the Docker Compose application that includes the 'db' and 'backend' services in the normal way. Stop
-the 'backend' service with 'docker-compose stop backend'. Run this script as a one-time command against the 'backend'
-service: 'docker-compose run backend python -m database.seed'. Once the script completes, resume the normal backend
-service with 'docker-compose restart backend'.
+Usage - when deployed on local development machine using Docker Compose:
+    1) docker-compose up  ==> Starts the portal application in the usual manner.
+    2) docker-compose stop backend  ==> Stop the Dash/Flask backend server.
+    3) docker-compose run backend python -m admin.reset  ==> Run this script to ensure database is reset and empty.
+    4) docker-compose run backend python -m admin.seed  ==> Run this script to seed the database.
+    4) docker-compose restart backend  ==> To resume normal operation.
 
 @author: sruffner
 @created: 22jul2021
 """
 import sys
-from getpass import getpass
-from typing import Optional
 
 from config.config import get_config
 
@@ -43,9 +43,11 @@ cfg = get_config()
 if not cfg.init_database_connection():
     raise RuntimeError('Unable to connect to database!')
 
-# We have to put this import AFTER configuring DJ and connecting to the database, since it will trigger a DB query
-from database.manager import DataBaseManager
+# We have to put these imports AFTER configuring DJ and connecting to the database, since it will trigger a DB query
+from database.table_ops import database_empty, insert_into_table
+from database.user_ops import register_new_portal_user, prompt_for_password
 from database.table_info import DBTable
+
 
 # here is the seed data IAW the current lab database schema defined in sgl_schema.py
 _seed_list = [
@@ -152,33 +154,6 @@ _seed_list = [
 ]
 
 
-def _prompt_for_password(username: str) -> Optional[str]:
-    """
-    Request a password for a portal user account to be added to the laboratory database. The method will prompt for the
-    password twice to guard against accidental typos and verify that it meets requirements. If not, it will prompt
-    again until an acceptable password is entered. It also gives the user the option to abort the script entirely by
-    entering 'q' after the password prompt.
-
-    Args:
-        username: The username for the new account.
-    Returns:
-        A valid password for the account, or None if the user elected to abort the script.
-    """
-    while True:
-        new_password = getpass(f"Enter the password for user '{username}', or 'q' to abort script > ")
-        if new_password == 'q':
-            return None
-        confirm_new = getpass('Reenter password to confirm > ')
-        if confirm_new != new_password:
-            print("   Password mismatch... Try again.", file=sys.stdout, flush=True)
-        else:
-            res = db_mgr.validate_password(new_password)
-            if res is None:
-                return new_password
-            else:
-                print(f"   {str(res)}... Try again.", file=sys.stdout, flush=True)
-
-
 if __name__ == '__main__':
     print("seed.py: Seed empty Lisberger lab database with some initial table entries (DEV USE ONLY)...\n\n",
           file=sys.stdout, flush=True)
@@ -189,8 +164,7 @@ if __name__ == '__main__':
         "Study": DBTable.STUDY, "Publication": DBTable.PUB
     }
 
-    db_mgr = DataBaseManager()
-    err_msg = db_mgr.database_empty()
+    err_msg = database_empty()
     if err_msg is not None:
         print(f"ERROR: {str(err_msg)}.\n  The database must be completely empty prior to seeding. Aborting...",
               file=sys.stdout, flush=True)
@@ -204,13 +178,13 @@ if __name__ == '__main__':
                 entry = add_dict['entry']
                 # special case: Registering a new user. Need to prompt for password.
                 if table_id == DBTable.USER:
-                    password = _prompt_for_password(entry['username'])
+                    password = prompt_for_password(entry['username'])
                     if password is None:
                         raise Exception(f"Aborted script on request.")
-                    err_msg = db_mgr.register_new_portal_user(
+                    err_msg = register_new_portal_user(
                         entry['username'], password, entry['access'], entry['full_name'], entry['contact_email'])
                 else:
-                    err_msg = db_mgr.insert_into_table(table_id, entry)
+                    err_msg = insert_into_table(table_id, entry)
                 if err_msg:
                     raise Exception(err_msg)
         print(f"Done. Database seeded with {len(_seed_list)} table entries.", file=sys.stdout, flush=True)

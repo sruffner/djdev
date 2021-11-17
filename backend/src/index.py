@@ -39,8 +39,8 @@ import dash_bootstrap_components as dbc
 import flask_login
 
 from app import app, load_authorized_user
-from database.manager import DataBaseManager
-from pages import curate, commit_session, explore, neurons, user_profile, manage_users
+from database.user_ops import authenticate_portal_user
+from pages import curate, commit, explore, neurons, user_profile, manage_users
 
 
 logger = logging.getLogger(__name__)
@@ -133,8 +133,8 @@ def _serve_layout() -> html.Div:
                                 dbc.DropdownMenuItem("What do you want to do?", header=True),
                                 dbc.DropdownMenuItem("Explore the database", href="/explore"),
                                 dbc.DropdownMenuItem(divider=True),
-                                dbc.DropdownMenuItem("Commit experiment session (access restricted)",
-                                                     id=_LINK_COMMIT_ID, href="/commit_session",
+                                dbc.DropdownMenuItem("Commit experiment sessions (access restricted)",
+                                                     id=_LINK_COMMIT_ID, href="/commit",
                                                      disabled=not can_commit),
                                 dbc.DropdownMenuItem("Curate lab information (administrators only)", id=_LINK_CURATE_ID,
                                                      href="/curate", disabled=not is_admin),
@@ -191,7 +191,7 @@ def display_page(pathname, n_intervals, current_href):
                 can_commit = portal_user.can_commit_to_database()
                 is_admin = portal_user.is_admin()
         if ((url_parts.path == '/curate') and not is_admin) or \
-                ((url_parts.path == '/commit_session') and not can_commit) or \
+                ((url_parts.path == '/commit') and not can_commit) or \
                 ((url_parts.path == '/manage_users') and not is_admin) or (not is_logged_in):
             url_parts = [(part if i != 2 else '/explore') for i, part in enumerate(url_parts)]
             return dash.no_update, urlunparse(url_parts), True
@@ -213,8 +213,8 @@ def display_page(pathname, n_intervals, current_href):
         if pathname == '/curate':
             layout = curate.layout if is_admin else None
             redirect = not is_admin
-        elif pathname == '/commit_session':
-            layout = commit_session.layout if can_commit else None
+        elif pathname == '/commit':
+            layout = commit.serve_layout() if can_commit else None
             redirect = not can_commit
         elif pathname == '/user_profile':
             layout = user_profile.serve_layout() if is_logged_in else None
@@ -253,7 +253,7 @@ def login_callback(*args):
     elif trigger_id == _LOGIN_SUBMIT_ID:
         username = args[4] if isinstance(args[4], str) else ""
         password = args[5] if isinstance(args[5], str) else ""
-        error_msg = DataBaseManager().authenticate_portal_user(username, password)
+        error_msg = authenticate_portal_user(username, password)
         portal_user = None
         if error_msg is None:
             portal_user = load_authorized_user(username)
@@ -298,4 +298,5 @@ def login_callback(*args):
 
 if __name__ == '__main__':
     logger.info("Starting portal app on Flask development server.")
-    app.run_server(host='0.0.0.0', port='8050', debug=True)
+    # force single-threaded server to avoid thread conflicts in servicing requests.
+    app.run_server(host='0.0.0.0', port='8050', debug=True, threaded=False)

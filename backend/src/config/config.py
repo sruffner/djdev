@@ -20,6 +20,9 @@ from pathlib import Path
 from typing import Optional
 
 import datajoint as dj
+from redis import Redis, RedisError
+
+logger = logging.getLogger(__name__)
 
 
 def get_config() -> AppConfig:
@@ -34,6 +37,7 @@ def get_config() -> AppConfig:
     if not hasattr(get_config, 'config'):
         if 'DJDEV_ROOT_REPO' not in os.environ:
             raise RuntimeError('The environment variable DJDEV_ROOT_REPO is required.')
+        repo_root = Path(os.environ['DJDEV_ROOT_REPO'])
         upload_dir = Path(os.environ['DJDEV_ROOT_REPO'], 'staging')
         if 'MARIADB_ROOT_PASSWORD' not in os.environ:
             raise RuntimeError('The environment variable MARIADB_ROOT_PASSWORD is required.')
@@ -44,8 +48,16 @@ def get_config() -> AppConfig:
         if 'FLASK_SECRET_KEY' not in os.environ:
             raise RuntimeError('The environment variable FLASK_SECRET_KEY is required.')
         secret_key = os.environ['FLASK_SECRET_KEY']
-        get_config.config = AppConfig(dash_upload_dir=upload_dir, dj_database_password=db_password,
-                                      dj_database_host=db_host, flask_secret_key=secret_key)
+        if ('REDIS_HOST' not in os.environ) or ('REDIS_PORT' not in os.environ):
+            raise RuntimeError('The environment variables REDIS_HOST and REDIS_PORT are required.')
+        conn = Redis(host=os.environ['REDIS_HOST'], port=os.environ['REDIS_PORT'])
+        try:
+            conn.ping()
+        except RedisError as e:
+            logger.debug(str(e), exc_info=True)
+
+        get_config.config = AppConfig(repo_root=repo_root, dash_upload_dir=upload_dir, dj_database_host=db_host,
+                                      dj_database_password=db_password, flask_secret_key=secret_key, redis_conn=conn)
     return get_config.config
 
 
@@ -54,28 +66,35 @@ class AppConfig:
     """
     Application configuration.
     """
+    repo_root: str
+    """ Relative or absolute path string identifying the root directory for lab portal's backing repository. """
+    dash_upload_dir: str
+    """ Relative or absolute path string identifying folder where application uploads are stored. """
+    dj_database_host: str
+    """ The database host name. """
+    dj_database_password: str
+    """ The password for the 'root' user of the database. """
+    flask_secret_key: str
+    """ 
+    Flask-Login library uses sessions for authentication, so the Flask secret key must be set. NOTE that this should be
+    set from a secret, not set to a new value every time the app is started -- as that will invalidate existing Flask
+    sessions.
+    """
+    redis_conn: Redis
+    """ 
+    Connection to the Redis server used to cache state so that backend server can remain 'stateless' and thus
+    permit replication in a cloud deployment. 
+    """
     dash_suppress_callback_exceptions: bool = True
     """ Dash configuration parameter. Set to True b/c app dynamically inserts elements into layout. """
-    dash_upload_dir: str = '/'
-    """ Relative or absolute path string identifying folder where application uploads are stored. """
-    dj_database_host: str = 'db'
-    """ The MySQL database host for DataJoint. It is the name of the Docker service running the MySQL daemon. """
     dj_database_user: str = 'root'
-    """ The database username for DataJoint. """
-    dj_database_password: str = ''
-    """ The database password for DataJoint. """
+    """ The database username for DataJoint. We stick with the 'root' user """
     dj_safemode: bool = False
     """ Enable/disable DataJoint's safe mode which, for example, will query console to confirm deletes. """
     dj_enable_python_native_blobs: bool = True
     """ Enable/disable python native blobs in DataJoint. """
     flask_permanent_session_lifetime: timedelta = timedelta(hours=24)
     """ Flask session lifetime. Flask-Login uses this to timeout client login sessions. """
-    flask_secret_key: str = os.urandom(12).hex()
-    """ 
-    Flask-Login library uses sessions for authentication, so the Flask secret key must be set. NOTE that this should be
-    set from a secret, not set to a new value every time the app is started -- as that will invalidate existing Flask
-    sessions.
-    """
 
     def init_database_connection(self) -> bool:
         """
@@ -95,7 +114,6 @@ class AppConfig:
         dj.config['safemode'] = self.dj_safemode
         dj.config['enable_python_native_blobs'] = self.dj_enable_python_native_blobs
 
-        logger = logging.getLogger(__name__)
         n_tries = 0
         db_connection: Optional[dj.Connection] = None
         while n_tries < 12:

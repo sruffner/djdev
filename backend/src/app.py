@@ -13,6 +13,7 @@ import dash_uploader as du
 import flask_login
 from config.config import get_config, AppConfig
 from config.logging import setup_logging
+from database.user_ops import get_portal_user_record, ADMIN_ACCESS, COMMIT_ACCESS
 
 setup_logging(cfg_file='config/logging.yaml')
 
@@ -28,13 +29,6 @@ app.config.suppress_callback_exceptions = cfg.dash_suppress_callback_exceptions
 
 # configure Dash uploader to upload to staging directory in backend container
 du.configure_upload(app, cfg.dash_upload_dir)
-
-# configure DataJoint and connect to MySQL server. Must abort if connection is not established!
-if not cfg.init_database_connection():
-    raise RuntimeError('Unable to connect to database!')
-
-# We have to put this import AFTER configuring DJ and connecting to the database, since it will trigger a DB query
-from database.manager import DataBaseManager, ADMIN_ACCESS, COMMIT_ACCESS
 
 # Setup for Flask-Login
 server.permanent_session_lifetime = cfg.flask_permanent_session_lifetime
@@ -86,7 +80,7 @@ def load_authorized_user(username: str) -> Optional[PortalUser]:
     Returns:
         The user object. Returns None if not found.
     """
-    user_record = DataBaseManager().get_portal_user_record(username)
+    user_record = get_portal_user_record(username)
     if isinstance(user_record, str):
         logger.warning(f"Authentication error: {user_record}")
         return None

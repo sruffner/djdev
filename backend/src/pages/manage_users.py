@@ -21,7 +21,8 @@ import flask_login
 from app import app, PortalUser, load_authorized_user
 
 import database.table_info as ti
-from database.manager import DataBaseManager, ACCESS_LEVELS, DOWNLOAD_ACCESS
+from database.user_ops import ACCESS_LEVELS, get_all_portal_user_records, DOWNLOAD_ACCESS, remove_portal_user, \
+    change_portal_user_access_level, register_new_portal_user
 
 _USER_TABLE_ID: str = "user-account-table"
 """ The ID assigned to the Dash DataTable presenting all user accounts registered on the Lisberger lab portal. """
@@ -74,7 +75,7 @@ def _fetch_user_table_rows() -> Union[str, List[Dict[str, str]]]:
     Helper method fetches all registered user account records and formats each record for display in the table
     on this page. Returns an error description on failure.
     """
-    rows = DataBaseManager().get_all_portal_user_records()
+    rows = get_all_portal_user_records()
     if isinstance(rows, list):
         for row in rows:
             row['registered'] = str(row['registered']).split()[0]  # only want the registration date
@@ -215,7 +216,7 @@ def serve_layout() -> html.Div:
     card = dbc.Card([
         dbc.CardHeader("Portal user account management"),
         dbc.CardBody([user_table_div, edit_row_inline_form]),
-    ], className='w-50 mx-auto mt-5')
+    ], className='w-75 mx-auto mt-5')
 
     return html.Div([card, register_modal])
 
@@ -299,7 +300,7 @@ def delete_or_change_access_callback(*args):
     # perform requested operation on selected user. Note we update table data if operation is successful RATHER than
     # fetching the data again after the operation!
     if trigger_id == _DELETE_BTN:
-        error_msg = DataBaseManager().remove_portal_user(user_row['username'])
+        error_msg = remove_portal_user(user_row['username'])
         if error_msg is None:
             rows.pop(idx)
     else:
@@ -308,7 +309,7 @@ def delete_or_change_access_callback(*args):
             # no change!
             return dash.no_update, dash.no_update, "", False
         else:
-            error_msg = DataBaseManager().change_portal_user_access_level(user_row['username'], access_level)
+            error_msg = change_portal_user_access_level(user_row['username'], access_level)
             if error_msg is None:
                 user_row['access'] = access_level
 
@@ -347,7 +348,7 @@ def register_user_callback(*args):
         if args[6] != args[7]:
             out[6:9] = ['Password mismatch. Try again.', 'danger', True]
         else:
-            error_msg = DataBaseManager().register_new_portal_user(args[2], args[6], args[5], args[3], args[4])
+            error_msg = register_new_portal_user(args[2], args[6], args[5], args[3], args[4])
             if error_msg is None:
                 out = ["", "", "", DOWNLOAD_ACCESS, "", "", "User registered successfully.", 'success', True]
             else:

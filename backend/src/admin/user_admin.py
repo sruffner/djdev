@@ -11,14 +11,18 @@ in the lab database (sgl_schema.py) serves this purpose. Each user account inclu
 user's encrypted password. While most user management-related activities can be accessed via the portal's web interface,
 those same activities are accessible by this script.
 
-Usage: Bring up the Docker Compose application that includes the 'db' and 'backend' services in the normal way. Stop
-the 'backend' service with 'docker-compose stop backend'. Run this script as a one-time command against the 'backend'
-service: 'docker-compose run backend python -m database.user_admin'. Then follow the input prompt to perform a variety
-of operations on the list of registered portal users: insert a new user, change an existing user's access level or
-password, update a user's profile, delete an existing user (forbidden if there exist dependencies on that user in other
-database tables), or list all users in the database. Since these are sensitive operations, the script is restricted to
-an existing user that has 'admin'-level privileges. However, if there is no such user currently in the database, then
-the script will require you create an initial 'admin' account before performing any other operations.
+Usage - when deployed on local development machine using Docker Compose:
+    1) docker-compose up  ==> Starts the portal application in the usual manner.
+    2) docker-compose stop backend  ==> Stop the Dash/Flask backend server.
+    3) docker-compose run backend python -m admin.user_admin  ==> Run this script to manage portal users list.
+    4) docker-compose restart backend  ==> To resume normal operation.
+
+Once the script is running, follow the input prompt to perform a variety of operations on the list of registered portal
+users: insert a new user, change an existing user's access level or password, update a user's profile, delete an
+existing user (forbidden if there exist dependencies on that user in other database tables), or list all users in the
+database. Since these are sensitive operations, the script is restricted to an existing user that has 'admin'-level
+privileges. However, if there is no such user currently in the database, then the script will require you create an
+initial 'admin' account before performing any other operations.
 
 @created: 27jul2021
 @author: sruffner
@@ -35,15 +39,18 @@ cfg = get_config()
 if not cfg.init_database_connection():
     raise RuntimeError('Unable to connect to database!')
 
-# We have to put this import AFTER configuring DJ and connecting to the database, since it will trigger a DB query
-from database.manager import DataBaseManager, ACCESS_LEVELS
+# We have to put these imports AFTER configuring DJ and connecting to the database, since they will trigger a DB query
+from database.table_ops import fetch_rows
+from database.user_ops import ACCESS_LEVELS, register_new_portal_user, remove_portal_user, \
+    change_portal_user_access_level, change_portal_user_password, get_portal_user_record, update_portal_user_profile, \
+    authenticate_portal_user
 from database.table_info import DBTable
 
 
 def _print_user_list() -> Optional[str]:
     error_msg = None
     try:
-        user_rows = DataBaseManager().fetch_rows(DBTable.USER)
+        user_rows = fetch_rows(DBTable.USER)
         print(f"   {len(user_rows)} users found:", file=sys.stdout, flush=True)
         header = '{:<20} {:<50} {:<50} {:<10} {:<20} {:<20} {:<20}'.format(
             'USERNAME', 'NAME/EMAIL ADDRESS', 'TITLE/ORG', 'ACCESS', 'REGISTERED', 'LAST LOGIN', 'LAST PWD')
@@ -77,7 +84,6 @@ def _print_usage() -> None:
 
 
 def _process_command() -> bool:
-    db_mgr = DataBaseManager()
     command = input('Enter command (a,d,c,p,u,l,t,h,x) > ')
     error_msg = None
     if command == 'a':
@@ -90,14 +96,14 @@ def _process_command() -> bool:
         if password != confirm_password:
             error_msg = "Password mismatch"
         else:
-            error_msg = db_mgr.register_new_portal_user(username, password, access, full_name, email)
+            error_msg = register_new_portal_user(username, password, access, full_name, email)
     elif command == 'd':
         username = input('Enter username of user to be removed > ')
-        error_msg = db_mgr.remove_portal_user(username)
+        error_msg = remove_portal_user(username)
     elif command == 'c':
         username = input('Enter username > ')
         access = input(f"Enter access level ({', '.join(ACCESS_LEVELS)}) > ")
-        error_msg = db_mgr.change_portal_user_access_level(username, access)
+        error_msg = change_portal_user_access_level(username, access)
     elif command == 'p':
         username = input('Enter username > ')
         old_password = getpass('Enter current password > ')
@@ -105,10 +111,10 @@ def _process_command() -> bool:
         confirm_new = getpass('Confirm new password > ')
         error_msg = \
             "Password mismatch" if (new_password != confirm_new) \
-            else db_mgr.change_portal_user_password(username, old_password, new_password)
+            else change_portal_user_password(username, old_password, new_password)
     elif command == 'u':
         username = input('Enter username > ')
-        user_record = db_mgr.get_portal_user_record(username)
+        user_record = get_portal_user_record(username)
         if not isinstance(user_record, dict):
             error_msg = user_record
         else:
@@ -118,7 +124,7 @@ def _process_command() -> bool:
             contact_email = input(f"Email: {user_record['contact_email']} > ")
             title = input(f"Title: {user_record['title']} > ")
             organization = input(f"Organization: {user_record['organization']} > ")
-            error_msg = db_mgr.update_portal_user_profile(
+            error_msg = update_portal_user_profile(
                 username, full_name=(full_name if len(full_name) > 0 else None),
                 email=(contact_email if len(contact_email) > 0 else None), title=(title if len(title) > 0 else None),
                 org=(organization if len(organization) > 0 else None))
@@ -129,7 +135,7 @@ def _process_command() -> bool:
     elif command == 't':
         username = input('Enter username > ')
         password = getpass('Enter password > ')
-        error_msg = db_mgr.authenticate_portal_user(username, password)
+        error_msg = authenticate_portal_user(username, password)
     elif command == 'x':
         return True
     else:
@@ -140,7 +146,7 @@ def _process_command() -> bool:
 
 
 def _admin_account_exists() -> bool:
-    return len(DataBaseManager().fetch_rows(DBTable.USER, dict(access='admin'))) > 0
+    return len(fetch_rows(DBTable.USER, dict(access='admin'))) > 0
 
 
 if __name__ == '__main__':
@@ -154,7 +160,7 @@ if __name__ == '__main__':
         print("** Please login. Only 'admin'-level users can modify the portal authorized users database.**")
         admin_username = input('Enter username > ')
         admin_password = getpass('Enter password > ')
-        e_msg = DataBaseManager().authenticate_portal_user(admin_username, admin_password, admin_only=True)
+        e_msg = authenticate_portal_user(admin_username, admin_password, admin_only=True)
         if e_msg is not None:
             print(f"ERROR: {e_msg}... BYE!", file=sys.stdout, flush=True)
             exit(0)
@@ -172,7 +178,7 @@ if __name__ == '__main__':
             if admin_password != admin_confirm_password:
                 e_msg = "Password mismatch"
             else:
-                e_msg = DataBaseManager().register_new_portal_user(
+                e_msg = register_new_portal_user(
                     admin_username, admin_password, 'admin', admin_full_name, admin_email)
             if e_msg is None:
                 break

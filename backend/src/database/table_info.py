@@ -3,7 +3,7 @@ table_info.py: Descriptive information about the tables in the Lisberger lab dat
 
 This module contains information about the tables defined in the Lisberger lab's database schema that help define how
 their contents are displayed and edited on the web front-end. The module does not reference the DataJoint table classes
-directly because we intend for all access/manipulation of database content to go through the manager.py module.
+directly because we intend for all access/manipulation of database content to go through the database.table_ops module.
 
     DBTable - An enumeration of all defined tables in the database.
     AttrTypeEnum - An enumeration of the different types of attributes employed in the table definitions.

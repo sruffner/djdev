@@ -30,7 +30,8 @@ from dash.dependencies import Input, Output, State
 from typing import List, Any, Optional, Dict, Set
 
 import database.table_info as ti
-from database.manager import DataBaseManager
+from database.table_ops import entry_form, fetch_rows, delete_from_table, check_row, insert_into_table, \
+    fetch_attribute_values, update_mapping_table, attribute_exists
 
 
 @dataclass(frozen=True)
@@ -248,8 +249,7 @@ class _BasePanel:
         Returns:
             A Dash Bootstrap Form component.
         """
-        return DataBaseManager().entry_form(self._table_id, self._attributes_exposed(), None, None,
-                                            f"{self._prefix}_entry_alert")
+        return entry_form(self._table_id, self._attributes_exposed(), None, None, f"{self._prefix}_entry_alert")
 
     def _data_table(self) -> dt.DataTable:
         """
@@ -346,7 +346,7 @@ class _BasePanel:
         Raises:
             ValueError: If any attribute ID in *condition* is not a recognized attribute of this table.
         """
-        return DataBaseManager().fetch_rows(self._table_id)
+        return fetch_rows(self._table_id)
 
     def _num_text_lines_per_row(self) -> int:
         """
@@ -426,7 +426,7 @@ class _BasePanel:
             if not (key in row_pk):
                 raise ValueError(f"Delete failed: Missing primary key '{key}'")
         restriction = {key: row_pk[key] for key in table_pk}
-        error_msg = DataBaseManager().delete_from_table(self._table_id, restriction)
+        error_msg = delete_from_table(self._table_id, restriction)
         return error_msg if error_msg else ""
 
     def _add_row(self, row: Dict[str, ti.AttributeValue]) -> str:
@@ -448,10 +448,9 @@ class _BasePanel:
         """
         try:
             # this call will remove auto-incrementing PK from argument, if present.
-            db_mgr = DataBaseManager()
-            error_msg = db_mgr.check_row(self._table_id, row)
+            error_msg = check_row(self._table_id, row)
             if not error_msg:
-                error_msg = db_mgr.insert_into_table(self._table_id, row)
+                error_msg = insert_into_table(self._table_id, row)
             if error_msg:
                 raise Exception(error_msg)
         except Exception as err:
@@ -843,7 +842,7 @@ class _MappingSubPanel(_BasePanel):
                 appear in this dictionary. Each _RowAlias list is sorted alphabetically IAW the alias's label field. The
                 dictionary will be empty if there are no current mappings or if a database access error occurs.
         """
-        map_rows = DataBaseManager().fetch_rows(self._map_table_id)
+        map_rows = fetch_rows(self._map_table_id)
         dst_map = {row[self._dst_pk]: self._to_row_alias(row) for row in self._rows()}
         src_to_dst: Dict[int, List[_RowAlias]] = dict()
         for row in map_rows:
@@ -875,7 +874,7 @@ class _MappingSubPanel(_BasePanel):
             result = [v for k, v in dst_map.items()]
         else:
             restriction = {self._src_pk: src_pk_val}
-            dst_pks = DataBaseManager().fetch_attribute_values(self._map_table_id, self._dst_pk, restriction)
+            dst_pks = fetch_attribute_values(self._map_table_id, self._dst_pk, restriction)
             result = [dst_map[pk] for pk in dst_pks]
         if len(result) > 0:
             return sorted(result, key=lambda alias: alias.label)
@@ -899,7 +898,7 @@ class _MappingSubPanel(_BasePanel):
             non-existent entity in either the source or destination table; database error.
 
         """
-        error_msg = DataBaseManager().update_mapping_table(self._map_table_id, src_pk_val, assoc_entities)
+        error_msg = update_mapping_table(self._map_table_id, src_pk_val, assoc_entities)
         return error_msg if error_msg else ""
 
 
@@ -929,7 +928,7 @@ class SubjectImplantPanel(_BasePanel):
                 will be emptied.
         """
         self._curr_subj = None
-        if isinstance(subj_id, str) and DataBaseManager().attribute_exists(ti.DBTable.SUBJECT, 'subj_id', subj_id):
+        if isinstance(subj_id, str) and attribute_exists(ti.DBTable.SUBJECT, 'subj_id', subj_id):
             self._curr_subj = subj_id
 
     def _attributes_exposed(self) -> List[str]:
@@ -961,7 +960,7 @@ class SubjectImplantPanel(_BasePanel):
         Overridden to only return implants for the currently selected subject. If there is no selected subject,
         then an empty list is returned.
         """
-        return DataBaseManager().fetch_rows(self._table_id, {'subj_id': self._curr_subj}) if self._curr_subj else list()
+        return fetch_rows(self._table_id, {'subj_id': self._curr_subj}) if self._curr_subj else list()
 
     def _add_row(self, row: Dict[str, ti.AttributeValue]) -> str:
         """

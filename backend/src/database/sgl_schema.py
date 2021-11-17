@@ -60,7 +60,7 @@ To simplify initial development, we are making a number of assumptions:
     Plexon MAP and Omniplex "clips", and from neural response data recorded directly in the Maestro trial data files.
     2) The experimenter must supply their "spike sorting" results. This is because every researcher seems to use their
     own spike sorting algorithm, and in some situations "by eye" spike editing happens. Currently, neural unit
-    information and spike train data is supplied in a pickle file. See manager.py for details.
+    information and spike train data is supplied in a pickle file.
 
 Created on Wed Jun  3 14:13:38 2020
 
@@ -71,9 +71,11 @@ from __future__ import annotations  # Needed in Python 3.7y to type-hint a metho
 from typing import Dict, Any, Optional
 
 import datajoint as dj
+from config.config import get_config
 
-# NOTE: DataJoint must already be configured and connected to the MySQL database, or this function call will trigger
-# an interactive connection attampt.
+# Configure and connect to the database server so that we can bind to our portal database
+if not get_config().init_database_connection():
+    raise RuntimeError('Unable to connect to portal database!')
 schema = dj.schema('sgl')
 
 
