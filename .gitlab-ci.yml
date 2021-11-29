@@ -14,6 +14,8 @@ build_backend:
     - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/backend"
     - echo "$CI_PROJECT_DIR"
   extends: .kaniko_build
+  only:
+    - devel
 
 build_mariadb:
   stage: build
@@ -23,6 +25,8 @@ build_mariadb:
     - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/mariadb"
     - echo "$CI_PROJECT_DIR"
   extends: .kaniko_build
+  only:
+    - devel
 
 build_redis:
   stage: build
@@ -32,21 +36,29 @@ build_redis:
     - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/redis"
     - echo "$CI_PROJECT_DIR"
   extends: .kaniko_build
+  only:
+    - devel
 
 scan_backend:
   stage: scan
   variables:
     THE_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME
   extends: .docker_scan
+  only:
+    - devel
 
 scan_mariadb:
   stage: scan
   variables:
     THE_IMAGE: ${CI_REGISTRY_IMAGE}/mariadb:$CI_COMMIT_REF_NAME
   extends: .docker_scan
+  only:
+    - devel
 
 scan_redis:
   stage: scan
   variables:
     THE_IMAGE: ${CI_REGISTRY_IMAGE}/redis:$CI_COMMIT_REF_NAME
   extends: .docker_scan
+  only:
+    - devel

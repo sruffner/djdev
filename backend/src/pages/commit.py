@@ -57,65 +57,6 @@ from database.table_ops import fetch_restrict_proj, fetch_attribute_values, fetc
 logger = logging.getLogger(__name__)
 
 
-def _create_dash_upload_component(
-        component_id='dash-uploader',
-        text='Drag and Drop Here to upload!',
-        text_completed='Uploaded: ',
-        cancel_button=True,
-        pause_button=False,
-        filetypes=None,
-        max_file_size=1024,
-        chunk_size=1,
-        default_style=None,
-        upload_id=None,
-        max_files=1,
-):
-    """
-    This is a revision of the Upload() function in dash-uploader to allow specification of the file upload chunk size
-    in MB. The default value of 1MB is just too small for giga-byte file uploads. In addition, knitting together all of
-    the chunks on the server will take too long when you have thousands of 1MB chunks. Use the 'chunk_size' parameter
-    to specify the chunk size in MB; it will be range-restricted to [1..100]
-    """
-    # limit allowed range for chunk_size
-    chunk_size = min(max(1, chunk_size), 100)
-
-    # Handle styling
-    default_style = du.upload.combine(default_style, du.upload.DEFAULT_STYLE)
-    upload_style = du.upload.combine({'lineHeight': '0px'}, default_style)
-
-    if upload_id is None:
-        upload_id = uuid.uuid1()
-
-    service = du.upload.update_upload_api(du.upload.settings.requests_pathname_prefix,
-                                          du.upload.settings.upload_api)
-
-    arguments = dict(
-        id=component_id,
-        # Have not tested if using many files
-        # is reliable -> Do not allow
-        maxFiles=max_files,
-        maxFileSize=max_file_size * 1024 * 1024,
-        chunkSize=chunk_size * 1024 * 1024,
-        textLabel=text,
-        service=service,
-        startButton=False,
-        # Not tested so default to one.
-        simultaneousUploads=1,
-        completedMessage=text_completed,
-        cancelButton=cancel_button,
-        pauseButton=pause_button,
-        defaultStyle=default_style,
-        uploadingStyle=upload_style,
-        completeStyle=default_style,
-        upload_id=str(upload_id),
-    )
-
-    if filetypes:
-        arguments['filetypes'] = filetypes
-
-    return du.Upload_ReactComponent(**arguments)
-
-
 _JOBS_TABLE_COLS: List[Column] = [
     Column('job', 'Job ID/Archive File', '170px', True),
     Column('started', 'Started', '100px', True),
@@ -285,11 +226,8 @@ def serve_layout() -> html.Div:
             upload finishes. **Do NOT close this pop-up window and do NOT close the browser tab while the upload is in
             progress**.*
             '''),
-            html.Div(_create_dash_upload_component(
-                component_id=_UPLOADER_ID, max_file_size=10000, chunk_size=100, max_files=1,
-                cancel_button=True, filetypes=['zip'],
-                upload_id=str(uuid.uuid1()),
-            ), className="mt-2")
+            html.Div(du.Upload(id=_UPLOADER_ID, max_file_size=10000, chunk_size=100, max_files=1, cancel_button=True,
+                               filetypes=['zip'], upload_id=str(uuid.uuid1())), className="mt-2")
         ]),
         dbc.ModalFooter(dbc.Row([dbc.Button("Close", id=_CLOSE_UPLOAD_ID, color="primary", n_clicks=0)]))
     ], id=_UPLOAD_ID, backdrop="static", size="xl", is_open=False)

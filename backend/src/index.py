@@ -296,6 +296,16 @@ def login_callback(*args):
     return tuple(out)
 
 
+# To serve the backend app with GUnicorn, use this to supply the Flask application insta
+def get_app():
+    """
+    The Flask application instance for the portal backend. When serving the backend with GUnicorn, use this to supply
+    the application instance.
+    """
+    return app.server
+
+
+# To run the backend on the Flask development server, run 'python index.py'
 if __name__ == '__main__':
     logger.info("Starting portal app on Flask development server.")
     # force single-threaded server to avoid thread conflicts in servicing requests.
