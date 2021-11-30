@@ -31,10 +31,10 @@ cards = dbc.CardDeck([
         dbc.CardHeader("Experimental Sessions"),
         dbc.CardBody(
             [
-                html.P("Review individual experiment sessions for behavioral and/or neuronal data sets. "
-                       "Review recently added content."),
+                html.P("Review behavioral and/or neuronal data sets from any individual experiment session stored "
+                       "in the database. "),
                 dbc.Button("Go to Sessions page", href="/sessions", color="primary", className="mt-auto",
-                           disabled=True),
+                           disabled=False),
             ]
         )
     ]),

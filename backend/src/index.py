@@ -40,7 +40,7 @@ import flask_login
 
 from app import app, load_authorized_user
 from database.user_ops import authenticate_portal_user
-from pages import curate, commit, explore, neurons, user_profile, manage_users
+from pages import curate, commit, explore, neurons, sessions, user_profile, manage_users
 
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,9 @@ _PAGE_CONTENT_ID = "page-content"
 """ ID of the main Div (below the navigation bar) encapsulating the current page's content in this multi-page app. """
 _AUTH_INTV_ID = "check-auth-intv"
 """ ID of an Interval component firing once per minute to check if current user is authorized to access page. """
+
+_PUBLIC_ENDPOINTS = ['/', '/explore', '/neurons', '/sessions']
+""" Public endpoints in the portal web app that do not require authenticated access. """
 
 
 def _serve_layout() -> html.Div:
@@ -181,7 +184,7 @@ def display_page(pathname, n_intervals, current_href):
     # or doesn't have the required access. When that happens, redirect to the home page.
     if (trigger_id == _AUTH_INTV_ID) and (n_intervals is not None):
         url_parts = urlparse(current_href) if isinstance(current_href, str) else ""
-        if url_parts.path in ['/explore', '/neurons', '/']:
+        if url_parts.path in _PUBLIC_ENDPOINTS:
             return dash.no_update, dash.no_update, False
         can_commit = is_admin = is_logged_in = False
         if flask_login.current_user.is_authenticated:
@@ -202,6 +205,8 @@ def display_page(pathname, n_intervals, current_href):
         layout = explore.layout
     elif pathname == '/neurons':
         layout = neurons.serve_layout()
+    elif pathname == '/sessions':
+        layout = sessions.serve_layout()
     else:
         can_commit = is_admin = is_logged_in = False
         if flask_login.current_user.is_authenticated:
