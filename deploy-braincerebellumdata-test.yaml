@@ -64,7 +64,7 @@ spec:
   containers:
   - name: sgl-db
     image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel
-    imagePullPolicy: IfNotPresent
+    imagePullPolicy: Always
     volumeMounts:
       - name: db-data
         mountPath: /bitnami/mariadb
@@ -76,11 +76,12 @@ spec:
             key: mariadb_root_password
   - name: sgl-redis
     image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel
+    imagePullPolicy: Always
     ports:
       - containerPort: 6379
   - name: sgl-worker1
     image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
-    imagePullPolicy: IfNotPresent
+    imagePullPolicy: Always
     command: ["rq"]
     args: ["worker", "--url", "redis://127.0.0.1:6379", "--name", "worker1"]
     volumeMounts:
@@ -107,7 +108,7 @@ spec:
             key: flask_secret_key
   - name: sgl-worker2
     image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
-    imagePullPolicy: IfNotPresent
+    imagePullPolicy: Always
     command: ["rq"]
     args: ["worker", "--url", "redis://127.0.0.1:6379", "--name", "worker2"]
     volumeMounts:
@@ -134,7 +135,7 @@ spec:
             key: flask_secret_key
   - name: sgl-backend
     image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
-    imagePullPolicy: IfNotPresent
+    imagePullPolicy: Always
     ports:
       - containerPort: 8050
     volumeMounts:
