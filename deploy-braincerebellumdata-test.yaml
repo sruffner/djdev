@@ -1,0 +1,168 @@
+# This YAML defines the deployment of the Lisberger lab portal application to the Duke OpenShift cluster in the
+# braincerebellumdata-test namespace. This namespace is used solely to test and evaluate the application whenever the
+# implementation changes in any way (bug fixes, new features, etc).
+#
+# The application is deployed in a single pod with independent containers for the MariaDB database and the Dash-based
+# portal backend running on a GUnicorn WSGI server. Three additional containers in the pod provide a Redis server and
+# two Redis Queue workers (that listen to the default queue). The portal backend uses Redis to store information on
+# in-progress session commit jobs (so that the backend itself remains stateless), and the RQ workers handle two types of
+# background tasks in the workflow for a commit job -- preprocessing of an experiment session archive after upload, and
+# pushing session data into the database after the user has reviewed/edited the results from preprocessing.
+#
+# Since all of the containers are running in a single pod, then the host is really "localhost" or "127.0.0.1". So
+# REDIS_HOST=127.0.0.1 (and the same for MARIADB_HOSTNAME!), and the command that starts the RQ worker is "rq worker
+# --url redis://127.0.0.0:6379".
+#
+# TODO: This deployment definition is under development. Issues to address (once we get it working!) --
+#  1) There are currently no PVs or PVCs. Which means we have to repopulate the database from scratch every time the
+#     app is redeployed. Note use of "emptyDir" in the volumes section.
+#  2) The Route resource named 'inbound-route' provides TLS edge termination to the Service sgl-portal-svc, a ClusterIP
+#     type service that routes to the GUnicorn-served Dash/Flask backend listening on the node's 8050 port. With this
+#     configuration, you access the portal at https://braincerebellumdata-test.ocp.dhe.duke.edu -- BUT you must be on
+#     the Duke VPN. We'll want to configure this differently for production.
+#
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: inbound-route
+  labels:
+    app: sgl-portal
+spec:
+  host: braincerebellumdata-test.ocp.dhe.duke.edu
+  to:
+    kind: Service
+    name: sgl-portal-svc
+    weight: 100
+  tls:
+    termination: edge
+  wildcardPolicy: None
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sgl-portal-svc
+  labels:
+    app: sgl-portal
+spec:
+  type: ClusterIP
+  selector:
+    app: sgl-portal
+  ports:
+    - protocol: TCP
+      port: 8050
+      targetPort: 8050
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: single-pod-app
+  labels:
+    app: sgl-portal
+spec:
+  imagePullSecrets:
+  - name: sgl-portal-pull-secret
+  containers:
+  - name: sgl-db
+    image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - name: db-data
+        mountPath: /bitnami/mariadb
+    env:
+      - name: MARIADB_ROOT_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: sgl-secret
+            key: mariadb_root_password
+  - name: sgl-redis
+    image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel
+    ports:
+      - containerPort: 6379
+  - name: sgl-worker1
+    image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
+    imagePullPolicy: IfNotPresent
+    command: ["rq"]
+    args: ["worker", "--url", "redis://127.0.0.1:6379", "--name", "worker1"]
+    volumeMounts:
+      - name: backend-repo
+        mountPath: /repository
+    env:
+      - name: REDIS_HOST
+        value: 127.0.0.1
+      - name: REDIS_PORT
+        value: "6379"
+      - name: MARIADB_HOSTNAME
+        value: 127.0.0.1
+      - name: DJDEV_ROOT_REPO
+        value: /repository
+      - name: MARIADB_ROOT_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: sgl-secret
+            key: mariadb_root_password
+      - name: FLASK_SECRET_KEY
+        valueFrom:
+          secretKeyRef:
+            name: sgl-secret
+            key: flask_secret_key
+  - name: sgl-worker2
+    image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
+    imagePullPolicy: IfNotPresent
+    command: ["rq"]
+    args: ["worker", "--url", "redis://127.0.0.1:6379", "--name", "worker2"]
+    volumeMounts:
+      - name: backend-repo
+        mountPath: /repository
+    env:
+      - name: REDIS_HOST
+        value: 127.0.0.1
+      - name: REDIS_PORT
+        value: "6379"
+      - name: MARIADB_HOSTNAME
+        value: 127.0.0.1
+      - name: DJDEV_ROOT_REPO
+        value: /repository
+      - name: MARIADB_ROOT_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: sgl-secret
+            key: mariadb_root_password
+      - name: FLASK_SECRET_KEY
+        valueFrom:
+          secretKeyRef:
+            name: sgl-secret
+            key: flask_secret_key
+  - name: sgl-backend
+    image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
+    imagePullPolicy: IfNotPresent
+    ports:
+      - containerPort: 8050
+    volumeMounts:
+      - name: backend-repo
+        mountPath: /repository
+    env:
+      - name: REDIS_HOST
+        value: 127.0.0.1
+      - name: REDIS_PORT
+        value: "6379"
+      - name: MARIADB_HOSTNAME
+        value: 127.0.0.1
+      - name: DJDEV_ROOT_REPO
+        value: /repository
+      - name: MARIADB_ROOT_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: sgl-secret
+            key: mariadb_root_password
+      - name: FLASK_SECRET_KEY
+        valueFrom:
+          secretKeyRef:
+            name: sgl-secret
+            key: flask_secret_key
+  volumes:
+    - name: db-data
+      emptyDir:
+        sizeLimit: 5Gi
+    - name: backend-repo
+      emptyDir:
+        sizeLimit: 30Gi
