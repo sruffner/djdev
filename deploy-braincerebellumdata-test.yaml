@@ -162,8 +162,8 @@ spec:
             key: flask_secret_key
   volumes:
     - name: db-data
-      emptyDir:
-        sizeLimit: 5Gi
+      persistentVolumeClaim:
+        claimName: pvc-db
     - name: backend-repo
-      emptyDir:
-        sizeLimit: 30Gi
+      persistentVolumeClaim:
+        claimName: pvc-backend
