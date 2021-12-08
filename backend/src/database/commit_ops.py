@@ -76,6 +76,8 @@ from dataclasses import dataclass
 from datetime import datetime, date
 from pathlib import Path
 from typing import Union, List, Dict, Any, Optional, Tuple, IO, Set
+
+from dash_uploader.httprequesthandler import get_chunk_name
 from rq import Queue
 from werkzeug.security import generate_password_hash
 
@@ -482,13 +484,15 @@ def update_commit_job_on_archive_upload(job_id: str, filename: str) -> Union[str
     directory in the portal repository. When the ZIP file has been uploaded, the server will queue a background worker
     to begin preprocessing the data in the archive.
 
+    NOTE: The archive is uploaded in file "chunks" of 100MB each. These chunks are reassembled as the first step of
+    preprocessing.
+
     Args:
         job_id:  The commit job identifier, assigned when the session commit was initiated on server.
         filename: The name of the ZIP file that was uploaded.
     Returns:
         On success, returns the job's latest status information, updated to include the name of the session ZIP file
-            that finished uploading. If archive file or job not found or a server error occurs, returns a brief error
-            description.
+            that finished uploading. If job not found or a server error occurs, returns a brief error description.
     """
     try:
         status_key = f"{STATUS_NS}{job_id}"
@@ -503,20 +507,15 @@ def update_commit_job_on_archive_upload(job_id: str, filename: str) -> Union[str
         if job_status.state != CommitStateEnum.UPLOADING:
             logger.debug(f"Got upload complete for a commit task (id={job_id}), but upload was already finished.")
 
-        # the upload folder name is initially stored in the job status object in the 'zip' field. Verify the ZIP file
-        # then rename that folder with the job ID. This frees the original upload folder name for the next upload from
-        # the same client session...
+        # the upload folder name is initially stored in the job status object in the 'zip' field. Rename that folder
+        # with the job ID. This frees the original upload folder name for the next upload from the same client session.
         upload_dir = get_subfolder_in_staging_directory(job_status.zip)
-        zip_path = Path(upload_dir, filename)
-        if not zip_path.is_file():
-            logger.debug(f"Got upload complete signal for task {job_id}, but file not found: {zip_path}")
-            return f"{filename}: Uploaded file missing, or upload did not finish"
         staging_dir = get_subfolder_in_staging_directory(job_id)
         upload_dir.rename(staging_dir)
 
         now = time.time()
-        update_msg = f"Upload complete - {zip_path.name}. Queued job to preprocess session archive."
-        job_status.zip = zip_path.name
+        update_msg = f"Upload complete - {filename}. Queued job to preprocess session archive."
+        job_status.zip = filename
         job_status.state = CommitStateEnum.PREPROCESS
         job_status.updated = now
         job_status.msg = update_msg
@@ -601,12 +600,16 @@ def cancel_or_remove_commit_job(job_id: str) -> Tuple[bool, str, Optional[Commit
 def preprocess_commit_job(job_id: str) -> bool:
     """
     This method, intended to be called on a background process independent from the Dash/Flask backend server,
-    pre-processes the uploaded session data ZIP archive for an in-progress commit job. It scans the archive contents and
-    extracts information that will be needed when the session is actually committed to the lab database: (1) the unique
-    trial protocols presented during the session; (2) timing information for all trial reps, in particular, the start
-    and stop timestamps for the trial in the Omniplex timeline (for electrophysiological experiments using the Omniplex
-    system); and (3) metrics for all neural units recorded in the session. It also initializes metadata that will
-    be added to the database (Session and Session.EPhys tables) when the session is committed.
+    pre-processes the uploaded session data ZIP archive for an in-progress commit job.
+
+    A session archive ZIP file is uploaded from client to the server in 100MB chunks, and those chunks are stored in a
+    unique subfolder under the staging folder for the commit job. The first step in preprocessing is to reassemble the
+    archive file from the individual chunks. It then scans the archive contents and extracts information that will be
+    needed when the session is actually committed to the lab database: (1) the unique trial protocols presented during
+    the session; (2) timing information for all trial reps, in particular, the start and stop timestamps for the trial
+    in the Omniplex timeline (for electrophysiological experiments using the Omniplex system); and (3) metrics for all
+    neural units recorded in the session. It also initializes metadata that will be added to the database (Session and
+    Session.EPhys tables) when the session is committed.
 
     Pre-processing a large (>1GB) session can take many minutes, so progress messages are delivered periodically to the
     commit job's Redis-cached progress history. The method also checks the job's status regularly in case the user
@@ -652,6 +655,8 @@ def preprocess_commit_job(job_id: str) -> bool:
             return False
         elif job_status.state != CommitStateEnum.PREPROCESS:
             logger.error(f"Commit job is not in the correct stage for background preprocessing: {job_status.state}")
+            return False
+        elif not _reassemble_archive_from_chunked_upload(job_id, job_status.zip):
             return False
         else:
             zip_path = Path(get_subfolder_in_staging_directory(job_id), job_status.zip)
@@ -795,6 +800,58 @@ def preprocess_commit_job(job_id: str) -> bool:
         _background_job_update(job_id, error_msg, CommitStateEnum.FAIL)
         return False
 
+    return True
+
+
+def _reassemble_archive_from_chunked_upload(job_id: str, zip_file_name: str) -> bool:
+    """
+    Helper method for preprocess_commit_job() handles the task of reconstructing the session archive from the
+    individual file chunks that are uploaded to the server from the client.
+
+    Session archives will typically be several GB in size, and the current upload mechanism uses chunking to keep the
+    client responsive. If the upload was successful, the commit job's staging folder will contain a single subfolder
+    containing all of the file chunks, with file names "zipfilename_part_NNN", where NNN is the chunk number.
+
+    This method verifies the expeected contents of the staging folder, knits together the chunks in order into the
+    original zip file, which is stored directly under the staging folder. The subfolder with the chunks is deleted.
+
+    It can take a while to rebuild a multi-GB file, so the method will post progress messages and check for user
+    cancel.
+    Args:
+        job_id: The commit job identifier, assigned when the session commit was initiated on server.
+        zip_file_name: The file name for the session archive.
+    Returns:
+        True if successful, false otherwise.
+    Raises:
+        Exception: If a chunk file is missing, an IO or other error occurs.
+    """
+    # expect to find a SINGLE folder under the staging folder that contains the file chunks
+    commit_job_dir = get_subfolder_in_staging_directory(job_id)
+    temp_dir: Optional[Path] = None
+    for child in commit_job_dir.iterdir():
+        if child.is_dir():
+            temp_dir = child
+            break
+    num_chunks = 0 if (temp_dir is None) else len([child for child in temp_dir.iterdir() if child.is_file()])
+    if num_chunks == 0:
+        error_msg = "Failed to reassemble archive from chunked upload - file chunks not found"
+        _background_job_update(job_id, error_msg, CommitStateEnum.FAIL)
+        return False
+
+    # reassemble chunks into ZIP file -- with progress updates every 5 seconds
+    t0 = time.time()
+    zip_path = Path(commit_job_dir, zip_file_name)
+    with open(zip_path, "ab") as target_file:
+        for i in range(1, num_chunks + 1):
+            chunk_path = Path(temp_dir, get_chunk_name(zip_file_name, i))
+            with open(chunk_path, "rb") as stored_chunk_file:
+                target_file.write(stored_chunk_file.read())
+            if (time.time() - t0) > 5:
+                msg = f"Reassembling {zip_file_name} from chunked upload: {i} of {num_chunks} chunks processed."
+                if _background_job_update(job_id, msg):
+                    return False
+                t0 = time.time()
+    shutil.rmtree(temp_dir)
     return True
 
 

@@ -13,6 +13,7 @@ import dash_uploader as du
 import flask_login
 from config.config import get_config, AppConfig
 from config.logging import setup_logging
+from database.upload_handler import UploadHandler
 from database.user_ops import get_portal_user_record, ADMIN_ACCESS, COMMIT_ACCESS
 
 setup_logging(cfg_file='config/logging.yaml')
@@ -27,8 +28,9 @@ logger.handlers.clear()
 
 app.config.suppress_callback_exceptions = cfg.dash_suppress_callback_exceptions
 
-# configure Dash uploader to upload to staging directory in backend container
-du.configure_upload(app, cfg.dash_upload_dir)
+# configure Dash uploader to upload to staging directory in backend container and to use a custom upload handler
+# that serves our purpose
+du.configure_upload(app, cfg.dash_upload_dir, http_request_handler=UploadHandler)
 
 # Setup for Flask-Login
 server.permanent_session_lifetime = cfg.flask_permanent_session_lifetime
