@@ -13,14 +13,14 @@
 # REDIS_HOST=127.0.0.1 (and the same for MARIADB_HOSTNAME!), and the command that starts the RQ worker is "rq worker
 # --url redis://127.0.0.0:6379".
 #
-# TODO: This deployment definition is under development. Issues to address (once we get it working!) --
-#  1) There are currently no PVs or PVCs. Which means we have to repopulate the database from scratch every time the
-#     app is redeployed. Note use of "emptyDir" in the volumes section.
+# NOTES --
+#  1) The PVCs listed were created on the Duke OCP console. The PVs are dynamically provisioned.
 #  2) The Route resource named 'inbound-route' provides TLS edge termination to the Service sgl-portal-svc, a ClusterIP
 #     type service that routes to the GUnicorn-served Dash/Flask backend listening on the node's 8050 port. With this
 #     configuration, you access the portal at https://braincerebellumdata-test.ocp.dhe.duke.edu -- BUT you must be on
 #     the Duke VPN. We'll want to configure this differently for production.
 #
+---
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
@@ -31,7 +31,7 @@ spec:
   host: braincerebellumdata-test.ocp.dhe.duke.edu
   to:
     kind: Service
-    name: sgl-portal-svc
+    name: portal-server
     weight: 100
   tls:
     termination: edge
@@ -40,130 +40,192 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: sgl-portal-svc
+  name: portal-server
   labels:
     app: sgl-portal
+    tier: web
 spec:
   type: ClusterIP
   selector:
     app: sgl-portal
+    tier: web
   ports:
     - protocol: TCP
       port: 8050
       targetPort: 8050
 ---
 apiVersion: v1
-kind: Pod
+kind: Service
 metadata:
-  name: single-pod-app
+  name: data-store
   labels:
     app: sgl-portal
+    tier: data
 spec:
-  imagePullSecrets:
-  - name: sgl-portal-pull-secret
-  containers:
-  - name: sgl-db
-    image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel
-    imagePullPolicy: Always
-    volumeMounts:
-      - name: db-data
-        mountPath: /bitnami/mariadb
-    env:
-      - name: MARIADB_ROOT_PASSWORD
-        valueFrom:
-          secretKeyRef:
-            name: sgl-secret
-            key: mariadb_root_password
-  - name: sgl-redis
-    image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel
-    imagePullPolicy: Always
-    ports:
-      - containerPort: 6379
-  - name: sgl-worker1
-    image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
-    imagePullPolicy: Always
-    command: ["rq"]
-    args: ["worker", "--url", "redis://127.0.0.1:6379", "--name", "worker1"]
-    volumeMounts:
-      - name: backend-repo
-        mountPath: /repository
-    env:
-      - name: REDIS_HOST
-        value: 127.0.0.1
-      - name: REDIS_PORT
-        value: "6379"
-      - name: MARIADB_HOSTNAME
-        value: 127.0.0.1
-      - name: DJDEV_ROOT_REPO
-        value: /repository
-      - name: MARIADB_ROOT_PASSWORD
-        valueFrom:
-          secretKeyRef:
-            name: sgl-secret
-            key: mariadb_root_password
-      - name: FLASK_SECRET_KEY
-        valueFrom:
-          secretKeyRef:
-            name: sgl-secret
-            key: flask_secret_key
-  - name: sgl-worker2
-    image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
-    imagePullPolicy: Always
-    command: ["rq"]
-    args: ["worker", "--url", "redis://127.0.0.1:6379", "--name", "worker2"]
-    volumeMounts:
-      - name: backend-repo
-        mountPath: /repository
-    env:
-      - name: REDIS_HOST
-        value: 127.0.0.1
-      - name: REDIS_PORT
-        value: "6379"
-      - name: MARIADB_HOSTNAME
-        value: 127.0.0.1
-      - name: DJDEV_ROOT_REPO
-        value: /repository
-      - name: MARIADB_ROOT_PASSWORD
-        valueFrom:
-          secretKeyRef:
-            name: sgl-secret
-            key: mariadb_root_password
-      - name: FLASK_SECRET_KEY
-        valueFrom:
-          secretKeyRef:
-            name: sgl-secret
-            key: flask_secret_key
-  - name: sgl-backend
-    image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
-    imagePullPolicy: Always
-    ports:
-      - containerPort: 8050
-    volumeMounts:
-      - name: backend-repo
-        mountPath: /repository
-    env:
-      - name: REDIS_HOST
-        value: 127.0.0.1
-      - name: REDIS_PORT
-        value: "6379"
-      - name: MARIADB_HOSTNAME
-        value: 127.0.0.1
-      - name: DJDEV_ROOT_REPO
-        value: /repository
-      - name: MARIADB_ROOT_PASSWORD
-        valueFrom:
-          secretKeyRef:
-            name: sgl-secret
-            key: mariadb_root_password
-      - name: FLASK_SECRET_KEY
-        valueFrom:
-          secretKeyRef:
-            name: sgl-secret
-            key: flask_secret_key
-  volumes:
-    - name: db-data
-      persistentVolumeClaim:
-        claimName: pvc-db
-    - name: backend-repo
-      persistentVolumeClaim:
-        claimName: pvc-backend
+  type: ClusterIP
+  selector:
+    app: sgl-portal
+    tier: data
+  ports:
+    - protocol: TCP
+      name: redis
+      port: 6379
+      targetPort: 6379
+    - protocol: TCP
+      name: mariadb
+      port: 3306
+      targetPort: 3306
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-store
+  labels:
+    app: sgl-portal
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sgl-portal
+      tier: data
+  template:
+    metadata:
+      labels:
+        app: sgl-portal
+        tier: data
+    spec:
+      imagePullSecrets:
+      - name: sgl-portal-pull-secret
+      containers:
+      - name: sgl-db
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel
+        imagePullPolicy: Always
+        volumeMounts:
+          - name: db-data
+            mountPath: /bitnami/mariadb
+        env:
+          - name: MARIADB_ROOT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: mariadb_root_password
+        ports:
+          - containerPort: 3360
+      - name: sgl-redis
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel
+        imagePullPolicy: Always
+        ports:
+          - containerPort: 6379
+      volumes:
+        - name: db-data
+          persistentVolumeClaim:
+            claimName: pvc-db
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-worker
+  labels:
+    app: sgl-portal
+    tier: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sgl-portal
+      tier: worker
+  template:
+    metadata:
+      labels:
+        app: sgl-portal
+        tier: worker
+    spec:
+      imagePullSecrets:
+      - name: sgl-portal-pull-secret
+      containers:
+      - name: web-worker
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
+        imagePullPolicy: Always
+        command: ["rq"]
+        args: ["worker", "--url", "redis://$(REDIS_HOST):$(REDIS_PORT)"]
+        volumeMounts:
+          - name: backend-repo
+            mountPath: /repository
+        env:
+          - name: REDIS_HOST
+            value: data-store.braincerebellumdata-test.svc.cluster.local
+          - name: REDIS_PORT
+            value: "6379"
+          - name: MARIADB_HOSTNAME
+            value: data-store.braincerebellumdata-test.svc.cluster.local
+          - name: DJDEV_ROOT_REPO
+            value: /repository
+          - name: MARIADB_ROOT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: mariadb_root_password
+          - name: FLASK_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: flask_secret_key
+      volumes:
+        - name: backend-repo
+          persistentVolumeClaim:
+            claimName: pvc-backend
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-server
+  labels:
+    app: sgl-portal
+    tier: web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sgl-portal
+      tier: web
+  template:
+    metadata:
+      labels:
+        app: sgl-portal
+        tier: web
+    spec:
+      imagePullSecrets:
+      - name: sgl-portal-pull-secret
+      containers:
+      - name: web-server
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
+        imagePullPolicy: Always
+        ports:
+          - containerPort: 8050
+        volumeMounts:
+          - name: backend-repo
+            mountPath: /repository
+        env:
+          - name: REDIS_HOST
+            value: data-store.braincerebellumdata-test.svc.cluster.local
+          - name: REDIS_PORT
+            value: "6379"
+          - name: MARIADB_HOSTNAME
+            value: data-store.braincerebellumdata-test.svc.cluster.local
+          - name: DJDEV_ROOT_REPO
+            value: /repository
+          - name: MARIADB_ROOT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: mariadb_root_password
+          - name: FLASK_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: flask_secret_key
+      volumes:
+        - name: backend-repo
+          persistentVolumeClaim:
+            claimName: pvc-backend
