@@ -24,8 +24,7 @@ logger = logging.getLogger(__name__)
 
 if __name__ == '__main__':
     cfg = get_config()
-    logger.info(f"Checking if Redis server is available at "
-                f"{cfg.redis_conn.connection.host}:{cfg.redis_conn.connection.port}")
+    logger.info("Checking if Redis server is available...")
     for i in range(60):
         try:
             res = cfg.redis_conn.ping()
@@ -34,7 +33,7 @@ if __name__ == '__main__':
             else:
                 logger.debug(f"Redis.ping() returned {res}, instead of PONG")
         except RedisError as e:
-            logger.debug(f"Failed to ping Redis server at {cfg.redis_conn.connection.host}: {str(e)}")
+            logger.debug(f"Failed to ping Redis server: {str(e)}")
         sleep(2)
 
     logger.error("Failed to ping Redis server for ~2 minutes. Giving up.")
