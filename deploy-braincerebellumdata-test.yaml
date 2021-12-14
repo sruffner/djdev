@@ -143,33 +143,8 @@ spec:
     spec:
       imagePullSecrets:
       - name: sgl-portal-pull-secret
-      initContainers:
-      - name: wait-for-redis
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
-        imagePullPolicy: Always
-        command: [ "python" ]
-        args: [ "-m", "admin.wait_for_redis"]
-        env:
-          - name: REDIS_HOST
-            value: data-store.braincerebellumdata-test.svc.cluster.local
-          - name: REDIS_PORT
-            value: "6379"
-          - name: MARIADB_HOSTNAME
-            value: data-store.braincerebellumdata-test.svc.cluster.local
-          - name: DJDEV_ROOT_REPO
-            value: /repository
-          - name: MARIADB_ROOT_PASSWORD
-            valueFrom:
-              secretKeyRef:
-                name: sgl-secret
-                key: mariadb_root_password
-          - name: FLASK_SECRET_KEY
-            valueFrom:
-              secretKeyRef:
-                name: sgl-secret
-                key: flask_secret_key
       containers:
-      - name: web-worker
+      - name: sgl-worker
         image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
         imagePullPolicy: Always
         command: ["rq"]
@@ -223,7 +198,7 @@ spec:
       imagePullSecrets:
       - name: sgl-portal-pull-secret
       containers:
-      - name: web-server
+      - name: sgl-server
         image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
         imagePullPolicy: Always
         ports:
