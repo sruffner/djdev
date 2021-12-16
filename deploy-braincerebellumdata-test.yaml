@@ -89,6 +89,8 @@ spec:
     matchLabels:
       app: sgl-portal
       tier: data
+  strategy:
+    type: Recreate   # we must NOT have two MariaDB containers running at once, accessing the same PVC!
   template:
     metadata:
       labels:
@@ -112,11 +114,31 @@ spec:
                 key: mariadb_root_password
         ports:
           - containerPort: 3360
+        livenessProbe:
+          exec:
+            command: ["sh", "-c", "exec mariadb-admin status -uroot -p$MARIADB_ROOT_PASSWORD"]
+          initialDelaySeconds: 20
+          periodSeconds: 5
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "exec mariadb-admin status -uroot -p$MARIADB_ROOT_PASSWORD"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
       - name: sgl-redis
         image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel
         imagePullPolicy: Always
         ports:
           - containerPort: 6379
+        livenessProbe:
+          exec:
+            command: ["sh", "-c", 'RES=$(redis-cli ping); if [ "$RES" != "PONG" ]; then echo "$RES"; exit 1; fi']
+          initialDelaySeconds: 20
+          periodSeconds: 5
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", 'RES=$(redis-cli ping); if [ "$RES" != "PONG" ]; then echo "$RES"; exit 1; fi']
+          initialDelaySeconds: 5
+          periodSeconds: 5
       volumes:
         - name: db-data
           persistentVolumeClaim:
@@ -143,6 +165,15 @@ spec:
     spec:
       imagePullSecrets:
       - name: sgl-portal-pull-secret
+      initContainers:
+      - name: wait-for-redis
+        image: busybox
+        command: ['sh', '-c', 'echo Waiting for Redis; until nc -z $(REDIS_HOST) $(REDIS_PORT); do printf "."; sleep 1; done; echo Ready!']
+        env:
+          - name: REDIS_HOST
+            value: data-store.braincerebellumdata-test.svc.cluster.local
+          - name: REDIS_PORT
+            value: "6379"
       containers:
       - name: sgl-worker
         image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
@@ -171,6 +202,16 @@ spec:
               secretKeyRef:
                 name: sgl-secret
                 key: flask_secret_key
+        livenessProbe:
+          exec:
+            command: [ "sh", "-c", 'H=$(hostname); rq info -W | grep -c $H' ]
+          initialDelaySeconds: 20
+          periodSeconds: 5
+        readinessProbe:
+          exec:
+            command: [ "sh", "-c", 'H=$(hostname); rq info -W | grep -c $H' ]
+          initialDelaySeconds: 5
+          periodSeconds: 5
       volumes:
         - name: backend-repo
           persistentVolumeClaim:
@@ -197,6 +238,19 @@ spec:
     spec:
       imagePullSecrets:
       - name: sgl-portal-pull-secret
+      initContainers:
+      - name: wait-for-redis
+        image: busybox
+        command: ['sh', '-c', 'echo Waiting for Redis; until nc -z $(DATA_HOST) 6379; do printf "."; sleep 1; done; echo Ready!']
+        env:
+          - name: DATA_HOST
+            value: data-store.braincerebellumdata-test.svc.cluster.local
+      - name: wait-for-mariadb
+        image: busybox
+        command: ['sh', '-c', 'echo Waiting for MariaDB; until nc -z $(DATA_HOST) 3306; do printf "."; sleep 1; done; echo Ready!']
+        env:
+          - name: DATA_HOST
+            value: data-store.braincerebellumdata-test.svc.cluster.local
       containers:
       - name: sgl-server
         image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
@@ -225,6 +279,17 @@ spec:
               secretKeyRef:
                 name: sgl-secret
                 key: flask_secret_key
+        livenessProbe:
+          exec:
+            command: [ "sh", "-c", 'pidof -x gunicorn' ]
+          initialDelaySeconds: 20
+          periodSeconds: 5
+        readinessProbe:
+          httpGet:
+            port: 8050
+            path: /
+          initialDelaySeconds: 20
+          periodSeconds: 5
       volumes:
         - name: backend-repo
           persistentVolumeClaim:
