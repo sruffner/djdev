@@ -21,12 +21,9 @@ from __future__ import annotations  # Needed in Python 3.7y to type-hint a metho
 
 from dataclasses import dataclass
 
-import dash
-import dash_html_components as html
+from dash import callback, clientside_callback, callback_context, no_update, exceptions as dash_exc, html, dcc, \
+    dash_table as dt, Input, Output, State
 import dash_bootstrap_components as dbc
-import dash_core_components as dcc
-import dash_table as dt
-from dash.dependencies import Input, Output, State
 from typing import List, Any, Optional, Dict, Set
 
 import database.table_info as ti
@@ -81,7 +78,7 @@ class _BasePanel:
     concrete subclasses that implement each of the panels that appears on the "curate" page.
     """
 
-    def __init__(self, app: dash.Dash, table_id: ti.DBTable, prefix: str, subpanels: List[_MappingSubPanel] = None):
+    def __init__(self, table_id: ti.DBTable, prefix: str, subpanels: List[_MappingSubPanel] = None):
         """
         Construct a user-facing panel associated with a manually curated table in the laboratory database. The panel
         displays the table contents in a Dash DataTable widget and provides mechanisms for adding new entities to
@@ -96,7 +93,6 @@ class _BasePanel:
         source table. See _MappingSubPanel for details.
 
         Args:
-            app: The Dash application object.
             table_id: ID of a database table conducive to form-based entry and a tabular presentation on the GUI.
             prefix: A short string used to define unique IDs for HTML/Dash components rendered in and managed by
                 this panel.
@@ -104,8 +100,6 @@ class _BasePanel:
                 widget to display any subpanels. Each subpanel houses a database table that is associated with table_id
                 through a separate "cross-reference" or "mapping" table in the database.
         """
-        self._app = app
-        """ The Dash application object. """
         self._table_id = table_id
         """ ID of database table that is displayed and modified on this panel. """
         self._prefix = prefix
@@ -113,7 +107,7 @@ class _BasePanel:
         self._subpanels = list(subpanels) if subpanels else []
         """ List of any subordinate panels presenting database tables related to the main table for this panel. """
         if hasattr(self, '_callbacks'):
-            self._callbacks(self._app)
+            self._callbacks()
 
     def id_prefix(self) -> str:
         """ Return a short string used to uniquely identify the tab or other component associated with this panel. It
@@ -457,18 +451,14 @@ class _BasePanel:
             error_msg = f"Add failed: {str(err)}"
         return error_msg if error_msg else ""
 
-    def _callbacks(self, app: dash.Dash):
+    def _callbacks(self):
         """
         Define the Dash callbacks that implement the user interactive functionality of the panel.
-
-        Args:
-            app (dash.Dash): The Dash application object. This is used to apply the Dash callback decorator to each
-            callback function
         """
         pfx = self._prefix
 
         # this clientside callback highlights all cells in the selected row
-        app.clientside_callback(
+        clientside_callback(
             """
             function(rows) {
                 let style = [];
@@ -495,10 +485,12 @@ class _BasePanel:
             input_vector.append(Input(f"{pfx}_lower_xref_btn", "n_clicks"))
             state_vector.append(State(f"{pfx}_mapping_updated_div", "children"))
 
-        @app.callback([Output(f"{pfx}_table", "data"), Output(f"{pfx}_table", "tooltip_data"),
-                       Output(f"{pfx}_table", "selected_rows"),
-                       Output(f"{pfx}_alert", "children"), Output(f"{pfx}_alert", "is_open")],
-                      input_vector, state_vector)
+        @callback(
+            [Output(f"{pfx}_table", "data"), Output(f"{pfx}_table", "tooltip_data"),
+             Output(f"{pfx}_table", "selected_rows"), Output(f"{pfx}_alert", "children"),
+             Output(f"{pfx}_alert", "is_open")],
+            input_vector, state_vector
+        )
         def callback_update_data_table(*args):
             """
             Update the row and tooltip data for the panel's Dash DataTable component, as well as the error message
@@ -521,9 +513,9 @@ class _BasePanel:
                 the property when the modal window is extinguished to determine if any changes were made, in which case
                 it is necessary to refresh the contents of the panel's data table.
             """
-            ctx = dash.callback_context
+            ctx = callback_context
             if not ctx.triggered:
-                raise dash.exceptions.PreventUpdate
+                raise dash_exc.PreventUpdate
 
             update = False
             clear_selection = False
@@ -548,11 +540,11 @@ class _BasePanel:
                     error_msg = self._remove_row(selected_row)
                     update = clear_selection = (len(error_msg) == 0)
 
-            table_data = self._rows() if update else dash.no_update
-            tooltip_data = self._tooltip_data_for(table_data) if update else dash.no_update
-            return table_data, tooltip_data, [] if clear_selection else dash.no_update, error_msg, len(error_msg) > 0
+            table_data = self._rows() if update else no_update
+            tooltip_data = self._tooltip_data_for(table_data) if update else no_update
+            return table_data, tooltip_data, [] if clear_selection else no_update, error_msg, len(error_msg) > 0
 
-        @app.callback(Output(f"del_{pfx}_btn", "disabled"), [Input(f"{pfx}_table", "selected_rows")])
+        @callback(Output(f"del_{pfx}_btn", "disabled"), [Input(f"{pfx}_table", "selected_rows")])
         def callback_on_table_row_select(selected_rows):
             """
             Update the enabled/disabled state of the "Remove" button in the panel layout.
@@ -573,10 +565,12 @@ class _BasePanel:
                          Output(f"{pfx}_entry_alert", "children"), Output(f"{pfx}_entry_alert", "is_open")]
         output_vector.extend([Output(f"{attr_id}_input", "value") for attr_id in attr_ids])
 
-        @app.callback(output_vector,
-                      [Input(f"add_{pfx}_btn", "n_clicks"), Input(f"{pfx}_entry_submit_btn", "n_clicks"),
-                       Input(f"{pfx}_entry_done_btn", "n_clicks")],
-                      state_vector)
+        @callback(
+            output_vector,
+            [Input(f"add_{pfx}_btn", "n_clicks"), Input(f"{pfx}_entry_submit_btn", "n_clicks"),
+             Input(f"{pfx}_entry_done_btn", "n_clicks")],
+            state_vector
+        )
         def callback_on_add_entry(add_btn, submit_btn, done_btn, *args):
             """
             Raise/lower the add-entry modal form by which user adds new entries to the database table represented in
@@ -594,9 +588,9 @@ class _BasePanel:
             trigger callback_update_data_table(). That callback will check the "children" property of "entry_added_div"
             and, if it is not zero, refresh the contents of the panel's data table to reflect the changes made.
             """
-            ctx = dash.callback_context
+            ctx = callback_context
             if not ctx.triggered:
-                raise dash.exceptions.PreventUpdate
+                raise dash_exc.PreventUpdate
 
             attr_ids = self._attributes_exposed()
             out = [True, 0, "", False]
@@ -607,7 +601,7 @@ class _BasePanel:
             btn_id = ctx.triggered[0]['prop_id'].split('.')[0]
             if btn_id.find(f"{pfx}_entry_done_btn") > -1:
                 out[0] = False
-                out[1] = dash.no_update
+                out[1] = no_update
             elif btn_id.find(f"{pfx}_entry_submit_btn") > -1:
                 entry = dict()
                 for i, attr_id in enumerate(attr_ids):
@@ -619,7 +613,7 @@ class _BasePanel:
                 if len(error_msg) == 0:
                     out[1] = 1
                 else:
-                    out = [dash.no_update] * (4 + len(attr_ids))
+                    out = [no_update] * (4 + len(attr_ids))
                     out[2] = error_msg
                     out[3] = True
 
@@ -635,13 +629,13 @@ class _BasePanel:
                 input_vector.append(Input(f"{pfx}_{sub_pfx}_toggle", "n_clicks"))
                 state_vector.append(State(f"{pfx}_{sub_pfx}_collapse", "is_open"))
 
-            @app.callback(output_vector, input_vector, state_vector)
+            @callback(output_vector, input_vector, state_vector)
             def toggle_accordion(*args):
                 """
                 Optional callback -- present only if the panel includes one or more subpanels within an accordion-style
                 layout -- updates the open state of each of the subpanels within the accordion widget.
                 """
-                ctx = dash.callback_context
+                ctx = callback_context
 
                 n_subpanels = len(self._subpanels)
                 out = n_subpanels * [False]
@@ -669,7 +663,7 @@ class _BasePanel:
                 state_vector.append(State(f"{pfx}_{sub_pfx}_drop", "value"))
             state_vector.append(State(f"{pfx}_xref_for", "value"))
 
-            @app.callback(output_vector1, input_vector, state_vector)
+            @callback(output_vector1, input_vector, state_vector)
             def callback_on_raise_xref_modal(*args):
                 """
                 Optional callback -- present only if the panel includes one or more subpanels having a table that is
@@ -698,13 +692,13 @@ class _BasePanel:
                 this button will also trigger callback_update_data_table(), which checks the "mapping_updated" DIV to
                 see if any changes occurred while the modal window was raised.
                 """
-                ctx = dash.callback_context
+                ctx = callback_context
                 if not ctx.triggered:
-                    raise dash.exceptions.PreventUpdate
+                    raise dash_exc.PreventUpdate
 
                 # output vector is initialized for the correct response to extinguishing the modal window
-                out = [False, dash.no_update, "", "", "success", False, dash.no_update]
-                out.extend([dash.no_update for _ in range(num_xref_dropdowns)])
+                out = [False, no_update, "", "", "success", False, no_update]
+                out.extend([no_update for _ in range(num_xref_dropdowns)])
 
                 btn_id = ctx.triggered[0]['prop_id'].split('.')[0]
                 selected_rows = args[3]
@@ -740,15 +734,15 @@ class _BasePanel:
                             break
                     ok = (len(error_msg) == 0)
 
-                    out[0] = out[1] = out[2] = dash.no_update
+                    out[0] = out[1] = out[2] = no_update
                     out[3] = "Updated successfully." if ok else error_msg
                     out[4] = "success" if ok else "danger"
                     out[5] = True
-                    out[6] = 1 if ok else dash.no_update
+                    out[6] = 1 if ok else no_update
 
                 return tuple(out)
 
-            @app.callback(output_vector2, [Input(f"{pfx}_xref_for", "value")])
+            @callback(output_vector2, [Input(f"{pfx}_xref_for", "value")])
             def callback_on_select_xref_key(src_pk_val):
                 """
                 Optional callback -- present only if the panel includes one or more subpanels having a table that is
@@ -756,9 +750,9 @@ class _BasePanel:
                 in the "xref_for" dropdown in the modal window changes, the current value(s) in the multi-select
                 dropdown(s) in that same window are updated to reflect the current mapping table view(s).
                 """
-                ctx = dash.callback_context
+                ctx = callback_context
                 if not ctx.triggered:
-                    raise dash.exceptions.PreventUpdate
+                    raise dash_exc.PreventUpdate
                 out = []
                 for subpanel in self._subpanels:
                     curr_mapped_list = subpanel.mappings_for(src_pk_val) if src_pk_val else None
@@ -787,13 +781,12 @@ class _MappingSubPanel(_BasePanel):
     Note that current_mappings() and mappings_for() return each mapped entity in the destination table as a _RowAlias,
     which includes a user-facing label and tooltip as well as the entity's primary key value.
     """
-    def __init__(self, app: dash.Dash, map_table_id: ti.DBTable, prefix: str):
+    def __init__(self, map_table_id: ti.DBTable, prefix: str):
         """
         Subpanel housing the destination table for the specified cross-reference table. It is intended only for
         embedding in a panel that houses the source table for that mapping.
 
         Args:
-            app: The Dash application object.
             map_table_id: ID of the cross-reference table in the database. Its primary key is ASSUMED to consist of
                 two foreign keys, namely, the auto-incrementing PKs of the source and destination tables.
             prefix: A short string used to define unique IDs for HTML/Dash components rendered in and managed by
@@ -823,7 +816,7 @@ class _MappingSubPanel(_BasePanel):
         self._map_table_id = map_table_id
         """ ID of the cross-reference table. """
 
-        super().__init__(app, self._dst_table_id, prefix)
+        super().__init__(self._dst_table_id, prefix)
 
     def to_key(self) -> str:
         """ID of the auto-incrementing primary key for the destination table housed in this mapping subpanel."""
@@ -904,8 +897,8 @@ class _MappingSubPanel(_BasePanel):
 
 class RigPanel(_BasePanel):
     """ This panel provides interactive access to experiment rigs in the lab database. """
-    def __init__(self, app: dash.Dash):
-        super().__init__(app, ti.DBTable.RIG, 'rig')
+    def __init__(self):
+        super().__init__(ti.DBTable.RIG, 'rig')
 
 
 class SubjectImplantPanel(_BasePanel):
@@ -914,10 +907,10 @@ class SubjectImplantPanel(_BasePanel):
     than displaying all implant records for all subjects, it restricts the display to the implant history of a single
     specified subject. The panel is intended for embedding in the SubjectPanel.
     """
-    def __init__(self, app: dash.Dash):
+    def __init__(self):
         self._curr_subj = None
         """ The panel shows the implant history for this experiment subject. If None, panel is empty. """
-        super().__init__(app, ti.DBTable.IMPLANT, 'impl')
+        super().__init__(ti.DBTable.IMPLANT, 'impl')
 
     def select_subject(self, subj_id: Optional[str]) -> None:
         """
@@ -980,9 +973,9 @@ class SubjectPanel(_BasePanel):
     subject table. That subpanel automatically expands whenever a subject is selected and collapses when the
     selection is cleared (for example, when a subject is deleted).
     """
-    def __init__(self, app: dash.Dash):
-        self._implant_subpanel = SubjectImplantPanel(app)
-        super().__init__(app, ti.DBTable.SUBJECT, 'subj')
+    def __init__(self):
+        self._implant_subpanel = SubjectImplantPanel()
+        super().__init__(ti.DBTable.SUBJECT, 'subj')
 
     def layout(self) -> List[Any]:
         """
@@ -999,17 +992,17 @@ class SubjectPanel(_BasePanel):
         ])
         return base_layout
 
-    def _callbacks(self, app: dash.Dash):
-        super()._callbacks(app)
+    def _callbacks(self):
+        super()._callbacks()
         pfx = self._prefix
 
-        @app.callback(
+        @callback(
             [Output("implhist_panel", "children"), Output("implhist_collapse", "is_open")],
             [Input(f"{pfx}_table", "selected_rows")], [State(f"{pfx}_table", "data")])
         def show_hide_implhist(selected_rows, rows):
-            ctx = dash.callback_context
+            ctx = callback_context
             if not ctx.triggered:
-                raise dash.exceptions.PreventUpdate
+                raise dash_exc.PreventUpdate
 
             idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
             selected_row = rows[idx] if (-1 < idx < len(rows)) else None
@@ -1021,14 +1014,14 @@ class SubjectPanel(_BasePanel):
 
 class BrainAreaPanel(_BasePanel):
     """ This panel provides interactive access to the various brain regions characterized in the lab database. """
-    def __init__(self, app: dash.Dash):
-        super().__init__(app, ti.DBTable.BRAIN_AREA, 'brain')
+    def __init__(self):
+        super().__init__(ti.DBTable.BRAIN_AREA, 'brain')
 
 
 class NeuronTypePanel(_BasePanel):
     """ This panel provides interactive access to the various neuron types characterized in the lab database. """
-    def __init__(self, app: dash.Dash):
-        super().__init__(app, ti.DBTable.NEURON_TYPE, 'n_typ')
+    def __init__(self):
+        super().__init__(ti.DBTable.NEURON_TYPE, 'n_typ')
 
 
 class StudyPanel(_BasePanel):
@@ -1036,9 +1029,9 @@ class StudyPanel(_BasePanel):
     This panel provides interactive access to research projects in the lab database, along with the publications
     associated with those projects.
     """
-    def __init__(self, app: dash.Dash):
-        subpanels = [StudyPanel.PublicationPanel(app)]
-        super().__init__(app, ti.DBTable.STUDY, 'study', subpanels)
+    def __init__(self):
+        subpanels = [StudyPanel.PublicationPanel()]
+        super().__init__(ti.DBTable.STUDY, 'study', subpanels)
 
     def _columns(self) -> List[ti.Column]:
         """ Overridden to add a column indicating how many publications are associated with the study. """
@@ -1090,8 +1083,8 @@ class StudyPanel(_BasePanel):
         return _RowAlias({'study_id': row['study_id']}, row['study_title'], None)
 
     class PublicationPanel(_MappingSubPanel):
-        def __init__(self, app: dash.Dash):
-            super().__init__(app, ti.DBTable.STUDY_TO_PUB, 'pub')
+        def __init__(self):
+            super().__init__(ti.DBTable.STUDY_TO_PUB, 'pub')
 
         def _columns(self) -> List[ti.Column]:
             """"

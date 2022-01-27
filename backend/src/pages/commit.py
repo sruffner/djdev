@@ -35,17 +35,14 @@ import uuid
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
-import dash
-import dash_html_components as html
-import dash_core_components as dcc
-import dash_table as dt
+from dash import callback_context, callback, exceptions as dash_exc, no_update, dash_table as dt, html, dcc, Input, \
+    Output, State
 import dash_bootstrap_components as dbc
 import dash_uploader as du
 import flask_login
 import plotly.express as px
-from dash.dependencies import Input, Output, State
 
-from app import load_authorized_user, app
+from app import load_authorized_user
 from database import maestro
 from database.commit_ops import CommitStateEnum, initiate_session_commit, get_pending_commit_jobs_for, \
     cancel_or_remove_commit_job, update_commit_job_on_archive_upload, commit_job_progress, CommitJobStatus, \
@@ -679,15 +676,15 @@ def _layout_unit_div(unit: Optional[OmniplexUnit]) -> List[Any]:
     return [html.Div(header_kids, className='mt-3 mb-1'), graph]
 
 
-@app.callback(
+@callback(
     [Output(_MESSAGE_BTN_ID, 'disabled'), Output(_REVIEW_BTN_ID, 'disabled'), Output(_REMOVE_BTN_ID, 'disabled')],
     [Input(_JOBS_TABLE_ID, 'selected_rows'), Input(_REFRESH_BTN_ID, "n_clicks")],
     [State(_JOBS_TABLE_ID, 'selected_rows'), State(_JOBS_TABLE_ID, 'data')]
 )
 def select_row_callback(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     if not ctx.triggered:
-        raise dash.exceptions.PreventUpdate
+        raise dash_exc.PreventUpdate
     trigger = ctx.triggered[0]['prop_id'].split('.')[0]
     arg_idx = 2 if trigger == _REFRESH_BTN_ID else 0
     idx = args[arg_idx][0] if isinstance(args[arg_idx], list) and (len(args[arg_idx]) > 0) else -1
@@ -696,8 +693,7 @@ def select_row_callback(*args):
     return row is None, disable_review, row is None
 
 
-# noinspection PyUnusedLocal
-@app.callback(
+@callback(
     [Output(_START_BTN_ID, 'disabled'), Output(_JOBS_TABLE_ID, "data"), Output(_JOBS_TABLE_ID, "selected_rows"),
      Output(_UPLOAD_ID, "is_open"), Output(_ALERT_ID, "children"), Output(_ALERT_ID, "is_open")],
     [Input(_START_BTN_ID, "n_clicks"), Input(_REFRESH_BTN_ID, "n_clicks"), Input(_REMOVE_BTN_ID, "n_clicks"),
@@ -705,9 +701,9 @@ def select_row_callback(*args):
     [State(_UPLOADER_ID, "upload_id"), State(_JOBS_TABLE_ID, "data"), State(_JOBS_TABLE_ID, "selected_rows")]
 )
 def all_in_one_callback(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     if not ctx.triggered:
-        raise dash.exceptions.PreventUpdate
+        raise dash_exc.PreventUpdate
 
     # is an upload in progress -- that determines whether or not we can start a new commit job
     job_rows: List[Any] = args[-2]
@@ -717,7 +713,7 @@ def all_in_one_callback(*args):
     # there must be a logged-in user with 'commit' access
     username = _get_current_username()
     if not username:
-        return uploading, dash.no_update, dash.no_update, dash.no_update, \
+        return uploading, no_update, no_update, no_update, \
                "Access denied. You must be logged into portal with commit privileges.", True
 
     trigger = ctx.triggered[0]['prop_id'].split('.')[0]
@@ -725,21 +721,21 @@ def all_in_one_callback(*args):
         job_status = initiate_session_commit(username, upload_id)
         if isinstance(job_status, str):
             # operation failed on server; inform user
-            return False, dash.no_update, dash.no_update, dash.no_update, str(job_status), True
+            return False, no_update, no_update, no_update, str(job_status), True
         else:
             job_row = _job_table_row_from_job_status_info(job_status)
             if not isinstance(job_rows, list):
                 job_rows = [job_row]
             else:
                 job_rows.insert(0, job_row)
-            return True, job_rows, dash.no_update, True, "", False
+            return True, job_rows, no_update, True, "", False
     elif trigger == _REFRESH_BTN_ID:
         err_msg, jobs = _commit_jobs_for_current_user()
         uploading = isinstance(jobs, list) and any([j['state'] == CommitStateEnum.UPLOADING.value for j in jobs])
         if err_msg is not None:
-            return dash.no_update, dash.no_update, dash.no_update, False, err_msg, True
+            return no_update, no_update, no_update, False, err_msg, True
         else:
-            return uploading, jobs, dash.no_update, False, "", False
+            return uploading, jobs, no_update, False, "", False
     elif trigger == _REMOVE_BTN_ID or trigger == _CLOSE_UPLOAD_ID:
         # hitting "Cancel" button while Upload Modal is raised removes the relevant job. The currently selected job
         # should be the one that was in the uploading phase, but we don't take that for granted
@@ -750,7 +746,6 @@ def all_in_one_callback(*args):
             idx = selection[0] if (selection is not None) and (len(selection) > 0) else -1
             job_id = job_rows[idx]['id'] if ((job_rows is not None) and (-1 < idx < len(job_rows))) else None
         else:
-            uploading_job_id = None
             if uploading:
                 try:
                     idx = [j['state'] for j in job_rows].index(CommitStateEnum.UPLOADING.value)
@@ -758,16 +753,16 @@ def all_in_one_callback(*args):
                 except ValueError:
                     pass
         if job_id is None:
-            raise dash.exceptions.PreventUpdate
+            raise dash_exc.PreventUpdate
         removed, err_msg, job_info = cancel_or_remove_commit_job(job_id)
         if len(err_msg) > 0:
-            return dash.no_update, dash.no_update, dash.no_update, False, err_msg, True
+            return no_update, no_update, no_update, False, err_msg, True
         elif removed:
             job_rows.pop(idx)
         else:
             job_rows[idx] = _job_table_row_from_job_status_info(job_info)
         uploading = any([j['state'] == CommitStateEnum.UPLOADING.value for j in job_rows])
-        return uploading, job_rows, [] if removed else dash.no_update, False, "", False
+        return uploading, job_rows, [] if removed else no_update, False, "", False
     elif trigger == _UPLOADER_ID:
         is_completed = args[-5]
         file_names = args[-4]
@@ -775,7 +770,7 @@ def all_in_one_callback(*args):
         if not is_completed:
             if file_names is not None:
                 logger.debug(f"Upload initiated on client, upload_id={upload_id}, file_names={file_names}")
-            raise dash.exceptions.PreventUpdate
+            raise dash_exc.PreventUpdate
         else:
             logger.debug(f"Upload completed, upload_id={upload_id}, file={file_names}")
             fname = str(file_names[0] if isinstance(file_names, list) else file_names)
@@ -787,37 +782,37 @@ def all_in_one_callback(*args):
             if upload_job_idx == -1:
                 logger.error(f"Upload just completed, but no current commit job is in the uploading phase!")
                 err_msg = f"Internal error - no commit job is currently uploading"
-                return False, dash.no_update, dash.no_update, False, err_msg, True
+                return False, no_update, no_update, False, err_msg, True
 
             job_status = update_commit_job_on_archive_upload(job_rows[upload_job_idx]['id'], fname)
             if isinstance(job_status, str):
                 err_msg = f"Upload failed: {str(job_status)}"
-                return True, dash.no_update, dash.no_update, False, err_msg, True
+                return True, no_update, no_update, False, err_msg, True
             job_rows[upload_job_idx] = _job_table_row_from_job_status_info(job_status)
-            return False, job_rows, dash.no_update, False, "", False
+            return False, job_rows, no_update, False, "", False
     logger.debug(f"On commit page, failed to identify trigger for all-in-one callback: {trigger}")
-    raise dash.exceptions.PreventUpdate
+    raise dash_exc.PreventUpdate
 
 
-@app.callback(
+@callback(
     [Output(_HISTORY_ID, 'is_open'), Output(_HISTORY_HEADER_ID, "children"), Output(_HISTORY_MARKDOWN_ID, "children")],
     [Input(_MESSAGE_BTN_ID, 'n_clicks'), Input(_CLOSE_HISTORY_ID, 'n_clicks')],
     [State(_JOBS_TABLE_ID, 'data'), State(_JOBS_TABLE_ID, 'selected_rows')]
 )
 def display_hide_progress_history(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     if not ctx.triggered:
-        raise dash.exceptions.PreventUpdate
+        raise dash_exc.PreventUpdate
     trigger = ctx.triggered[0]['prop_id'].split('.')[0]
     if trigger == _CLOSE_HISTORY_ID:
-        return False, dash.no_update, dash.no_update
+        return False, no_update, no_update
     else:  # _MESSAGE_BTN_ID
         selection = args[-1]
         idx = selection[0] if (selection is not None) and (len(selection) > 0) else -1
         job_rows = args[-2]
         sel_row = job_rows[idx] if ((job_rows is not None) and (-1 < idx < len(job_rows))) else None
         if sel_row is None:
-            raise dash.exceptions.PreventUpdate
+            raise dash_exc.PreventUpdate
         messages = commit_job_progress(sel_row['id'])
         if isinstance(messages, str):
             # A server error happened. Display the error message in the modal.
@@ -829,19 +824,19 @@ def display_hide_progress_history(*args):
         return True, header, markdown
 
 
-@app.callback(
+@callback(
     [Output(_REVIEW_ID, 'is_open'), Output(_REVIEW_ID, "children")],
     [Input(_REVIEW_BTN_ID, 'n_clicks'), Input(_REVIEW_CLOSE_ID, 'n_clicks')],
     [State(_JOBS_TABLE_ID, 'data'), State(_JOBS_TABLE_ID, 'selected_rows')]
 )
 def display_hide_session_review(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     if not ctx.triggered:
-        raise dash.exceptions.PreventUpdate
+        raise dash_exc.PreventUpdate
 
     trigger = ctx.triggered[0]['prop_id'].split('.')[0]
     if trigger == _REVIEW_CLOSE_ID:
-        return False, dash.no_update
+        return False, no_update
     elif trigger == _REVIEW_BTN_ID:
         # get job ID from the selected row in jobs table
         selection = args[-1]
@@ -849,31 +844,31 @@ def display_hide_session_review(*args):
         job_rows = args[-2]
         sel_row = job_rows[idx] if ((job_rows is not None) and (-1 < idx < len(job_rows))) else None
         if sel_row is None:
-            raise dash.exceptions.PreventUpdate
+            raise dash_exc.PreventUpdate
         return True, _layout_review_modal(sel_row['id'])
 
 
-@app.callback(
+@callback(
     [Output(_REVIEW_ALERT_ID, 'children'), Output(_REVIEW_ALERT_ID, 'color'), Output(_REVIEW_COMMIT_ID, 'disabled')],
     [Input(_META_ALERT_DIV, 'children'), Input(_PROTO_ALERT_DIV, 'children'), Input(_UNIT_ALERT_DIV, 'children'),
      Input(_COMMIT_ALERT_DIV, 'children')]
 )
 def update_review_modal_alert(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     if not ctx.triggered:
-        raise dash.exceptions.PreventUpdate
+        raise dash_exc.PreventUpdate
     trigger = ctx.triggered[0]['prop_id'].split('.')[0]
     try:
         idx = [_META_ALERT_DIV, _PROTO_ALERT_DIV, _UNIT_ALERT_DIV, _COMMIT_ALERT_DIV].index(trigger)
     except ValueError:
-        raise dash.exceptions.PreventUpdate
+        raise dash_exc.PreventUpdate
     pos = args[idx].find('-') if isinstance(args[idx], str) else -1
     if pos > -1:
         alert_color = args[idx][0:pos]
         return args[idx][pos + 1:], alert_color, alert_color != 'success'
 
 
-@app.callback(
+@callback(
     Output(_META_ALERT_DIV, 'children'),
     [Input(_UPDATE_META_ID, 'n_clicks')],
     [State(_EXPERIMENTER_SELECT_ID, "value"), State(_SUBJECT_SELECT_ID, "value"), State(_RIG_SELECT_ID, "value"),
@@ -883,9 +878,9 @@ def update_review_modal_alert(*args):
      State(_PROBE_Z_INPUT_ID, "value"), State(_AREA_SELECT_ID, "value"), State(_REVIEW_HEADER_ID, "children")]
 )
 def update_session_data(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     if not ctx.triggered:
-        raise dash.exceptions.PreventUpdate
+        raise dash_exc.PreventUpdate
     trigger = ctx.triggered[0]['prop_id'].split('.')[0]
     if trigger == _UPDATE_META_ID:
         # job ID is in the modal header text
@@ -906,11 +901,10 @@ def update_session_data(*args):
             ok, ready, alert_msg = ready_to_commit(job_id)
             alert_color = 'danger' if (not ok) else ('success' if ready else 'warning')
         return f"{alert_color}-{alert_msg}"
-    return dash.no_update
+    return no_update
 
 
-# TODO: Need to test the "Add RV" and "Validate" functions by processing an archive with new protocols!
-@app.callback(
+@callback(
     [Output(_PROTO_DIV_ID, 'children'), Output(_PROTO_ALERT_DIV, 'children'),
      Output(_PROTO_VALID_BTN_ID, 'children'), Output(_PROTO_VALID_BTN_ID, 'disabled'),
      Output(_PROTO_RV_GROUP_ID, 'style'), Output(_PROTO_SELECT_ID, 'options')],
@@ -919,10 +913,10 @@ def update_session_data(*args):
      State(_PROTO_RV_SEG_SELECT_ID, 'value'), State(_PROTO_RV_TGT_SELECT_ID, 'value'),
      State(_PROTO_SELECT_ID, 'options'), State(_REVIEW_HEADER_ID, "children")])
 def update_proto(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     if not ctx.triggered:
-        raise dash.exceptions.PreventUpdate
-    out = [dash.no_update] * 6
+        raise dash_exc.PreventUpdate
+    out = [no_update] * 6
     # job ID is in the modal header text
     idx = args[-1].find(":")
     job_id = args[-1][idx + 2:]
@@ -961,15 +955,15 @@ def update_proto(*args):
     return tuple(out)
 
 
-@app.callback(
+@callback(
     [Output(_UNIT_DIV_ID, 'children'), Output(_UNIT_ALERT_DIV, 'children')],
     [Input(_UNIT_SELECT_ID, 'value'), Input(_UNIT_TYPE_SELECT_ID, "value"), Input(_UNIT_TYPE_APPLY_ALL_ID, "n_clicks")],
     [State(_UNIT_TYPE_SELECT_ID, 'value'), State(_UNIT_SELECT_ID, 'value'), State(_REVIEW_HEADER_ID, "children")]
 )
 def update_unit(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     if not ctx.triggered:
-        raise dash.exceptions.PreventUpdate
+        raise dash_exc.PreventUpdate
     # job ID is in the modal header text
     idx = args[-1].find(":")
     job_id = args[-1][idx + 2:]
@@ -977,9 +971,9 @@ def update_unit(*args):
     if trigger == _UNIT_SELECT_ID:
         unit: OmniplexUnit = metrics_for_neural_unit(job_id, int(args[0]))
         if unit:
-            return _layout_unit_div(unit), dash.no_update
+            return _layout_unit_div(unit), no_update
         else:
-            return dash.no_update, "danger-An error occurred while retrieving neural unit metrics from server"
+            return no_update, "danger-An error occurred while retrieving neural unit metrics from server"
     elif (trigger == _UNIT_TYPE_SELECT_ID) or (trigger == _UNIT_TYPE_APPLY_ALL_ID):
         unit_idx = -1 if (trigger == _UNIT_TYPE_APPLY_ALL_ID) else int(args[-2])
         nt_id = int(args[1] if trigger == _UNIT_TYPE_SELECT_ID else args[-3])
@@ -989,34 +983,34 @@ def update_unit(*args):
             msg = f"{'danger' if not ok else ('success' if ready else 'warning')}-{msg}"
         else:
             msg = "danger-An error occurred while updating neural unit type on server"
-        return dash.no_update, msg
-    return dash.no_update, dash.no_update
+        return no_update, msg
+    return no_update, no_update
 
 
-@app.callback(
+@callback(
     [Output(_COMMIT_ALERT_DIV, 'children'), Output(_REVIEW_CLOSE_ID, 'n_clicks'), Output(_REFRESH_BTN_ID, 'n_clicks')],
     [Input(_REVIEW_COMMIT_ID, 'n_clicks')],
     [State(_REVIEW_CLOSE_ID, 'n_clicks'), State(_REFRESH_BTN_ID, 'n_clicks'), State(_REVIEW_HEADER_ID, 'children')]
 )
 def on_trigger_commit_to_database(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     if not ctx.triggered:
-        raise dash.exceptions.PreventUpdate
+        raise dash_exc.PreventUpdate
     trigger = ctx.triggered[0]['prop_id'].split('.')[0]
     if trigger == _REVIEW_COMMIT_ID:
         # Each time the review modal is shown, it is laid out again. So this method will be invoked on initial load,
         # but the "n_clicks" attribute will be at its initial value of 0. In this case, do nothing. This is
         # imperative!
         if args[0] == 0:
-            raise dash.exceptions.PreventUpdate
+            raise dash_exc.PreventUpdate
         # get job ID from the Review modal header
         idx = args[-1].find(":")
         job_id = args[-1][idx + 2:]
         err_msg = commit_to_database(job_id)
         if err_msg:
-            return f"danger-{err_msg}", dash.no_update, dash.no_update
+            return f"danger-{err_msg}", no_update, no_update
         else:
             n_close = (args[-3] + 1) if args[-3] else 1
             n_refresh = (args[-2] + 1) if args[-2] else 1
-            return dash.no_update, n_close, n_refresh
-    raise dash.exceptions.PreventUpdate
+            return no_update, n_close, n_refresh
+    raise dash_exc.PreventUpdate

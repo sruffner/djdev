@@ -5,12 +5,12 @@ certifi==2020.6.20
 click==8.0.1
 configparser==5.0.1
 cycler==0.10.0
-dash==1.19.0
+dash==2.0.0
 dash-bootstrap-components==0.12.0
-dash-core-components==1.15.0
-dash-html-components==1.1.2
-dash-renderer==1.9.0
-dash-table==4.11.2
+dash-core-components==2.0.0
+dash-html-components==2.0.0
+dash-renderer==1.9.1
+dash-table==5.0.0
 dash-uploader==0.6.0
 datajoint==0.13.2
 decorator==4.4.2
@@ -36,7 +36,7 @@ parso==0.7.1
 pexpect==4.8.0
 pickleshare==0.7.5
 Pillow==8.3.2
-plotly==4.14.3
+plotly==5.5.0
 prompt-toolkit==3.0.8
 ptyprocess==0.6.0
 pydot==1.4.1

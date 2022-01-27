@@ -11,14 +11,12 @@ change an existing account's access level.
 """
 from typing import Optional, List, Dict, Union
 
-import dash
-from dash.dependencies import Output, Input, State
-import dash_html_components as html
+from dash import callback, clientside_callback, callback_context, no_update, html, dash_table as dt, Input, \
+    Output, State
 import dash_bootstrap_components as dbc
-import dash_table as dt
 import flask_login
 
-from app import app, PortalUser, load_authorized_user
+from app import PortalUser, load_authorized_user
 
 import database.table_info as ti
 from database.user_ops import ACCESS_LEVELS, get_all_portal_user_records, DOWNLOAD_ACCESS, remove_portal_user, \
@@ -222,7 +220,7 @@ def serve_layout() -> html.Div:
 
 
 # this clientside callback highlights all cells in the selected row
-app.clientside_callback(
+clientside_callback(
     """
     function(rows) {
         let style = [];
@@ -237,9 +235,10 @@ app.clientside_callback(
 )
 
 
-@app.callback([Output(_DELETE_BTN, 'disabled'), Output(_UPDATE_ACCESS_DROP, 'label'),
-               Output(_UPDATE_ACCESS_DROP, 'disabled')],
-              [Input(_USER_TABLE_ID, 'selected_rows')], [State(_USER_TABLE_ID, 'data')])
+@callback(
+    [Output(_DELETE_BTN, 'disabled'), Output(_UPDATE_ACCESS_DROP, 'label'), Output(_UPDATE_ACCESS_DROP, 'disabled')],
+    [Input(_USER_TABLE_ID, 'selected_rows')], [State(_USER_TABLE_ID, 'data')]
+)
 def select_row_callback(selection, rows):
     idx = selection[0] if (selection is not None) and (len(selection) > 0) else -1
     row = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
@@ -259,17 +258,18 @@ input_vector = [Input(_DELETE_BTN, 'n_clicks'), Input(_REG_MODAL_ID, 'is_open')]
 input_vector.extend([Input(k, 'n_clicks') for k in _ACCESS_DROP_ITEMS])
 
 
-@app.callback([Output(_USER_TABLE_ID, 'data'), Output(_USER_TABLE_ID, 'selected_rows'),
-               Output(_OP_ALERT_ID, 'children'), Output(_OP_ALERT_ID, 'is_open')],
-              input_vector,
-              [State(_USER_TABLE_ID, 'selected_rows'), State(_USER_TABLE_ID, 'data')])
+@callback(
+    [Output(_USER_TABLE_ID, 'data'), Output(_USER_TABLE_ID, 'selected_rows'),
+     Output(_OP_ALERT_ID, 'children'), Output(_OP_ALERT_ID, 'is_open')],
+    input_vector, [State(_USER_TABLE_ID, 'selected_rows'), State(_USER_TABLE_ID, 'data')]
+)
 def delete_or_change_access_callback(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if (ctx.triggered is not None) else ""
     triggers = [_DELETE_BTN, _REG_MODAL_ID]
     triggers.extend(_ACCESS_DROP_ITEMS)
     if trigger_id not in triggers:
-        return tuple([dash.no_update] * 4)
+        return tuple([no_update] * 4)
 
     # stop any user managment task if login session times out or logged-in user lacks admin-level access
     portal_user: Optional[PortalUser] = None
@@ -287,7 +287,7 @@ def delete_or_change_access_callback(*args):
             else:
                 return updated_rows, [], "", False
         else:
-            return tuple([dash.no_update] * 4)
+            return tuple([no_update] * 4)
 
     # there must be a user row selected in table to delete or change access level
     ofs = 2 + len(_ACCESS_DROP_ITEMS)  # offset to first element of State vector
@@ -295,7 +295,7 @@ def delete_or_change_access_callback(*args):
     idx = args[ofs][0] if (args[ofs] is not None) and (len(args[ofs]) > 0) else -1
     user_row = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
     if user_row is None:
-        return dash.no_update, dash.no_update, "", False
+        return no_update, no_update, "", False
 
     # perform requested operation on selected user. Note we update table data if operation is successful RATHER than
     # fetching the data again after the operation!
@@ -307,7 +307,7 @@ def delete_or_change_access_callback(*args):
         access_level = trigger_id.split('-')[0]   # the drop item ID starts with the corresponding access level
         if access_level == user_row['access']:
             # no change!
-            return dash.no_update, dash.no_update, "", False
+            return no_update, no_update, "", False
         else:
             error_msg = change_portal_user_access_level(user_row['username'], access_level)
             if error_msg is None:
@@ -316,28 +316,32 @@ def delete_or_change_access_callback(*args):
     if error_msg is None:
         return rows, [] if trigger_id == _DELETE_BTN else [idx], "", False
     else:
-        return dash.no_update, dash.no_update, error_msg, True
+        return no_update, no_update, error_msg, True
 
 
-@app.callback(Output(_REG_MODAL_ID, "is_open"),
-              [Input(_REGISTER_USERS_BTN, 'n_clicks'), Input(_DONE_BTN, 'n_clicks')], [State(_REG_MODAL_ID, 'is_open')])
+@callback(
+    Output(_REG_MODAL_ID, "is_open"),
+    [Input(_REGISTER_USERS_BTN, 'n_clicks'), Input(_DONE_BTN, 'n_clicks')], [State(_REG_MODAL_ID, 'is_open')]
+)
 def toggle_register_users_modal(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if (ctx.triggered is not None) else ""
     if trigger_id not in [_REGISTER_USERS_BTN, _DONE_BTN]:
-        return dash.no_update
+        return no_update
     return not args[2]
 
 
-@app.callback([Output(_USERNAME_ID, 'value'), Output(_FULL_NAME_ID, 'value'), Output(_EMAIL_ID, 'value'),
-               Output(_ACCESS_SELECT_ID, 'value'), Output(_PASSWORD_ID, 'value'), Output(_CONFIRM_PWD_ID, 'value'),
-               Output(_REG_ALERT_ID, 'children'), Output(_REG_ALERT_ID, 'color'), Output(_REG_ALERT_ID, 'is_open')],
-              [Input(_REGISTER_BTN, 'n_clicks'), Input(_REG_MODAL_ID, 'is_open')],
-              [State(_USERNAME_ID, 'value'), State(_FULL_NAME_ID, 'value'), State(_EMAIL_ID, 'value'),
-               State(_ACCESS_SELECT_ID, 'value'), State(_PASSWORD_ID, 'value'), State(_CONFIRM_PWD_ID, 'value')])
+@callback(
+    [Output(_USERNAME_ID, 'value'), Output(_FULL_NAME_ID, 'value'), Output(_EMAIL_ID, 'value'),
+     Output(_ACCESS_SELECT_ID, 'value'), Output(_PASSWORD_ID, 'value'), Output(_CONFIRM_PWD_ID, 'value'),
+     Output(_REG_ALERT_ID, 'children'), Output(_REG_ALERT_ID, 'color'), Output(_REG_ALERT_ID, 'is_open')],
+    [Input(_REGISTER_BTN, 'n_clicks'), Input(_REG_MODAL_ID, 'is_open')],
+    [State(_USERNAME_ID, 'value'), State(_FULL_NAME_ID, 'value'), State(_EMAIL_ID, 'value'),
+     State(_ACCESS_SELECT_ID, 'value'), State(_PASSWORD_ID, 'value'), State(_CONFIRM_PWD_ID, 'value')]
+)
 def register_user_callback(*args):
-    out = [dash.no_update] * 9
-    ctx = dash.callback_context
+    out = [no_update] * 9
+    ctx = callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if (ctx.triggered is not None) else ""
     if trigger_id not in [_REGISTER_BTN, _REG_MODAL_ID]:
         return tuple(out)

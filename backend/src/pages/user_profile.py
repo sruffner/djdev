@@ -10,13 +10,11 @@ fields in the profile will be blank, and all action buttons disabled.
 """
 from typing import Optional
 
-import dash_html_components as html
+from dash import callback, callback_context, no_update, Input, Output, State, html
 import dash_bootstrap_components as dbc
 import flask_login
-import dash
-from dash.dependencies import Output, Input, State
 
-from app import app, PortalUser, load_authorized_user
+from app import PortalUser, load_authorized_user
 from database.user_ops import update_portal_user_profile, change_portal_user_password
 
 _FULL_NAME_ID: str = "full_name_in"
@@ -126,17 +124,17 @@ def serve_layout() -> html.Div:
     return html.Div([profile_card, password_card])
 
 
-@app.callback(
+@callback(
     [Output(_PROFILE_ALERT_ID, 'children'), Output(_PROFILE_ALERT_ID, 'color'),
      Output(_PROFILE_ALERT_ID, 'is_open')],
     [Input(_SAVE_PROFILE_BTN, 'n_clicks')],
     [State(_FULL_NAME_ID, 'value'), State(_EMAIL_ID, 'value'), State(_TITLE_ID, 'value'), State(_ORG_ID, 'value')]
 )
 def update_profile_callback(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if (ctx.triggered is not None) else ""
     if trigger_id != _SAVE_PROFILE_BTN:
-        return dash.no_update, dash.no_update, dash.no_update
+        return no_update, no_update, no_update
 
     msg: Optional[str]
     portal_user = None
@@ -149,14 +147,14 @@ def update_profile_callback(*args):
     return ("Profile updated.", "success", True) if (msg is None) else (msg, "danger", True)
 
 
-@app.callback(
+@callback(
     [Output(_PWD_ALERT_ID, 'children'), Output(_PWD_ALERT_ID, 'color'), Output(_PWD_ALERT_ID, 'is_open'),
      Output(_CURRENT_PWD_ID, 'value'), Output(_NEW_PWD_ID, 'value'), Output(_CONFIRM_PWD_ID, 'value')],
     [Input(_CHANGE_PWD_BTN, 'n_clicks')],
     [State(_CURRENT_PWD_ID, 'value'), State(_NEW_PWD_ID, 'value'), State(_CONFIRM_PWD_ID, 'value')]
 )
 def change_password_callback(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if (ctx.triggered is not None) else ""
     if trigger_id != _CHANGE_PWD_BTN:
         return "", "danger", False, "", "", ""

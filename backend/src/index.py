@@ -31,10 +31,7 @@ command "python ./index.py". The Dash application instance is created in app.py.
 import logging
 from urllib.parse import urlparse, urlunparse
 
-import dash
-import dash_core_components as dcc
-import dash_html_components as html
-from dash.dependencies import Input, Output, State
+from dash import callback, callback_context, no_update, Input, Output, State, dcc, html
 import dash_bootstrap_components as dbc
 import flask_login
 
@@ -177,10 +174,12 @@ def _serve_layout() -> html.Div:
 app.layout = _serve_layout
 
 
-@app.callback([Output(_PAGE_CONTENT_ID, 'children'), Output(_URL_ID, 'href'), Output(_URL_ID, 'refresh')],
-              [Input(_URL_ID, 'pathname'), Input(_AUTH_INTV_ID, 'n_intervals')], [State(_URL_ID, 'href')])
+@callback(
+    [Output(_PAGE_CONTENT_ID, 'children'), Output(_URL_ID, 'href'), Output(_URL_ID, 'refresh')],
+    [Input(_URL_ID, 'pathname'), Input(_AUTH_INTV_ID, 'n_intervals')], [State(_URL_ID, 'href')]
+)
 def display_page(pathname, n_intervals, current_href):
-    ctx = dash.callback_context
+    ctx = callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if (ctx.triggered is not None) else ""
 
     # at regular intervals we check to see if we're on a restricted-access page, but the user is either not logged in
@@ -188,7 +187,7 @@ def display_page(pathname, n_intervals, current_href):
     if (trigger_id == _AUTH_INTV_ID) and (n_intervals is not None):
         url_parts = urlparse(current_href) if isinstance(current_href, str) else ""
         if url_parts.path in _PUBLIC_ENDPOINTS:
-            return dash.no_update, dash.no_update, False
+            return no_update, no_update, False
         can_commit = is_admin = is_logged_in = False
         if flask_login.current_user.is_authenticated:
             portal_user = load_authorized_user(flask_login.current_user.get_id())
@@ -200,8 +199,8 @@ def display_page(pathname, n_intervals, current_href):
                 ((url_parts.path == '/commit') and not can_commit) or \
                 ((url_parts.path == '/manage_users') and not is_admin) or (not is_logged_in):
             url_parts = [(part if i != 2 else '/explore') for i, part in enumerate(url_parts)]
-            return dash.no_update, urlunparse(url_parts), True
-        return dash.no_update, dash.no_update, False
+            return no_update, urlunparse(url_parts), True
+        return no_update, no_update, False
 
     redirect = False
     if pathname == '/explore':
@@ -229,7 +228,7 @@ def display_page(pathname, n_intervals, current_href):
         else:
             layout = explore.serve_layout()
             redirect = not (pathname in ['/', '/explore'])   # eg, someone enters a bogus path manually
-    update_href = dash.no_update
+    update_href = no_update
     if redirect:
         url_parts = urlparse(current_href)
         update_href = urlunparse([(part if i != 2 else '/explore') for i, part in enumerate(url_parts)])
@@ -246,8 +245,8 @@ def display_page(pathname, n_intervals, current_href):
     [State(_LOGIN_USERNAME_ID, 'value'), State(_LOGIN_PASSWORD_ID, 'value')]
 )
 def login_callback(*args):
-    ctx = dash.callback_context
-    out = [dash.no_update] * 12
+    ctx = callback_context
+    out = [no_update] * 12
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if (ctx.triggered is not None) else ""
 
     if trigger_id == _LOGIN_ID:
@@ -300,7 +299,7 @@ def login_callback(*args):
     return tuple(out)
 
 
-# To serve the backend app with GUnicorn, use this to supply the Flask application insta
+# To serve the backend app with GUnicorn, use this to supply the Flask application instance
 def get_app():
     """
     The Flask application instance for the portal backend. When serving the backend with GUnicorn, use this to supply

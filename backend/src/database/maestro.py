@@ -25,9 +25,9 @@ import math
 import zipfile
 import hashlib
 import pickle
-import dash_html_components as html
+from dash import html
+from dash import dash_table as dt
 import dash_bootstrap_components as dbc
-import dash_table as dt
 import numpy as np
 
 from utils.common import DocEnum

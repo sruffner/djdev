@@ -15,8 +15,7 @@ from typing import Dict, Any, Optional, Union, List
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import dash_html_components as html
-import dash_core_components as dcc
+from dash import html, dcc
 import dash_bootstrap_components as dbc
 
 from database import stats

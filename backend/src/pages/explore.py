@@ -28,16 +28,12 @@ import logging
 from datetime import date
 from typing import List, Optional, Dict, Any, Tuple, Union
 
-import dash
-import dash_html_components as html
-import dash_core_components as dcc
+from dash import callback, callback_context, html, dcc, dash_table as dt, exceptions as dash_exc, no_update, Input, \
+    Output, State
 import dash_bootstrap_components as dbc
-import dash_table as dt
-from dash.dependencies import Output, Input, State
 import numpy as np
 import plotly.express as px
 
-from app import app
 import database.table_info as ti
 from database.data_plots import average_response_figure, single_trial_response_figure, trial_target_trajectory_figure, \
     discharge_statistics_figure
@@ -392,20 +388,20 @@ state_vector.append(State(_DATE_PICKER_ID, "date"))
 state_vector.append(State(_SEARCH_MODE_RADIO_ID, "value"))
 
 
-@app.callback(
+@callback(
     [Output(_FILTER_COUNT_ID, "children"),  Output(_FILTER_NTYPE_ID, 'disabled'), Output(_FILTER_SPIKES_ID, 'disabled'),
      Output(_SEARCH_TABLE_ID, "selected_rows"), Output(_SEARCH_TABLE_ID, "data"),
      Output(_SEARCH_TABLE_ID, "columns"), Output(_SEARCH_TABLE_ID, "style_cell_conditional")],
     input_vector, state_vector)
 def update_search_results(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     if not ctx.triggered:
-        raise dash.exceptions.PreventUpdate
+        raise dash_exc.PreventUpdate
 
     # no need for update when user changes the date but does not filter on that date
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
     if trigger_id == _DATE_PICKER_ID and args[13] == _FILTER_UNUSED:
-        raise dash.exceptions.PreventUpdate
+        raise dash_exc.PreventUpdate
 
     mode = int(args[7]) if trigger_id == _SEARCH_MODE_RADIO_ID else int(args[-1])  # current search mode
     min_spikes = 0 if (args[9] is None) else int(args[9])
@@ -420,12 +416,14 @@ def update_search_results(*args):
            mode == _SESSION_MODE, mode == _SESSION_MODE, [], rows, columns, style_cell_conditional
 
 
-@app.callback([Output(_FILTER_NTYPE_ID, "value"), Output(_FILTER_SPIKES_ID, "value"), Output(_FILTER_EXP_ID, "value"),
-               Output(_FILTER_SUBJ_ID, "value"), Output(_FILTER_STUDY_ID, "value"), Output(_FILTER_DATE_ID, "value")],
-              [Input(_FILTER_CLEAR_ID, "n_clicks")])
+@callback(
+    [Output(_FILTER_NTYPE_ID, "value"), Output(_FILTER_SPIKES_ID, "value"), Output(_FILTER_EXP_ID, "value"),
+     Output(_FILTER_SUBJ_ID, "value"), Output(_FILTER_STUDY_ID, "value"), Output(_FILTER_DATE_ID, "value")],
+    [Input(_FILTER_CLEAR_ID, "n_clicks")]
+)
 def clear_filters(n_clear):
     if not n_clear:
-        raise dash.exceptions.PreventUpdate
+        raise dash_exc.PreventUpdate
     return _FILTER_UNUSED, 0, _FILTER_UNUSED, _FILTER_UNUSED, _FILTER_UNUSED, _FILTER_UNUSED
 
 
@@ -912,7 +910,7 @@ def _discharge_statistics_panel(unit_key: Dict[str, Any], proto_hash: str) -> ht
 # Dash Store component on the page. This is because many callbacks need the identity of the currently selected session,
 # and we don't want to pass the state of 'data' and 'selected_rows' attributes of the DataTable for all of those
 # callbacks. The 'data' attribute could be rather large!
-@app.callback(
+@callback(
     Output(_SELECTED_ROW_ID, "value"), [Input(_SEARCH_TABLE_ID, "selected_rows")], [State(_SEARCH_TABLE_ID, "data")]
 )
 def on_search_row_selected(selected_rows, rows):
@@ -921,7 +919,7 @@ def on_search_row_selected(selected_rows, rows):
     return json.dumps(selected_row)
 
 
-@app.callback(
+@callback(
     [Output(_COLLAPSE_ID, "is_open"), Output(_SESSION_TAB_ID, "children"), Output(_DATA_TAB_ID, "children")],
     [Input(_SELECTED_ROW_ID, "value")]
 )
@@ -932,16 +930,16 @@ def show_hide_detail_pane(json_str):
     return selected_row is not None, summary_tab, data_tab
 
 
-@app.callback(
+@callback(
     [Output(_UNIT_STATS_MODAL_ID, "is_open"), Output(_UNIT_STATS_BODY_ID, "children")],
     [Input(_UNIT_STATS_OPEN_ID, "n_clicks"), Input(_UNIT_STATS_CLOSE_ID, "n_clicks")],
     [State(_UNIT_SELECT_ID, "value"), State(_SELECTED_ROW_ID, "value")]
 )
 def on_show_hide_unit_stats(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ""
     if trigger_id == _UNIT_STATS_CLOSE_ID:
-        return False, dash.no_update
+        return False, no_update
     elif trigger_id == _UNIT_STATS_OPEN_ID:
         selected_row = args[-1] and json.loads(args[-1])
         unit_id = int(args[-2]) if isinstance(args[-2], str) else None
@@ -950,25 +948,27 @@ def on_show_hide_unit_stats(*args):
             summary_div = _unit_summary(selected_row)
             if summary_div:
                 return True, summary_div
-    return False, dash.no_update
+    return False, no_update
 
 
-@app.callback([Output(_PROTO_VIEW_MODAL_ID, "is_open"), Output(_PROTO_VIEW_BODY_ID, "children")],
-              [Input(_PROTO_VIEW_OPEN_ID, "n_clicks"), Input(_PROTO_VIEW_CLOSE_ID, "n_clicks")],
-              [State(_PROTO_SELECT_ID, "value")])
+@callback(
+    [Output(_PROTO_VIEW_MODAL_ID, "is_open"), Output(_PROTO_VIEW_BODY_ID, "children")],
+    [Input(_PROTO_VIEW_OPEN_ID, "n_clicks"), Input(_PROTO_VIEW_CLOSE_ID, "n_clicks")],
+    [State(_PROTO_SELECT_ID, "value")]
+)
 def on_show_hide_protocol_definition(*args):
-    ctx = dash.callback_context
+    ctx = callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ""
     if trigger_id == _PROTO_VIEW_CLOSE_ID:
-        return False, dash.no_update
+        return False, no_update
     elif trigger_id == _PROTO_VIEW_OPEN_ID:
         protocol = get_trial_protocol_definition(args[2])
         if protocol:
             return True, protocol.display_definition()
-    return False, dash.no_update
+    return False, no_update
 
 
-@app.callback(
+@callback(
     [Output(_PROTO_SELECT_ID, "options"), Output(_PROTO_SELECT_ID, "value"),
      Output(_DISP_SELECT_ID, "options"), Output(_DISP_SELECT_ID, "value"), Output(_UNIT_STATS_OPEN_ID, "disabled")],
     [Input(_UNIT_SELECT_ID, "value"), Input(_PROTO_SELECT_ID, "value")],
@@ -977,13 +977,12 @@ def on_show_hide_protocol_definition(*args):
 )
 def on_update_selected_unit_or_proto(*args):
     selected_row = args[-1] and json.loads(args[-1])
-    ctx = dash.callback_context
+    ctx = callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ""
     if (selected_row is None) or (trigger_id == ""):
-        raise dash.exceptions.PreventUpdate
+        raise dash_exc.PreventUpdate
 
-    proto_opts, proto_sel, disp_opts, disp_sel = dash.no_update, dash.no_update, dash.no_update, dash.no_update
-    stats_disabled = dash.no_update
+    proto_opts, proto_sel, disp_opts, disp_sel, stats_disabled = no_update, no_update, no_update, no_update, no_update
     if trigger_id == _UNIT_SELECT_ID:
         unit_id = 0 if (args[0] is None) else int(args[0])
         stats_disabled = (unit_id == 0)
@@ -999,7 +998,7 @@ def on_update_selected_unit_or_proto(*args):
     return proto_opts, proto_sel, disp_opts, disp_sel, stats_disabled
 
 
-@app.callback(
+@callback(
     Output(_DISP_VIEW_ID, "children"),
     [Input(_DISP_SELECT_ID, "value")],
     [State(_UNIT_SELECT_ID, "value"), State(_PROTO_SELECT_ID, "value"), State(_SELECTED_ROW_ID, "value")],
@@ -1007,12 +1006,12 @@ def on_update_selected_unit_or_proto(*args):
 )
 def on_update_trial_data_view(disp_sel, unit_sel, proto_sel, json_str):
     selected_row = json_str and json.loads(json_str)
-    if (selected_row is None) or not dash.callback_context.triggered:
-        raise dash.exceptions.PreventUpdate
+    if (selected_row is None) or not callback_context.triggered:
+        raise dash_exc.PreventUpdate
     return _generate_trial_data_view(selected_row, 0 if (unit_sel is None) else int(unit_sel), proto_sel, disp_sel)
 
 
-@app.callback(
+@callback(
     Output(_DS_GRAPH_ID, "figure"), [Input(_DS_RANGE_ID, "value")],
     [State(_SELECTED_ROW_ID, "value"), State(_UNIT_SELECT_ID, "value"), State(_PROTO_SELECT_ID, "value")])
 def on_update_discharge_stats_figure(range_value, json_str, unit_sel, proto_hash_value):

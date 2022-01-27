@@ -7,7 +7,7 @@ app.py: Create and configure the Dash application instance for the Lisberger lab
 import logging
 from typing import Dict, Optional
 
-import dash
+from dash import Dash
 import dash_bootstrap_components as dbc
 import dash_uploader as du
 import flask_login
@@ -19,7 +19,7 @@ from database.user_ops import get_portal_user_record, ADMIN_ACCESS, COMMIT_ACCES
 setup_logging(cfg_file='config/logging.yaml')
 
 cfg: AppConfig = get_config()
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.SPACELAB])
+app = Dash(__name__, external_stylesheets=[dbc.themes.SPACELAB])
 server = app.server
 
 # Dash adds a stream handler to the 'app' logger. We don't want this.

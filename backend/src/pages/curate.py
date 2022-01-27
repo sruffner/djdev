@@ -1,17 +1,13 @@
-import dash
-import dash_html_components as html
-import dash_core_components as dcc
+from dash import callback, html, dcc, Input, Output, no_update
 import dash_bootstrap_components as dbc
-from dash.dependencies import Input, Output
-from app import app
 
 import pages.curate_panels as cp
 
-subj_panel = cp.SubjectPanel(app)
-rig_panel = cp.RigPanel(app)
-brain_panel = cp.BrainAreaPanel(app)
-n_type_panel = cp.NeuronTypePanel(app)
-study_panel = cp.StudyPanel(app)
+subj_panel = cp.SubjectPanel()
+rig_panel = cp.RigPanel()
+brain_panel = cp.BrainAreaPanel()
+n_type_panel = cp.NeuronTypePanel()
+study_panel = cp.StudyPanel()
 tab_to_panel = {f"{p.id_prefix()}_tab": p
                 for p in [subj_panel, rig_panel, brain_panel, n_type_panel, study_panel]}
 
@@ -43,10 +39,9 @@ container_card = dbc.Card([
 layout = html.Div([container_card])
 
 
-@app.callback(Output("sel-tab-content", "children"),
-              [Input("tabs", "active_tab")])
+@callback(Output("sel-tab-content", "children"), [Input("tabs", "active_tab")])
 def update_tab_content(active_tab):
-    out = dash.no_update
+    out = no_update
     if active_tab:
         tabpane = None
         try:
