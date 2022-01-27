@@ -40,7 +40,7 @@ import flask_login
 
 from app import app, load_authorized_user
 from database.user_ops import authenticate_portal_user
-from pages import curate, commit, explore, neurons, user_profile, manage_users
+from pages import curate, commit, explore, user_profile, manage_users
 
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,9 @@ _PAGE_CONTENT_ID = "page-content"
 """ ID of the main Div (below the navigation bar) encapsulating the current page's content in this multi-page app. """
 _AUTH_INTV_ID = "check-auth-intv"
 """ ID of an Interval component firing once per minute to check if current user is authorized to access page. """
+
+_PUBLIC_ENDPOINTS = ['/', '/explore']
+""" Public endpoints in the portal web app that do not require authenticated access. """
 
 
 def _serve_layout() -> html.Div:
@@ -123,6 +126,9 @@ def _serve_layout() -> html.Div:
     navbar = dbc.Navbar(
         [
             html.A(dbc.NavbarBrand("Lisberger Data Portal"), href="/explore"),
+            html.A("[Courtesy of the Lisberger lab at Duke University]",
+                   href="https://www.neuro.duke.edu/research/faculty-labs/lisberger-lab", target="_blank",
+                   style=dict(color='white')),
             dbc.Row(
                 [
                     dbc.Col(dbc.Button("Login", id=_LOGIN_ID, color="info", style=login_btn_style, n_clicks=0),
@@ -181,7 +187,7 @@ def display_page(pathname, n_intervals, current_href):
     # or doesn't have the required access. When that happens, redirect to the home page.
     if (trigger_id == _AUTH_INTV_ID) and (n_intervals is not None):
         url_parts = urlparse(current_href) if isinstance(current_href, str) else ""
-        if url_parts.path in ['/explore', '/neurons', '/']:
+        if url_parts.path in _PUBLIC_ENDPOINTS:
             return dash.no_update, dash.no_update, False
         can_commit = is_admin = is_logged_in = False
         if flask_login.current_user.is_authenticated:
@@ -199,9 +205,7 @@ def display_page(pathname, n_intervals, current_href):
 
     redirect = False
     if pathname == '/explore':
-        layout = explore.layout
-    elif pathname == '/neurons':
-        layout = neurons.serve_layout()
+        layout = explore.serve_layout()
     else:
         can_commit = is_admin = is_logged_in = False
         if flask_login.current_user.is_authenticated:
@@ -223,7 +227,7 @@ def display_page(pathname, n_intervals, current_href):
             layout = manage_users.serve_layout() if is_admin else None
             redirect = not is_admin
         else:
-            layout = explore.layout
+            layout = explore.serve_layout()
             redirect = not (pathname in ['/', '/explore'])   # eg, someone enters a bogus path manually
     update_href = dash.no_update
     if redirect:

@@ -20,9 +20,56 @@ from numpy.lib import stride_tricks
 
 from database import maestro
 from database.table_info import AttributeValue, DBTable, primary_key_of
-from database.table_ops import fetch_one_row, fetch_rows, fetch_restrict_proj, fetch_any_proj
+from database.table_ops import fetch_one_row, fetch_rows, fetch_restrict_proj, fetch_any_proj, fetch_attribute_values
 
 logger = logging.getLogger(__name__)
+
+
+def trial_protocols_for_session(session_key: Dict[str, AttributeValue], aggregate: bool = False) \
+        -> Optional[Dict[str, str]]:
+    """
+    Get all trial protocols presented during the specified experiment session.
+
+    Args:
+        session_key: At a minimum, this dictionary must uniquely identify an experiment session in the database.
+        aggregate: If True, include ONLY those trial protocols for which average response data can be computed. By
+            convention, there must be at least 3 reps of the trial protocol, AND the protocol itself either must have NO
+            random variables OR a single segment (not necessarily segment 0) of random duration. Default = False.
+    Returns:
+        A dictionary containing the user-friendly pathname ("set/subset/name" or "set/name") of each trial protocol
+            presented during the experiment session, keyed by the protocol's MD5 hash digest. If aggregate is True, any
+            protocols for which the average responses CANNOT be computed are excluded; in this case, it is possible that
+            the dictionary is empty. The dictionary items are ordered by pathname. Returns None if an error occurs.
+    """
+    try:
+        session_pk = {k: session_key[k] for k in primary_key_of(DBTable.SESSION, False)}
+        all_proto_hashes = fetch_attribute_values(DBTable.TRIAL, 'proto_hash', restriction=session_pk)
+        if all_proto_hashes is None:
+            return None
+        unique_proto_hashes = {h for h in all_proto_hashes}
+        if aggregate:
+            out = dict()
+            for h in unique_proto_hashes:
+                if all_proto_hashes.count(h) > 2:
+                    proto = get_trial_protocol_definition(h)
+                    if proto is None:
+                        return None
+                    elif proto.can_aggregate_responses():
+                        out[h] = proto.trial.path_name()
+        else:
+            restriction = [f"proto_hash = '{h}'" for h in unique_proto_hashes]
+            protocols = fetch_any_proj(DBTable.TRIAL_PROTOCOL, restriction, ['proto_name', 'proto_set', 'proto_subset'])
+            if protocols is None:
+                return None
+            out = dict()
+            for p in protocols:
+                out[p['proto_hash']] = f"{p['proto_set']}/{p['proto_name']}" \
+                    if len(p['proto_subset']) == 0 else f"{p['proto_set']}/{p['proto_subset']}/{p['proto_name']}"
+        sorted_tuples = sorted(out.items(), key=lambda item: item[1])
+        return {k: v for k, v in sorted_tuples}
+    except Exception as e:
+        logger.error(str(e), exc_info=True)
+        return None
 
 
 def trial_protocols_for_neuron(neuron_key: Dict[str, AttributeValue], aggregate: bool = False) \
@@ -93,6 +140,36 @@ def get_trial_protocol_definition(proto_hash: str) -> Optional[maestro.Protocol]
     return None
 
 
+def trials_for_session(session_key: Dict[str, AttributeValue], proto_hash: Optional[str] = None,
+                       complete_reps_only: bool = False) -> Optional[List[int]]:
+    """
+    Get the indices of all trials, or a subset thereof, presented during the specified experiment session.
+
+    Args:
+        session_key: At a minimum, this dictionary must uniquely identify an experiment session in the database.
+        proto_hash: If this identifies a trial protocol in the database, then return only the indices of the trials
+            belonging to that protocol. Default = None.
+        complete_reps_only: If True, omit from result any trials that did not run to completion. Default = False.
+    Returns:
+        The list of indices of the relevant trials. The trial index indicates its presentation order during the
+            experiment session. The index plus the session key is sufficient information to retrieve the trial details
+            and response data. Returns an empty list if no relevant trials found. Returns None if an error occurs while
+            retrieving the information.
+    """
+    try:
+        restriction = {k: session_key[k] for k in primary_key_of(DBTable.SESSION, False)}
+        if isinstance(proto_hash, str):
+            restriction['proto_hash'] = proto_hash
+        if complete_reps_only:
+            restriction['trial_success'] = True
+        relevant_trial_indices = fetch_attribute_values(DBTable.TRIAL, 'trial_idx', restriction)
+        relevant_trial_indices.sort()
+        return relevant_trial_indices
+    except Exception as e:
+        logger.error(str(e), exc_info=True)
+        return None
+
+
 def trials_for_neuron(neuron_key: Dict[str, AttributeValue], proto_hash: Optional[str] = None,
                       complete_reps_only: bool = False) -> Optional[List[int]]:
     """
@@ -132,8 +209,8 @@ def data_for_trial(trial_key: Dict[str, AttributeValue], unit_ids: Optional[List
 
     Args:
         trial_key: This dictionary must uniquely identify a single trial record in the database.
-        unit_ids: Use this argument to request the responses of only selected neural units (identified by their
-            integer unit ID). If None, all recorded neural unit responses are retrieved.
+        unit_ids: Use this argument to request the responses of one or more neural units (identified by their
+            integer unit ID). If None, no neuronal responses are retrieved. Default = None.
     Returns:
         The trial data container. Returns None if trial not found or if an error occurs while retrieving the
             information.
@@ -151,7 +228,7 @@ def data_for_trial(trial_key: Dict[str, AttributeValue], unit_ids: Optional[List
         behavioral_responses = fetch_rows(DBTable.TRIAL_BEHAVIORAL, trial_pk)
         if behavioral_responses is None:
             return None
-        neuronal_responses = fetch_rows(DBTable.TRIAL_NEURONAL, trial_pk)
+        neuronal_responses = list() if unit_ids is None else fetch_rows(DBTable.TRIAL_NEURONAL, trial_pk)
         if neuronal_responses is None:
             return None
 
@@ -160,7 +237,7 @@ def data_for_trial(trial_key: Dict[str, AttributeValue], unit_ids: Optional[List
             behavioral_field[response['response_id']] = response['response_trace']
         neuronal_field: Dict[int, np.ndarray] = dict()
         for response in neuronal_responses:
-            if (not unit_ids) or (response['unit_id'] in unit_ids):
+            if response['unit_id'] in unit_ids:
                 neuronal_field[response['unit_id']] = response['spike_times']
         proto_def: maestro.Protocol = pickle.loads(proto_info['proto_def'])
 
@@ -265,6 +342,80 @@ def retrieve_trial_reps_for_neuron(neuron_key: Dict[str, AttributeValue], proto_
                 trial_rvs=pickle.loads(trial_info['trial_rvs']),
                 behavior=behavioral_field,
                 neuronal=neuronal_field
+            ))
+
+        return trial_data
+    except Exception as e:
+        logger.error(str(e), exc_info=True)
+        return None
+
+
+def retrieve_trial_reps_for_session(session_key: Dict[str, AttributeValue], proto_hash: str,
+                                    complete_reps: bool = True) -> Optional[List[TrialData]]:
+    """
+    Retrieve behavioral trial response data for all reps of the specified trial protocol presented during the specified
+    experiment session. NOTE that this method could take a significant amount of time depending on the number of trial
+    reps that must be retrieved from the database.
+
+    Args:
+        session_key: At a minimum, this dictionary must uniquely identify an experiment session in the database.
+        proto_hash: The MD5 hash uniquely identifying a trial protocol in the database.
+        complete_reps: If True, omit from result any trials that did not run to completion. Default = True.
+    Returns:
+        A list of trial data containers. The list will be empty if no reps were found. Returns None if an error
+            occurs while retrieving the information.
+    """
+    try:
+        trial_restriction = {k: session_key[k] for k in primary_key_of(DBTable.SESSION, False)}
+        trial_restriction['proto_hash'] = proto_hash
+        if complete_reps:
+            trial_restriction['trial_success'] = True
+
+        proto_info = fetch_one_row(DBTable.TRIAL_PROTOCOL, dict(proto_hash=proto_hash))
+        if proto_info is None:
+            logger.error(f"Trial protocol (hash={proto_hash}) not found in database!")
+            return None
+        proto_def: maestro.Protocol = pickle.loads(proto_info['proto_def'])
+
+        # retrieve all relevant trials, and the behavioral responses for those trials
+        relevant_trials = fetch_rows(DBTable.TRIAL, trial_restriction)
+        if relevant_trials is None:
+            return None
+        behavioral_responses = fetch_restrict_proj([DBTable.TRIAL_BEHAVIORAL, DBTable.TRIAL],
+                                                   [None, trial_restriction], [])
+        if behavioral_responses is None:
+            return None
+
+        relevant_trials = sorted(relevant_trials, key=lambda k: k['trial_idx'], reverse=True)
+        behavioral_responses = sorted(behavioral_responses, key=lambda k: k['trial_idx'], reverse=True)
+        trial_data: List[TrialData] = list()
+        while len(relevant_trials) > 0:
+            trial_info = relevant_trials.pop()
+            behavioral_field: Dict[str, np.ndarray] = dict()
+            while (len(behavioral_responses) > 0) and \
+                    (behavioral_responses[-1]['trial_idx'] == trial_info['trial_idx']):
+                response = behavioral_responses.pop()
+                behavioral_field[response['response_id']] = response['response_trace']
+
+            trial_data.append(TrialData(
+                experimenter=session_key['experimenter'],
+                subj_id=session_key['subj_id'],
+                session_date=session_key['session_date'],
+                session_sfx=session_key['session_sfx'],
+                trial_idx=trial_info['trial_idx'],
+                protocol=proto_def,
+                filename=trial_info['trial_filename'],
+                duration_ms=trial_info['trial_dur'],
+                record_start_ms=trial_info['trial_record_start'],
+                success=trial_info['trial_success'],
+                rewarded=trial_info['trial_rewarded'],
+                reward1_ms=trial_info['trial_rew1'],
+                reward2_ms=trial_info['trial_rew2'],
+                vstab_win_len_ms=trial_info['vstab_win_len'],
+                timestamp_sec=trial_info['trial_ts'],
+                trial_rvs=pickle.loads(trial_info['trial_rvs']),
+                behavior=behavioral_field,
+                neuronal=dict()
             ))
 
         return trial_data

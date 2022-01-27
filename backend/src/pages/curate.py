@@ -1,5 +1,6 @@
 import dash
 import dash_html_components as html
+import dash_core_components as dcc
 import dash_bootstrap_components as dbc
 from dash.dependencies import Input, Output
 from app import app
@@ -28,17 +29,18 @@ tabs_card = dbc.Card(
     ]
 )
 
-layout = html.Div([
-    dbc.Container([
-        dbc.Row([
-            dbc.Col(
-                html.H3("Curate the laboratory database", className="text-center"),
-                className="mb-3 mt-3")
-        ]),
-        dbc.Row([dbc.Col(html.H5(children='*** UNDER CONSTRUCTION ***'), className="mb-3")]),
-        tabs_card
-    ])
-])
+markdown = dcc.Markdown('''
+    Users with administrative-level access to the portal can add and/or update information used to categorize and 
+    search for datasets stored in the lab database. **The system will generally prevent you from deleting any 
+    information that would indirectly cause the removal of experimental data; nevertheless, avoid removing any 
+    metadata unless you are sure it is safe!**
+    ''', className='mt-1 mb-2')
+container_card = dbc.Card([
+    dbc.CardHeader("Curate the laboratory database"),
+    dbc.CardBody([markdown, tabs_card])
+], className='w-75 mx-auto mt-5')
+
+layout = html.Div([container_card])
 
 
 @app.callback(Output("sel-tab-content", "children"),
