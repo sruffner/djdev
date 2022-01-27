@@ -91,7 +91,7 @@ def serve_layout() -> html.Div:
         dbc.CardBody(form_groups),
         dbc.CardFooter(dbc.Button("Save Changes", id=_SAVE_PROFILE_BTN, disabled=(portal_user is None), n_clicks=0,
                                   color='primary', className='ml-auto'))
-    ], className='w-50 mt-3 mb-3 mx-auto')
+    ], className='w-75 mt-5 mb-3 mx-auto')
 
     form_groups = list()
     entry_widget = dbc.Input(
@@ -121,7 +121,7 @@ def serve_layout() -> html.Div:
         dbc.CardBody(form_groups),
         dbc.CardFooter(dbc.Button("Change", id=_CHANGE_PWD_BTN, disabled=(portal_user is None), n_clicks=0,
                                   color='primary', className='ml-auto'))
-    ], className='w-50 mx-auto')
+    ], className='w-75 mx-auto')
 
     return html.Div([profile_card, password_card])
 

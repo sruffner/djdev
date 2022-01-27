@@ -7,6 +7,6 @@ WORKDIR /code
 COPY ./src .
 
 # This command runs the backend in the Flask development server
-# CMD [ "python", "./index.py" ]
+CMD [ "python", "./index.py" ]
 # This command runs the backend using GUnicorn
-CMD [ "gunicorn", "--config", "./config/gunicorn_config.py", "index:get_app()"]
+# CMD [ "gunicorn", "--config", "./config/gunicorn_config.py", "index:get_app()"]
