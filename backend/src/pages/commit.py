@@ -185,24 +185,19 @@ def serve_layout() -> html.Div:
     jobs_table = _table_of_pending_commit_jobs(jobs)
     alert = dbc.Alert(err_msg if err_msg else "", id=_ALERT_ID, color="danger", dismissable=True, fade=True,
                       duration=10000, is_open=(err_msg is not None))
-    start_btn = dbc.Button("New commit...", id=_START_BTN_ID, color="primary", n_clicks=0, disabled=upload_in_progress)
-    refresh_btn = dbc.Button("Refresh", id=_REFRESH_BTN_ID, color="primary", n_clicks=0, className='mr-4')
-    message_btn = dbc.Button("Messages...", id=_MESSAGE_BTN_ID, color="primary", n_clicks=0, disabled=True,
-                             className='mr-1')
-    next_btn = dbc.Button("Review & Commit", id=_REVIEW_BTN_ID, color="primary", n_clicks=0, disabled=True,
-                          className='mr-1')
-    remove_btn = dbc.Button("Cancel/Remove", id=_REMOVE_BTN_ID, color="primary", n_clicks=0, disabled=True)
-    button_form = dbc.Form(
-        [
-            dbc.FormGroup([refresh_btn, start_btn], className="mt-3 mb-2 mr-4"),
-            dbc.FormGroup([message_btn, next_btn, remove_btn], className="mt-2 mb-2 ml-auto")
-        ],
-        inline=True,
-    )
+    refresh_btn = dbc.Button("Refresh", id=_REFRESH_BTN_ID, n_clicks=0, class_name='me-4')
+    start_btn = dbc.Button("New commit...", id=_START_BTN_ID, n_clicks=0, disabled=upload_in_progress)
+    message_btn = dbc.Button("Messages...", id=_MESSAGE_BTN_ID, n_clicks=0, disabled=True, class_name='me-2')
+    next_btn = dbc.Button("Review & Commit", id=_REVIEW_BTN_ID, n_clicks=0, disabled=True, class_name='me-2')
+    remove_btn = dbc.Button("Cancel/Remove", id=_REMOVE_BTN_ID, n_clicks=0, disabled=True)
+    button_row = dbc.Row([
+        dbc.Col([refresh_btn, start_btn], width='auto', class_name="me-4"),
+        dbc.Col([message_btn, next_btn, remove_btn], width='auto')
+    ], justify='between', class_name="mt-2 mb-2")
 
     # NOTE that we assign a UUID as the upload ID. SO, if user reloads the page, that will change!
     upload_modal = dbc.Modal([
-        dbc.ModalHeader("Upload session data archive"),
+        dbc.ModalHeader(dbc.ModalTitle("Upload session data archive")),
         dbc.ModalBody([
             dcc.Markdown('''
             * Before you begin, all session data files (Maestro and Omniplex) must be compressed into a single, flat
@@ -226,14 +221,14 @@ def serve_layout() -> html.Div:
             html.Div(du.Upload(id=_UPLOADER_ID, max_file_size=10000, chunk_size=100, max_files=1, cancel_button=True,
                                filetypes=['zip'], upload_id=str(uuid.uuid1())), className="mt-2")
         ]),
-        dbc.ModalFooter(dbc.Row([dbc.Button("Close", id=_CLOSE_UPLOAD_ID, color="primary", n_clicks=0)]))
+        dbc.ModalFooter(dbc.Row([dbc.Button("Close", id=_CLOSE_UPLOAD_ID, n_clicks=0)]))
     ], id=_UPLOAD_ID, backdrop="static", size="xl", is_open=False)
 
     messages_modal = dbc.Modal(
         [
             dbc.ModalHeader(id=_HISTORY_HEADER_ID),
             dbc.ModalBody(dcc.Markdown(id=_HISTORY_MARKDOWN_ID)),
-            dbc.ModalFooter(dbc.Row([dbc.Button("Close", id=_CLOSE_HISTORY_ID, color="primary", n_clicks=0)]))
+            dbc.ModalFooter(dbc.Row([dbc.Button("Close", id=_CLOSE_HISTORY_ID, n_clicks=0)]))
         ],
         id=_HISTORY_ID, backdrop=False, size="lg", is_open=False
     )
@@ -242,8 +237,8 @@ def serve_layout() -> html.Div:
 
     card = dbc.Card([
         dbc.CardHeader("Experiment session commits in progress"),
-        dbc.CardBody([alert, button_form, jobs_table]),
-    ], className='w-75 mx-auto mt-5')
+        dbc.CardBody([alert, button_row, jobs_table]),
+    ], class_name='w-75 mx-auto mt-5')
 
     return html.Div([card, upload_modal, messages_modal, review_modal])
 
@@ -272,7 +267,7 @@ def _layout_review_modal(job_id: Optional[str] = None) -> Tuple[dbc.ModalHeader,
     else:
         alert_color, alert_msg = 'danger', 'No job loaded'
     alert = dbc.Alert(alert_msg, id=_REVIEW_ALERT_ID, color=alert_color, dismissable=False, is_open=True,
-                      className='mb-2')
+                      class_name='mb-2')
 
     # we use these hidden DIVs to trigger updates to the Bootstrap Alert and the "Commit" button enable state in
     # response to user interactions on the Review modal.
@@ -281,12 +276,11 @@ def _layout_review_modal(job_id: Optional[str] = None) -> Tuple[dbc.ModalHeader,
     unit_alert_div = html.Div("", id=_UNIT_ALERT_DIV, style=dict(display='none'))
     commit_alert_div = html.Div("", id=_COMMIT_ALERT_DIV, style=dict(display='none'))
 
-    header = dbc.ModalHeader(f"Review & commit: {job_id}", id=_REVIEW_HEADER_ID)
+    header = dbc.ModalHeader(dbc.ModalTitle(f"Review & commit: {job_id}", id=_REVIEW_TITLE_ID))
     body = dbc.ModalBody([alert, tabs, meta_alert_div, proto_alert_div, unit_alert_div, commit_alert_div])
     footer = dbc.ModalFooter([
-        dbc.Button("Commit", id=_REVIEW_COMMIT_ID, color="primary", n_clicks=0, disabled=(alert_color != 'success'),
-                   className='mr-2'),
-        dbc.Button("Close", id=_REVIEW_CLOSE_ID, color="primary", n_clicks=0)
+        dbc.Button("Commit", id=_REVIEW_COMMIT_ID, n_clicks=0, disabled=(alert_color != 'success'), class_name='mr-2'),
+        dbc.Button("Close", id=_REVIEW_CLOSE_ID, n_clicks=0)
     ])
     return header, body, footer
 
@@ -296,8 +290,8 @@ _REVIEW_ID = 'review-modal'
 ID of Modal "Review" component by which user reviews and edits session information for a pending commit job, then
 initiates the actual commit.
 """
-_REVIEW_HEADER_ID = 'review-header'
-""" ID of the header of the Modal "Review" component. """
+_REVIEW_TITLE_ID = 'review-title'
+""" ID of the ModalTitle inside the header of the Modal "Review" component. The title text contains the job ID. """
 _REVIEW_BODY_ID = 'review-body'
 """ ID of the body of the Modal "Review" component. """
 _REVIEW_CLOSE_ID = 'review-close-btn'
@@ -396,88 +390,88 @@ def _layout_session_info_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card, i
 
     # Widgets for attributes in Session table...
     experimenter_group = dbc.InputGroup([
-        dbc.InputGroupAddon("Experimenter", addon_type="prepend"),
+        dbc.InputGroupText("Experimenter"),
         dbc.Select(id=_EXPERIMENTER_SELECT_ID,
                    options=[{"label": user, "value": user} for user in experimenters],
                    value=info.experimenter if info else None)
     ], size='sm')
     subject_group = dbc.InputGroup([
-        dbc.InputGroupAddon("Subject", addon_type="prepend"),
+        dbc.InputGroupText("Subject"),
         dbc.Select(id=_SUBJECT_SELECT_ID,
                    options=[{"label": subject, "value": subject} for subject in subjects],
                    value=info.subj_id if info else None)
     ], size='sm')
     rig_group = dbc.InputGroup([
-        dbc.InputGroupAddon("Rig", addon_type="prepend"),
+        dbc.InputGroupText("Rig"),
         dbc.Select(id=_RIG_SELECT_ID,
                    options=[{"label": rig, "value": rig} for rig in rigs],
                    value=info.rig_id if info else None)
     ], size='sm')
     study_group = dbc.InputGroup([
-        dbc.InputGroupAddon("Study", addon_type="prepend"),
+        dbc.InputGroupText("Study"),
         dbc.Select(id=_STUDY_SELECT_ID,
                    options=[{"label": opt['study_title'], "value": opt['study_id']} for opt in studies],
                    value=info.study_id if info else None)
     ], size='sm')
     date_group = dbc.InputGroup([
-        dbc.InputGroupAddon("Recorded On", addon_type="prepend"),
+        dbc.InputGroupText("Recorded On"),
         dcc.DatePickerSingle(id=_RECORD_DATE_ID, date=info.session_date if info else None, display_format='YYYY-MM-DD')
     ], size='sm')
     suffix_group = dbc.InputGroup([
-        dbc.InputGroupAddon("Suffix (0-9)", addon_type="prepend"),
-        dbc.Input(id=_SUFFIX_INPUT_ID, type='number', minLength=1, maxLength=1,
+        dbc.InputGroupText("Suffix (0-9)"),
+        dbc.Input(id=_SUFFIX_INPUT_ID, type='number', minlength=1, maxlength=1,
                   value=info.session_suffix if info else None)
     ], size='sm')
     notes_group = dbc.InputGroup([
-        dbc.InputGroupAddon("Session Notes", addon_type="prepend"),
-        dbc.Textarea(id=_NOTES_AREA_ID, minLength=0, maxLength=2048, rows=4, value=info.session_notes if info else None,
+        dbc.InputGroupText("Session Notes"),
+        dbc.Textarea(id=_NOTES_AREA_ID, minlength=0, maxlength=2048, rows=4, value=info.session_notes if info else None,
                      placeholder='Enter any notes about this particular session (optional, up to 2048 chars)')
     ], size='sm')
 
     row_1 = dbc.Row([dbc.Col(date_group, width=3), dbc.Col(suffix_group, width=2),
-                     dbc.Col(subject_group, width=3, className='ml-auto'),
-                     dbc.Col(rig_group, width=2, className='ml-auto')], className='mr-1 ml-1 mt-2 mb-2')
-    row_2 = dbc.Row([dbc.Col(experimenter_group, width=4), dbc.Col(study_group, width=8)], className='mr-1 ml-1 mb-2')
-    row_3 = dbc.Row(dbc.Col(notes_group, width=12), className='mr-1 ml-1 mb-3')
+                     dbc.Col(subject_group, width=3), dbc.Col(rig_group, width=2)], className='mx-1 mt-2 mb-2')
+    row_2 = dbc.Row([dbc.Col(experimenter_group, width=4), dbc.Col(study_group, width=8)], className='mx-1 mb-2')
+    row_3 = dbc.Row(dbc.Col(notes_group, width=12), className='mx-1 mb-3')
 
     # Widgets for attributes in Session.EPhys....
     no_ephys = (info is None) or (info.num_units <= 0)
     source_options = attribute_info(DBTable.SESSION_EPHYS, 'ephys_src').options
     rec_src_group = dbc.InputGroup([
-        dbc.InputGroupAddon("Recording Source", addon_type="prepend"),
+        dbc.InputGroupText("Recording Source"),
         dbc.Select(id=_RECORDING_SRC_SELECT_ID, disabled=no_ephys,
                    options=[{"label": opt, "value": opt} for opt in source_options],
                    value=info.ephys_src if info else None)
     ], size='sm')
     probe_type_options = attribute_info(DBTable.SESSION_EPHYS, 'probe_type').options
     probe_type_group = dbc.InputGroup([
-        dbc.InputGroupAddon("Probe Type", addon_type="prepend"),
+        dbc.InputGroupText("Probe Type"),
         dbc.Select(id=_PROBE_TYPE_SELECT_ID, disabled=no_ephys,
                    options=[{"label": opt, "value": opt} for opt in probe_type_options],
                    value=info.probe_type if info else None)
     ], size='sm')
     rate_group = dbc.InputGroup([
-        dbc.InputGroupAddon("Sampling Rate (Hz)", addon_type="prepend"),
-        dbc.Input(id=_PROBE_RATE_INPUT_ID, disabled=no_ephys, type='number', minLength=2, maxLength=10,
+        dbc.InputGroupText("Sampling Rate (Hz)"),
+        dbc.Input(id=_PROBE_RATE_INPUT_ID, disabled=no_ephys, type='number', minlength=2, maxlength=10,
                   value=info.sampling_rate if info else None)
     ], size='sm')
     probe_x_group = dbc.InputGroup([
-        dbc.InputGroupAddon("Probe Location: X (mm)", addon_type="prepend"),
-        dbc.Input(id=_PROBE_X_INPUT_ID, disabled=no_ephys, type='number', minLength=2, maxLength=10,
+        dbc.InputGroupText("Probe Location: "),
+        dbc.InputGroupText("X (mm)"),
+        dbc.Input(id=_PROBE_X_INPUT_ID, disabled=no_ephys, type='number', minlength=2, maxlength=10,
                   value=info.probe_x if info else None)
     ], size='sm')
     probe_y_group = dbc.InputGroup([
-        dbc.InputGroupAddon("Y (mm)", addon_type="prepend"),
-        dbc.Input(id=_PROBE_Y_INPUT_ID, disabled=no_ephys, type='number', minLength=2, maxLength=10,
+        dbc.InputGroupText("Y (mm)"),
+        dbc.Input(id=_PROBE_Y_INPUT_ID, disabled=no_ephys, type='number', minlength=2, maxlength=10,
                   value=info.probe_y if info else None)
     ], size='sm')
     probe_z_group = dbc.InputGroup([
-        dbc.InputGroupAddon("Depth (mm)", addon_type="prepend"),
-        dbc.Input(id=_PROBE_Z_INPUT_ID, disabled=no_ephys, type='number', minLength=2, maxLength=10,
+        dbc.InputGroupText("Depth (mm)"),
+        dbc.Input(id=_PROBE_Z_INPUT_ID, disabled=no_ephys, type='number', minlength=2, maxlength=10,
                   value=info.probe_depth if info else None)
     ], size='sm')
     brain_area_group = dbc.InputGroup([
-        dbc.InputGroupAddon("Brain Area", addon_type="prepend"),
+        dbc.InputGroupText("Brain Area"),
         dbc.Select(id=_AREA_SELECT_ID, disabled=no_ephys,
                    options=[{"label": opt['ba_name'], "value": opt['ba_id']} for opt in brain_areas],
                    value=info.ba_id if info else None)
@@ -487,21 +481,21 @@ def _layout_session_info_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card, i
     divider = dbc.Row([
         dbc.Col(dbc.Label(ephys_label, size='sm'), width=5 if no_ephys else 1),
         dbc.Col(html.Hr(), width=7 if no_ephys else 11)
-    ], className='mr-1 ml-1 mb-2')
+    ], class_name='mx-1 mb-2')
 
     row_4 = dbc.Row([dbc.Col(rec_src_group, width=4), dbc.Col(probe_type_group, width=4), dbc.Col(rate_group, width=4)],
-                    className='mr-1 ml-1 mb-2')
+                    class_name='mx-1 mb-2')
     row_5 = dbc.Row([dbc.Col(probe_x_group, width=4), dbc.Col(probe_y_group, width=2), dbc.Col(probe_z_group, width=3)],
-                    className='mr-1 ml-1 mb-2')
-    row_6 = dbc.Row(dbc.Col(brain_area_group, width=4), className='mr-1 ml-1 mb-3')
+                    class_name='mx-1 mb-2')
+    row_6 = dbc.Row(dbc.Col(brain_area_group, width=4), class_name='mx-1 mb-3')
 
-    update_btn = dbc.Button("Update", id=_UPDATE_META_ID, color="primary", size='sm')
+    update_btn = dbc.Button("Update", id=_UPDATE_META_ID, size='sm')
     update_tip = dbc.Tooltip("Be sure to press this button to confirm any changes on this tab!", target=_UPDATE_META_ID,
                              placement='right', delay=dict(show=100, hide=100))
-    row_7 = dbc.Row([dbc.Col(update_btn, width=1), update_tip], className='mr-1 ml-1 mb-2')
+    row_7 = dbc.Row([dbc.Col(update_btn, width=1), update_tip], class_name='mx-1 mb-2')
 
     n = 0 if no_ephys else info.num_units
-    return dbc.Card([row_1, row_2, row_3, divider, row_4, row_5, row_6, row_7], className='mt-2'), n, err_msg
+    return dbc.Card([row_1, row_2, row_3, divider, row_4, row_5, row_6, row_7], class_name='mt-2'), n, err_msg
 
 
 def _layout_trial_protocol_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card, Optional[str]]:
@@ -528,7 +522,7 @@ def _layout_trial_protocol_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card,
 
     proto_div = html.Div(_layout_protocol_div(initial_proto), id=_PROTO_DIV_ID)
 
-    return dbc.Card(dbc.CardBody([select_proto, proto_div]), className="mt-2"), err_msg
+    return dbc.Card(dbc.CardBody([select_proto, proto_div]), class_name="mt-2"), err_msg
 
 
 _PROTO_DIV_ID = "review-proto-div"
@@ -560,7 +554,7 @@ def _layout_protocol_div(proto_candidate: Optional[maestro.ProtocolCandidate]) -
         needs_validation = needs_validation and not proto_candidate.user_validated
 
     valid_btn = dbc.Button("Validate" if needs_validation else "\u2713 Validated", id=_PROTO_VALID_BTN_ID,
-                           color='primary', disabled=(not needs_validation), size='sm')
+                           disabled=(not needs_validation), size='sm')
     tool_tip = dbc.Tooltip(
         "Any trial protocol based on fewer than 3 reps and not matching an existing protocol in the database must "
         "be manually verified by the user. Add any missing random variables (eg, a random-duration fixation "
@@ -569,30 +563,30 @@ def _layout_protocol_div(proto_candidate: Optional[maestro.ProtocolCandidate]) -
     reps_badge = dbc.Badge(
         f"# reps = {proto_candidate.num_reps if proto_candidate else 0} "
         f"{'; found match' if (proto_candidate and proto_candidate.matches_existing) else ''}",
-        color='info', className='ml-2 mr-5'
+        color='info', class_name='ms-2 me-5'
     )
-    add_rv_btn = dbc.Button("Add Random Var:", id=_PROTO_ADD_RV_BTN_ID, color='primary', size='sm', className='mr-2')
+    add_rv_btn = dbc.Button("Add Random Var:", id=_PROTO_ADD_RV_BTN_ID, size='sm', class_name='me-2')
     n_segs = len(proto_candidate.trial.segments) if proto_candidate else 0
     n_tgts = len(proto_candidate.trial.targets) if proto_candidate else 0
     select_rv_type = dbc.InputGroup([
-        dbc.InputGroupAddon("Type", addon_type='prepend'),
+        dbc.InputGroupText("Type"),
         dbc.Select(
             id=_PROTO_RV_TYPE_SELECT_ID,
             options=[{'label': t.name, 'value': str(t.value)} for t in maestro.SegParamType if
                      t.can_vary_randomly()],
             value=str(maestro.SegParamType.DURATION.value)
         )
-    ], size='sm', className='mr-2')
+    ], size='sm', class_name='me-2')
     seg_select = dbc.InputGroup([
-        dbc.InputGroupAddon("Segment", addon_type='prepend'),
+        dbc.InputGroupText("Segment"),
         dbc.Select(
             id=_PROTO_RV_SEG_SELECT_ID,
             options=[{'label': str(i), 'value': str(i)} for i in range(n_segs)],
             value='0' if n_segs > 0 else None
         )
-    ], size='sm', className='mr-2')
+    ], size='sm', class_name='me-2')
     tgt_select = dbc.InputGroup([
-        dbc.InputGroupAddon("Target", addon_type='prepend'),
+        dbc.InputGroupText("Target"),
         dbc.Select(
             id=_PROTO_RV_TGT_SELECT_ID,
             options=[{'label': proto_candidate.trial.targets[i].name, 'value': str(i)} for i in range(n_tgts)],
@@ -601,9 +595,9 @@ def _layout_protocol_div(proto_candidate: Optional[maestro.ProtocolCandidate]) -
     ], size='sm')
     validate_form = dbc.Form([
         valid_btn, reps_badge, tool_tip,
-        dbc.FormGroup([add_rv_btn, select_rv_type, seg_select, tgt_select], id=_PROTO_RV_GROUP_ID,
-                      style={} if needs_validation else {'display': 'none'})
-    ], inline=True, className='mt-3')
+        dbc.Row(dbc.Col([add_rv_btn, select_rv_type, seg_select, tgt_select], width='auto'), id=_PROTO_RV_GROUP_ID,
+                style={} if needs_validation else {'display': 'none'})
+    ], class_name='mt-3')
 
     cmpt_list = protocol.display_definition() if protocol else list()
     cmpt_list.insert(0, validate_form)
@@ -623,8 +617,9 @@ def _layout_neural_units_tab_content(job_id: Optional[str], num_units: int) -> T
         options=[{'label': f"Unit {i + 1}", 'value': str(i)} for i in range(num_units)],
         value="0" if first_unit else None
     )
+    select_unit_row = dbc.Row(dbc.Col(select_unit, width='auto'))
     unit_div = html.Div(_layout_unit_div(first_unit), id=_UNIT_DIV_ID)
-    return dbc.Card(dbc.CardBody([select_unit, unit_div]), className="mt-3"), err_msg
+    return dbc.Card(dbc.CardBody([select_unit_row, unit_div]), class_name="mt-3"), err_msg
 
 
 _UNIT_DIV_ID = "review-unit-div"
@@ -648,23 +643,25 @@ def _layout_unit_div(unit: Optional[OmniplexUnit]) -> List[Any]:
         initial = str(unit.neuron_type)
     select_type = dbc.InputGroup(
         [
-            dbc.InputGroupAddon("Neuron Type", addon_type="prepend"),
+            dbc.InputGroupText("Neuron Type"),
             dbc.Select(
                 id=_UNIT_TYPE_SELECT_ID,
                 options=[{'label': nt['nt_name'], 'value': str(nt['nt_id'])} for nt in neuron_types],
                 value=initial
             )
-        ], className='mb-3')
-    apply_all_btn = dbc.Button("Apply selected type to all units", color='primary', id=_UNIT_TYPE_APPLY_ALL_ID)
-    header_kids = [html.Hr(), dbc.Row([dbc.Col(select_type, width=8), dbc.Col(apply_all_btn, width=4)])]
+        ])
+    apply_all_btn = dbc.Button("Apply selected type to all units", id=_UNIT_TYPE_APPLY_ALL_ID)
+    header_kids = [html.Hr(),
+                   dbc.Row([dbc.Col(select_type, width='auto'), dbc.Col(apply_all_btn, width=4)],
+                           class_name='mb-3')]
 
     peak_to_peak = max(unit.template) - min(unit.template) if unit else 0
     header_kids.extend([
-        dbc.Badge(f"Omniplex Channel: {unit.channel if unit else '--'}", color="primary", className="mr-3"),
-        dbc.Badge(f"Mean firing rate: {unit.firing_rate if unit else 0:.1f} Hz", color="primary", className="mr-3"),
-        dbc.Badge(f"#Spikes: {unit.num_spikes if unit else 0}", color="primary", className="mr-3"),
-        dbc.Badge(f"SNR: {unit.snr if unit else 0:.2f}", color="primary", className="mr-3"),
-        dbc.Badge(f"Peak-to-peak: {peak_to_peak:.1f} \u00B5V", color="primary", className="mr-3"),
+        dbc.Badge(f"Omniplex Channel: {unit.channel if unit else '--'}", color="primary", class_name="me-3"),
+        dbc.Badge(f"Mean firing rate: {unit.firing_rate if unit else 0:.1f} Hz", color="primary", class_name="me-3"),
+        dbc.Badge(f"#Spikes: {unit.num_spikes if unit else 0}", color="primary", class_name="me-3"),
+        dbc.Badge(f"SNR: {unit.snr if unit else 0:.2f}", color="primary", class_name="me-3"),
+        dbc.Badge(f"Peak-to-peak: {peak_to_peak:.1f} \u00B5V", color="primary", class_name="me-3"),
     ])
 
     # simple graph of template waveform. Note I'm assuming 40KHz sampling rate here!
@@ -875,7 +872,7 @@ def update_review_modal_alert(*args):
      State(_RECORD_DATE_ID, "date"), State(_SUFFIX_INPUT_ID, "value"), State(_STUDY_SELECT_ID, "value"),
      State(_NOTES_AREA_ID, "value"), State(_RECORDING_SRC_SELECT_ID, "value"), State(_PROBE_TYPE_SELECT_ID, "value"),
      State(_PROBE_RATE_INPUT_ID, "value"), State(_PROBE_X_INPUT_ID, "value"), State(_PROBE_Y_INPUT_ID, "value"),
-     State(_PROBE_Z_INPUT_ID, "value"), State(_AREA_SELECT_ID, "value"), State(_REVIEW_HEADER_ID, "children")]
+     State(_PROBE_Z_INPUT_ID, "value"), State(_AREA_SELECT_ID, "value"), State(_REVIEW_TITLE_ID, "children")]
 )
 def update_session_data(*args):
     ctx = callback_context
@@ -883,7 +880,7 @@ def update_session_data(*args):
         raise dash_exc.PreventUpdate
     trigger = ctx.triggered[0]['prop_id'].split('.')[0]
     if trigger == _UPDATE_META_ID:
-        # job ID is in the modal header text
+        # job ID is in the modal header title text
         idx = args[-1].find(":")
         job_id = args[-1][idx + 2:]
         ofs = 1
@@ -911,13 +908,13 @@ def update_session_data(*args):
     [Input(_PROTO_SELECT_ID, 'value'), Input(_PROTO_ADD_RV_BTN_ID, 'n_clicks'), Input(_PROTO_VALID_BTN_ID, 'n_clicks')],
     [State(_PROTO_SELECT_ID, 'value'), State(_PROTO_RV_TYPE_SELECT_ID, 'value'),
      State(_PROTO_RV_SEG_SELECT_ID, 'value'), State(_PROTO_RV_TGT_SELECT_ID, 'value'),
-     State(_PROTO_SELECT_ID, 'options'), State(_REVIEW_HEADER_ID, "children")])
+     State(_PROTO_SELECT_ID, 'options'), State(_REVIEW_TITLE_ID, "children")])
 def update_proto(*args):
     ctx = callback_context
     if not ctx.triggered:
         raise dash_exc.PreventUpdate
     out = [no_update] * 6
-    # job ID is in the modal header text
+    # job ID is in the modal header title text
     idx = args[-1].find(":")
     job_id = args[-1][idx + 2:]
     trigger = ctx.triggered[0]['prop_id'].split('.')[0]
@@ -958,13 +955,13 @@ def update_proto(*args):
 @callback(
     [Output(_UNIT_DIV_ID, 'children'), Output(_UNIT_ALERT_DIV, 'children')],
     [Input(_UNIT_SELECT_ID, 'value'), Input(_UNIT_TYPE_SELECT_ID, "value"), Input(_UNIT_TYPE_APPLY_ALL_ID, "n_clicks")],
-    [State(_UNIT_TYPE_SELECT_ID, 'value'), State(_UNIT_SELECT_ID, 'value'), State(_REVIEW_HEADER_ID, "children")]
+    [State(_UNIT_TYPE_SELECT_ID, 'value'), State(_UNIT_SELECT_ID, 'value'), State(_REVIEW_TITLE_ID, "children")]
 )
 def update_unit(*args):
     ctx = callback_context
     if not ctx.triggered:
         raise dash_exc.PreventUpdate
-    # job ID is in the modal header text
+    # job ID is in the modal header title text
     idx = args[-1].find(":")
     job_id = args[-1][idx + 2:]
     trigger = ctx.triggered[0]['prop_id'].split('.')[0]
@@ -990,7 +987,7 @@ def update_unit(*args):
 @callback(
     [Output(_COMMIT_ALERT_DIV, 'children'), Output(_REVIEW_CLOSE_ID, 'n_clicks'), Output(_REFRESH_BTN_ID, 'n_clicks')],
     [Input(_REVIEW_COMMIT_ID, 'n_clicks')],
-    [State(_REVIEW_CLOSE_ID, 'n_clicks'), State(_REFRESH_BTN_ID, 'n_clicks'), State(_REVIEW_HEADER_ID, 'children')]
+    [State(_REVIEW_CLOSE_ID, 'n_clicks'), State(_REFRESH_BTN_ID, 'n_clicks'), State(_REVIEW_TITLE_ID, 'children')]
 )
 def on_trigger_commit_to_database(*args):
     ctx = callback_context
@@ -1003,7 +1000,7 @@ def on_trigger_commit_to_database(*args):
         # imperative!
         if args[0] == 0:
             raise dash_exc.PreventUpdate
-        # get job ID from the Review modal header
+        # get job ID from the Review modal header title text
         idx = args[-1].find(":")
         job_id = args[-1][idx + 2:]
         err_msg = commit_to_database(job_id)

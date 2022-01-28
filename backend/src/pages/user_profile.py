@@ -53,73 +53,71 @@ def serve_layout() -> html.Div:
     if flask_login.current_user.is_authenticated:
         portal_user = load_authorized_user(flask_login.current_user.get_id())
 
-    form_groups = list()
+    form_rows = list()
     entry_widget = dbc.Input(
-        id=_FULL_NAME_ID, type='text', minLength=5, maxLength=50,
+        id=_FULL_NAME_ID, type='text', minlength=5, maxlength=50,
         value=portal_user.full_name() if portal_user else None,
         placeholder="Enter full name (5-50 chars; eg. 'John J. Doe', 'Jane Smith, PhD')"
     )
-    form_groups.append(dbc.FormGroup([dbc.Label("Full Name", width=2), dbc.Col(entry_widget, width=10)], row=True))
+    form_rows.append(dbc.Row([dbc.Label("Full Name", width=2), dbc.Col(entry_widget, width=10)], class_name='mb-2'))
     entry_widget = dbc.Input(
-        id=_EMAIL_ID, type='email', minLength=0, maxLength=80,
+        id=_EMAIL_ID, type='email', minlength=0, maxlength=80,
         value=portal_user.contact_email() if portal_user else None,
         placeholder="Enter a valid email address up to 80 chars long"
     )
-    form_groups.append(dbc.FormGroup([dbc.Label("Email Address", width=2), dbc.Col(entry_widget, width=10)], row=True))
+    form_rows.append(dbc.Row([dbc.Label("Email Address", width=2), dbc.Col(entry_widget, width=10)], class_name='mb-2'))
     entry_widget = dbc.Input(
-        id=_TITLE_ID, type='text', minLength=0, maxLength=50,
+        id=_TITLE_ID, type='text', minlength=0, maxlength=50,
         value=portal_user.title() if portal_user else None,
         placeholder="Enter title/position (optional, 0-50 chars; eg, 'PostDoc')"
     )
-    form_groups.append(dbc.FormGroup([dbc.Label("Position", width=2), dbc.Col(entry_widget, width=10)], row=True))
+    form_rows.append(dbc.Row([dbc.Label("Position", width=2), dbc.Col(entry_widget, width=10)], class_name='mb-2'))
     entry_widget = dbc.Input(
-        id=_ORG_ID, type='text', minLength=0, maxLength=50,
+        id=_ORG_ID, type='text', minlength=0, maxlength=50,
         value=portal_user.organization() if portal_user else None,
         placeholder="Enter organization name (optional, 0-50 chars; eg, 'Duke University')"
     )
-    form_groups.append(dbc.FormGroup([dbc.Label("Organization", width=2), dbc.Col(entry_widget, width=10)], row=True))
+    form_rows.append(dbc.Row([dbc.Label("Organization", width=2), dbc.Col(entry_widget, width=10)], class_name='mb-2'))
 
     # alert raised when system fails to save a profile change - displays a brief error message. Otherwise hidden.
-    form_groups.append(dbc.FormGroup(
-        dbc.Alert("", id=_PROFILE_ALERT_ID, dismissable=True, is_open=False)
+    form_rows.append(dbc.Row(
+        dbc.Col(dbc.Alert("", id=_PROFILE_ALERT_ID, dismissable=True, is_open=False), width=10)
     ))
 
     profile_card = dbc.Card([
         dbc.CardHeader("User Profile"),
-        dbc.CardBody(form_groups),
-        dbc.CardFooter(dbc.Button("Save Changes", id=_SAVE_PROFILE_BTN, disabled=(portal_user is None), n_clicks=0,
-                                  color='primary', className='ml-auto'))
-    ], className='w-75 mt-5 mb-3 mx-auto')
+        dbc.CardBody(dbc.Form(form_rows)),
+        dbc.CardFooter(dbc.Button("Save Changes", id=_SAVE_PROFILE_BTN, disabled=(portal_user is None)))
+    ], class_name='w-75 mt-5 mb-3 mx-auto')
 
-    form_groups = list()
+    form_rows = list()
     entry_widget = dbc.Input(
-        id=_CURRENT_PWD_ID, type='password', minLength=8, maxLength=32,
+        id=_CURRENT_PWD_ID, type='password', minlength=8, maxlength=32,
         placeholder="Verify current password"
     )
-    form_groups.append(dbc.FormGroup([dbc.Label("Current password", width=2), dbc.Col(entry_widget, width=10)],
-                                     row=True))
+    form_rows.append(dbc.Row([dbc.Label("Current password", width=2), dbc.Col(entry_widget, width=6)],
+                             class_name='mb-2'))
     entry_widget = dbc.Input(
-        id=_NEW_PWD_ID, type='password', minLength=8, maxLength=32,
+        id=_NEW_PWD_ID, type='password', minlength=8, maxlength=32,
         placeholder="Enter new password (8-32 chars with at least 1 digit and 1 uppercase letter)"
     )
-    form_groups.append(dbc.FormGroup([dbc.Label("New password", width=2), dbc.Col(entry_widget, width=10)], row=True))
+    form_rows.append(dbc.Row([dbc.Label("New password", width=2), dbc.Col(entry_widget, width=6)], class_name='mb-2'))
     entry_widget = dbc.Input(
-        id=_CONFIRM_PWD_ID, type='password', minLength=8, maxLength=32,
+        id=_CONFIRM_PWD_ID, type='password', minlength=8, maxlength=32,
         placeholder="Reenter new password"
     )
-    form_groups.append(dbc.FormGroup([dbc.Label("", width=2), dbc.Col(entry_widget, width=10)], row=True))
+    form_rows.append(dbc.Row([dbc.Label("", width=2), dbc.Col(entry_widget, width=6)], class_name='mb-2'))
 
     # alert raised when a password change fails - displays a brief error message. Otherwise hidden.
-    form_groups.append(dbc.FormGroup(
-        dbc.Alert("", id=_PWD_ALERT_ID, dismissable=True, is_open=False)
+    form_rows.append(dbc.Row(
+        dbc.Col(dbc.Alert("", id=_PWD_ALERT_ID, dismissable=True, is_open=False), width=10)
     ))
 
     password_card = dbc.Card([
         dbc.CardHeader("Change Password"),
-        dbc.CardBody(form_groups),
-        dbc.CardFooter(dbc.Button("Change", id=_CHANGE_PWD_BTN, disabled=(portal_user is None), n_clicks=0,
-                                  color='primary', className='ml-auto'))
-    ], className='w-75 mx-auto')
+        dbc.CardBody(dbc.Form(form_rows)),
+        dbc.CardFooter(dbc.Button("Change", id=_CHANGE_PWD_BTN, disabled=(portal_user is None), n_clicks=0))
+    ], class_name='w-75 mx-auto')
 
     return html.Div([profile_card, password_card])
 

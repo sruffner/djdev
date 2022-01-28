@@ -2508,11 +2508,11 @@ class Protocol(NamedTuple):
         rvs = proto_summary['rvs']
 
         badges = [
-            dbc.Badge(f"Record Seg: {proto_summary['record_seg']}", color="primary", className="mr-3"),
-            dbc.Badge(f"Transform: {proto_summary['transform']}", color="primary", className="mr-3"),
-            dbc.Badge(f"Targets: {len(target_names)}", id="disp_proto_targets", color="primary", className="mr-3"),
-            dbc.Badge(f"Perturbations: {len(perts)}", id="disp_proto_perts", color="primary", className="mr-3"),
-            dbc.Badge(f"Tagged Sections: {len(sections)}", id="disp_proto_sections", color="primary", className="mr-3"),
+            dbc.Badge(f"Record Seg: {proto_summary['record_seg']}", color="primary", class_name="me-3"),
+            dbc.Badge(f"Transform: {proto_summary['transform']}", color="primary", class_name="me-3"),
+            dbc.Badge(f"Targets: {len(target_names)}", id="disp_proto_targets", color="primary", class_name="me-3"),
+            dbc.Badge(f"Perturbations: {len(perts)}", id="disp_proto_perts", color="primary", class_name="me-3"),
+            dbc.Badge(f"Tagged Sects: {len(sections)}", id="disp_proto_sections", color="primary", class_name="me-3"),
             dbc.Badge(f"Random Vars: {len(rvs)}", id="disp_proto_random_vars", color="primary"),
             dbc.Tooltip([html.Div(f"{str(target)}") for target in targets],
                         target="disp_proto_targets", style={'max-width': '600px'})

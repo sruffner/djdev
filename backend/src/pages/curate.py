@@ -17,7 +17,7 @@ tabs_card = dbc.Card(
             dbc.Tabs(
                 [dbc.Tab(label=panel.tab_label(), tab_id=tab_id) for tab_id, panel in tab_to_panel.items()],
                 id="tabs",
-                card=True, persistence=True, persistence_type="session",
+                persistence=True, persistence_type="session",
                 active_tab=f"{subj_panel.id_prefix()}_tab",
             )
         ),
@@ -34,7 +34,7 @@ markdown = dcc.Markdown('''
 container_card = dbc.Card([
     dbc.CardHeader("Curate the laboratory database"),
     dbc.CardBody([markdown, tabs_card])
-], className='w-75 mx-auto mt-5')
+], class_name='w-75 mx-auto mt-5')
 
 layout = html.Div([container_card])
 

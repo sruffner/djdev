@@ -83,23 +83,23 @@ def _serve_layout() -> html.Div:
         [
             dbc.ModalHeader(f"Login to portal"),
             dbc.ModalBody(dbc.Form([
-                dbc.FormGroup([
+                dbc.Row([
                     dbc.Label("Username", width=2),
                     dbc.Col(dbc.Input(type="text", id=_LOGIN_USERNAME_ID, placeholder="Enter username"), width=10)
-                ], row=True),
-                dbc.FormGroup([
+                ], class_name='mb-2'),
+                dbc.Row([
                     dbc.Label("Password", width=2),
                     dbc.Col(dbc.Input(type="password", id=_LOGIN_PASSWORD_ID, placeholder="Enter password"), width=10)
-                ], row=True),
-                dbc.FormGroup(
-                    dbc.Alert("", id=_LOGIN_ALERT_ID, is_open=False)
+                ], class_name='mb-2'),
+                dbc.Row(
+                    dbc.Col(dbc.Alert("", id=_LOGIN_ALERT_ID, is_open=False), width=12)
                 )
             ])),
             dbc.ModalFooter(
                 dbc.Row([
-                    dbc.Button("Login", id=_LOGIN_SUBMIT_ID, color="primary", n_clicks=0),
-                    dbc.Button("Cancel", id=_LOGIN_CANCEL_ID, color="primary", n_clicks=0, className="ml-3")
-                ])
+                    dbc.Col(dbc.Button("Login", id=_LOGIN_SUBMIT_ID, n_clicks=0), width='auto'),
+                    dbc.Col(dbc.Button("Cancel", id=_LOGIN_CANCEL_ID, n_clicks=0), width='auto')
+                ], justify='end')
             )
         ],
         id=_LOGIN_MODAL_ID, backdrop="static", size="lg", is_open=False
@@ -120,12 +120,16 @@ def _serve_layout() -> html.Div:
             can_commit = portal_user.can_commit_to_database()
             is_admin = portal_user.is_admin()
 
+    brand_link = dbc.NavbarBrand("Lisberger Data Portal", href="/explore")
+    lab_link = html.A("[Courtesy of the Lisberger lab at Duke University]",
+                      href="https://www.neuro.duke.edu/research/faculty-labs/lisberger-lab", target="_blank",
+                      style=dict(color='white'))
     navbar = dbc.Navbar(
-        [
-            html.A(dbc.NavbarBrand("Lisberger Data Portal"), href="/explore"),
-            html.A("[Courtesy of the Lisberger lab at Duke University]",
-                   href="https://www.neuro.duke.edu/research/faculty-labs/lisberger-lab", target="_blank",
-                   style=dict(color='white')),
+        dbc.Container([
+            dbc.Row([
+                dbc.Col(brand_link, width='auto', class_name='mr-2'),
+                dbc.Col(lab_link, width='auto')
+            ], class_name='g-0', align='center'),
             dbc.Row(
                 [
                     dbc.Col(dbc.Button("Login", id=_LOGIN_ID, color="info", style=login_btn_style, n_clicks=0),
@@ -147,14 +151,14 @@ def _serve_layout() -> html.Div:
                                 dbc.DropdownMenuItem("Update your profile", href="/user_profile"),
                                 dbc.DropdownMenuItem("Logout", id=_LOGOUT_ID, n_clicks=0)
                             ],
-                            id=_NAV_MENU_ID, right=True, label=drop_menu_label, color="info", style=drop_menu_style
+                            id=_NAV_MENU_ID, align_end=True, label=drop_menu_label, color="info", style=drop_menu_style
                         ),
                         width="auto"
                     )
                 ],
-                no_gutters=True, className="ml-auto flex-nowrap mt-3 mt-md-0", align="center"
+                class_name="g-0 ml-auto flex-nowrap mt-3 mt-md-0", align="center"
             )
-        ],
+        ], fluid=True),
         color="primary",
         dark=True,
     )

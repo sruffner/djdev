@@ -70,8 +70,8 @@ def serve_layout() -> html.Div:
     """
     detail_panel = dbc.Tabs(
         [
-            dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_SESSION_TAB_ID), className='mt-2'), label="Session Info"),
-            dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_DATA_TAB_ID), className='mt-2'), label="Trial Data")
+            dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_SESSION_TAB_ID), class_name='mt-2'), label="Session Info"),
+            dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_DATA_TAB_ID), class_name='mt-2'), label="Trial Data")
         ]
     )
     """ Rendering of a tabbed panel in which details about an experiment session are displayed. """
@@ -82,7 +82,7 @@ def serve_layout() -> html.Div:
             {"label": "Neural recordings", "value": _UNIT_MODE}
         ],
         value=_SESSION_MODE, id=_SEARCH_MODE_RADIO_ID, inline=True,
-        labelCheckedStyle=dict(fontWeight='bold')
+        label_checked_style=dict(fontWeight='bold')
     )
 
     usage_instructions = dcc.Markdown(
@@ -119,11 +119,11 @@ def serve_layout() -> html.Div:
             dbc.Row([
                 dbc.Col(search_mode_radio, width='auto'),
                 dbc.Col(_filter_group(), width='auto')
-            ], align='center', className='mb-2'),
-            dbc.Row(dbc.Col(html.Div(children=data_table)), className="mb-3"),
+            ], align='center', class_name='mb-2'),
+            dbc.Row(dbc.Col(html.Div(children=data_table)), class_name="mb-3"),
             dbc.Row(dbc.Col(dbc.Collapse(detail_panel, id=_COLLAPSE_ID)))
         ]),
-    ], className='w-75 mx-auto mt-5')
+    ], class_name='w-75 mx-auto mt-5')
 
     stored_selection = dcc.Store(id=_SELECTED_ROW_ID)
     return html.Div([card, stored_selection])
@@ -287,46 +287,46 @@ def _filter_group() -> dbc.Row:
 
     # these two filter controls are specific to searching individual neurons, so they are hidden initially
     neuron_type_row = dbc.Row(dbc.InputGroup([
-        dbc.InputGroupAddon("Neuron Type", addon_type="prepend"),
+        dbc.InputGroupText("Neuron Type"),
         dbc.Select(id=_FILTER_NTYPE_ID,
                    options=[{"label": opt['nt_name'], "value": str(opt['nt_id'])} for opt in neuron_types],
                    value=_FILTER_UNUSED, disabled=True)
-    ], size='sm'), className='mr-1 ml-1 mb-2')
+    ], size='sm'), class_name='g-0 mx-1 mb-2')
     num_spikes_row = dbc.Row(dbc.InputGroup([
-        dbc.InputGroupAddon("#Spikes >=", addon_type="prepend"),
+        dbc.InputGroupText("#Spikes >="),
         dbc.Input(id=_FILTER_SPIKES_ID, type='number', min=0, debounce=True, value=0, disabled=True)
-    ], size='sm'), className='mr-1 ml-1 mb-2')
+    ], size='sm'), class_name='g-0 mx-1 mb-2')
 
     experimenter_row = dbc.Row(dbc.InputGroup([
-        dbc.InputGroupAddon("Experimenter", addon_type="prepend"),
+        dbc.InputGroupText("Experimenter"),
         dbc.Select(id=_FILTER_EXP_ID,
                    options=[{"label": opt['full_name'], "value": opt['username']} for opt in experimenters],
                    value=_FILTER_UNUSED)
-    ], size='sm'), className='mr-1 ml-1 mb-2')
+    ], size='sm'), class_name='g-0 mx-1 mb-2')
     subject_row = dbc.Row(dbc.InputGroup([
-        dbc.InputGroupAddon("Subject", addon_type="prepend"),
+        dbc.InputGroupText("Subject"),
         dbc.Select(id=_FILTER_SUBJ_ID,
                    options=[{"label": opt, "value": opt} for opt in subjects], value=_FILTER_UNUSED)
-    ], size='sm'), className='mr-1 ml-1 mb-2')
+    ], size='sm'), class_name='g-0 mx-1 mb-2')
     study_row = dbc.Row(dbc.InputGroup([
-        dbc.InputGroupAddon("Study", addon_type="prepend"),
+        dbc.InputGroupText("Study"),
         dbc.Select(id=_FILTER_STUDY_ID,
                    options=[{"label": opt['study_title'], "value": opt['study_id']} for opt in studies],
                    value=_FILTER_UNUSED)
-    ], size='sm'), className='mr-1 ml-1 mb-2')
+    ], size='sm'), class_name='g-0 mx-1 mb-2')
     date_row = dbc.Row(dbc.InputGroup([
-        dbc.InputGroupAddon("Recorded: ", addon_type="prepend"),
+        dbc.InputGroupText("Recorded: "),
         dbc.Select(id=_FILTER_DATE_ID,
                    options=[{"label": opt, "value": opt} for opt in date_choices], value=_FILTER_UNUSED),
-        dcc.DatePickerSingle(id=_DATE_PICKER_ID, date=date.today(), display_format='YYYY-MM-DD', className='ml-2')
-    ], size='sm'), className='mr-1 ml-1 mb-3')
+        dcc.DatePickerSingle(id=_DATE_PICKER_ID, date=date.today(), display_format='YYYY-MM-DD', className='ms-2')
+    ], size='sm'), className='g-0 mx-1 mb-3')
     control_row = dbc.Row([
-        dbc.Button("Clear", id=_FILTER_CLEAR_ID, className="mr-3", size='sm', color='primary'),
-        dbc.Label(f"{num_sessions} sessions found", id=_FILTER_COUNT_ID, className='my-auto')
-    ], className='mr-1 ml-1')
+        dbc.Col(dbc.Button("Clear", id=_FILTER_CLEAR_ID, size='sm'), width='auto', class_name='me-2'),
+        dbc.Col(dbc.Label(f"{num_sessions} sessions found", id=_FILTER_COUNT_ID, size='sm'), width='auto')
+    ], align='center', class_name='g-0 mx-1')
 
     return dbc.Row([
-        dbc.Col(dbc.Button("Filters", id=_FILTER_RAISE_ID, size='sm', color='primary')),
+        dbc.Col(dbc.Button("Filters", id=_FILTER_RAISE_ID, size='sm')),
         dbc.Popover(
             [
                 dbc.PopoverBody([neuron_type_row, num_spikes_row, experimenter_row, subject_row, study_row,
@@ -474,8 +474,8 @@ def _session_info_tabpane(session: Dict[str, Any]) -> html.Div:
     info_table = dbc.Table([info_table_body], striped=True, bordered=True)
 
     notes_grp = dbc.InputGroup([
-        dbc.InputGroupAddon("Session Notes", addon_type="prepend"),
-        dbc.Textarea(value=session['session_notes'], rows=4, readOnly=True)
+        dbc.InputGroupText("Session Notes"),
+        dbc.Textarea(value=session['session_notes'], rows=4, readonly=True)
     ])
 
     if num_units > 0:
@@ -589,16 +589,16 @@ def _trial_data_tabpane(session: Dict[str, Any]) -> html.Div:
         disabled=(num_units <= 0)
     )
     unit_grp = dbc.InputGroup([
-        dbc.InputGroupAddon("Unit", addon_type="prepend"),
+        dbc.InputGroupText("Unit"),
         select_unit
     ], size='sm')
-    view_unit_btn = dbc.Button("View stats", id=_UNIT_STATS_OPEN_ID, color='primary', size='sm')
+    view_unit_btn = dbc.Button("View stats", id=_UNIT_STATS_OPEN_ID, size='sm')
     unit_stats_modal = dbc.Modal(
         [
             dbc.ModalBody(id=_UNIT_STATS_BODY_ID),
             dbc.ModalFooter(
                 dbc.Row([
-                    dbc.Button("Close", id=_UNIT_STATS_CLOSE_ID, color="primary")
+                    dbc.Button("Close", id=_UNIT_STATS_CLOSE_ID)
                 ])
             )
         ],
@@ -608,16 +608,16 @@ def _trial_data_tabpane(session: Dict[str, Any]) -> html.Div:
     # the trial protocol selection dropdown reflects all the different trial protocols presented during the session
     proto_options, init_proto = _proto_select_options_and_initial_value(session, unit_id=initial_unit_id)
     proto_grp = dbc.InputGroup([
-        dbc.InputGroupAddon("Trial Protocol", addon_type="prepend"),
+        dbc.InputGroupText("Trial Protocol"),
         dbc.Select(id=_PROTO_SELECT_ID, options=proto_options, value=init_proto)
-    ], size='sm', className='mr-1')
-    view_proto_btn = dbc.Button("View details", id=_PROTO_VIEW_OPEN_ID, color='primary', size='sm')
+    ], size='sm', class_name='mr-1')
+    view_proto_btn = dbc.Button("View details", id=_PROTO_VIEW_OPEN_ID, size='sm')
     proto_modal = dbc.Modal(
         [
             dbc.ModalBody(id=_PROTO_VIEW_BODY_ID),
             dbc.ModalFooter(
                 dbc.Row([
-                    dbc.Button("Close", id=_PROTO_VIEW_CLOSE_ID, color="primary")
+                    dbc.Button("Close", id=_PROTO_VIEW_CLOSE_ID)
                 ])
             )
         ],
@@ -627,7 +627,7 @@ def _trial_data_tabpane(session: Dict[str, Any]) -> html.Div:
     # the display select dropdown selects among individual trial reps or one of two possible aggregate responses
     disp_options, init_disp = _disp_select_options_and_initial_value(session, init_proto, initial_unit_id)
     disp_grp = dbc.InputGroup([
-        dbc.InputGroupAddon("Display", addon_type="prepend"),
+        dbc.InputGroupText("Display"),
         dbc.Select(id=_DISP_SELECT_ID, options=disp_options, value=init_disp)
     ], size='sm')
 
@@ -635,7 +635,7 @@ def _trial_data_tabpane(session: Dict[str, Any]) -> html.Div:
                            children=_generate_trial_data_view(session, initial_unit_id, init_proto, init_disp))
 
     # a tooltip is presented in a Bootstrap Popover element attached to a pill badge on the navigation row.
-    help_badge = dbc.Badge("?", pill=True, id=_TD_HELP_BADGE_ID, className='mt-1 float-right', color='info',
+    help_badge = dbc.Badge("?", pill=True, id=_TD_HELP_BADGE_ID, class_name='float-end', color='info',
                            style={'font-size': 18})
     markdown = dcc.Markdown(
         '''Select a trial protocol, then select an individual trial response or an aggregate response statistic. 
@@ -650,14 +650,14 @@ def _trial_data_tabpane(session: Dict[str, Any]) -> html.Div:
 
     nav_row = dbc.Row([
         dbc.Col(dbc.Row([
-            dbc.Col(unit_grp, width='auto', className='mr-1'),
-            dbc.Col([view_unit_btn, unit_stats_modal], width='auto', className='mr-5'),
-            dbc.Col(proto_grp, width='auto', className='mr-1'),
-            dbc.Col([view_proto_btn, proto_modal], width='auto', className='mr-5'),
+            dbc.Col(unit_grp, width='auto', class_name='me-1'),
+            dbc.Col([view_unit_btn, unit_stats_modal], width='auto', class_name='me-5'),
+            dbc.Col(proto_grp, width='auto', class_name='me-1'),
+            dbc.Col([view_proto_btn, proto_modal], width='auto', class_name='me-5'),
             dbc.Col(disp_grp, width='auto')
-        ], no_gutters=True), width=10),
+        ], class_name='g-0'), width=10),
         dbc.Col([help_badge, help_popover], width=1)
-    ], justify='between', className='mb-2')
+    ], align='center', justify='between', class_name='mb-2')
 
     loading_figure = dcc.Loading(id=_DISP_VIEW_LOADING_ID, children=figure_view, type='circle')
     return html.Div([nav_row, loading_figure])

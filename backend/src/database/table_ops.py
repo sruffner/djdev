@@ -122,7 +122,7 @@ def entry_form(table_id: DBTable, include_attrs: Optional[List[str]] = None,
     """
     if not allows_form_entry(table_id):
         raise KeyError(f"Entry form not supported for the database table {str(table_id)}.")
-    form_groups = []
+    form_rows = []
     for attr_id in attributes_of(table_id):
         if include_attrs and not (attr_id in include_attrs):
             continue
@@ -153,7 +153,7 @@ def entry_form(table_id: DBTable, include_attrs: Optional[List[str]] = None,
         elif (attr_info.type == AttrTypeEnum.TEXT) and attr_info.textrange and (attr_info.textrange[1] > 100):
             entry_widget = dbc.Textarea(
                 id=f"{attr_id}_input",
-                minLength=attr_info.textrange[0], maxLength=attr_info.textrange[1],
+                minlength=attr_info.textrange[0], maxlength=attr_info.textrange[1],
                 rows=2 if attr_info.textrange[1] < 400 else 4,
                 value=initial_entry[attr_id] if initial_entry else "",
                 placeholder=attr_info.placeholder
@@ -166,27 +166,28 @@ def entry_form(table_id: DBTable, include_attrs: Optional[List[str]] = None,
             entry_widget = dbc.Input(
                 id=f"{attr_id}_input",
                 type=input_type,
-                minLength=attr_info.textrange[0] if attr_info.textrange else 0,
-                maxLength=attr_info.textrange[1] if attr_info.textrange else 100,
+                minlength=attr_info.textrange[0] if attr_info.textrange else 0,
+                maxlength=attr_info.textrange[1] if attr_info.textrange else 100,
                 value=initial_entry[attr_id] if initial_entry else "",
                 placeholder=attr_info.placeholder
             )
 
-        form_groups.append(dbc.FormGroup(
+        form_rows.append(dbc.Row(
             [
                 dbc.Label(attr_info.label, width=2),
                 dbc.Col(entry_widget, width=10)
             ],
-            row=True,
+            class_name='mb-2',
         ))
 
     # alert raised when an add operation fails - displays a brief error message. Otherwise hidden.
     if alert_id:
-        form_groups.append(dbc.FormGroup(
-            dbc.Alert("", id=f"{alert_id}", dismissable=True, duration=10000, fade=True, is_open=False)
+        form_rows.append(dbc.Row(
+            dbc.Col(dbc.Alert("", id=f"{alert_id}", dismissable=True, duration=10000, fade=True, is_open=False),
+                    width=12)
         ))
 
-    return dbc.Form(form_groups)
+    return dbc.Form(form_rows)
 
 
 def num_table_rows(table_id: DBTable,

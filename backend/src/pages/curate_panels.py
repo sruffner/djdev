@@ -151,17 +151,17 @@ class _BasePanel:
         layout = [
             html.Div(id=f"{pfx}_table_div", children=[self._data_table()]),
             dbc.Alert("", id=f"{self._prefix}_alert", color="danger", dismissable=True, is_open=False,
-                      className="mt-3 mb-1"),
-            dbc.Button("Add", id=f"add_{pfx}_btn", color="primary", className="mr-2 mt-3"),
-            dbc.Button("Remove", id=f"del_{pfx}_btn", color="primary", className="mr-2 mt-3", disabled=True),
+                      class_name="mt-3 mb-1"),
+            dbc.Button("Add", id=f"add_{pfx}_btn", class_name="me-2 mt-3"),
+            dbc.Button("Remove", id=f"del_{pfx}_btn", class_name="me-2 mt-3", disabled=True),
             dbc.Modal(
                 [
-                    dbc.ModalHeader(f"Add {ti.table_row_label(self._table_id)}"),
+                    dbc.ModalHeader(dbc.ModalTitle(f"Add {ti.table_row_label(self._table_id)}")),
                     dbc.ModalBody(self._entry_form()),
                     dbc.ModalFooter(
                         dbc.Row([
-                            dbc.Button("Add", id=f"{pfx}_entry_submit_btn", color="primary"),
-                            dbc.Button("Done", id=f"{pfx}_entry_done_btn", color="primary", className="ml-3")
+                            dbc.Col(dbc.Button("Add", id=f"{pfx}_entry_submit_btn"), width='auto'),
+                            dbc.Col(dbc.Button("Done", id=f"{pfx}_entry_done_btn"), width='auto')
                         ])
                     )
                 ],
@@ -173,7 +173,7 @@ class _BasePanel:
         ]
 
         accordion_cards = []
-        assoc_form_grps = []
+        assoc_form_rows = []
         related_btn_labels = []
         for subpanel in self._subpanels:
             sub_pfx = subpanel.id_prefix()
@@ -185,39 +185,39 @@ class _BasePanel:
                 dbc.Collapse(dbc.CardBody(subpanel.layout()), id=f"{pfx}_{sub_pfx}_collapse")
             ], style={'overflow': 'visible'})
             accordion_cards.append(card)
-            assoc_form_grps.append(dbc.FormGroup([
+            assoc_form_rows.append(dbc.Row([
                 dbc.Label(f"Related {subpanel.tab_label()}", html_for=f"{pfx}_{sub_pfx}_drop"),
                 dcc.Dropdown(id=f"{pfx}_{sub_pfx}_drop", multi=True, clearable=True, searchable=False),
                 dbc.FormText(f"Use the dropdown to select any related {subpanel.tab_label().lower()}")
             ]))
             related_btn_labels.append(subpanel.tab_label().lower())
 
-        if len(assoc_form_grps) > 0:
+        if len(assoc_form_rows) > 0:
             xref_selector = dbc.InputGroup([
-                dbc.InputGroupAddon("Related information for:", addon_type="prepend"),
+                dbc.InputGroupText("Related information for:"),
                 dbc.Select(id=f"{pfx}_xref_for")
             ])
             form_kids = []
-            for i, grp in enumerate(assoc_form_grps):
+            for i, grp in enumerate(assoc_form_rows):
                 form_kids.append(grp)
-                if i < (len(assoc_form_grps) - 1):
+                if i < (len(assoc_form_rows) - 1):
                     form_kids.append(html.Hr())
             form_kids.append(
                 dbc.Alert("", id=f"{self._prefix}_xref_alert", color="success", dismissable=True, is_open=False,
-                          className="mt-2 mb-1")
+                          class_name="mt-2 mb-1")
             )
             layout.append(
                 dbc.Button("Related " + ", ".join(related_btn_labels),
-                           id=f"{pfx}_raise_xref_btn", color="primary", className="mr-2 mt-3")
+                           id=f"{pfx}_raise_xref_btn", class_name="me-2 mt-3")
             )
             layout.append(
                 dbc.Modal(
                     [
-                        dbc.ModalHeader(xref_selector),
+                        dbc.ModalHeader(dbc.ModalTitle(xref_selector)),
                         dbc.ModalBody(dbc.Form(form_kids)),
                         dbc.ModalFooter(dbc.Row([
-                            dbc.Button("Update", id=f"{pfx}_upd_xref_btn", color="primary", className='mr-3'),
-                            dbc.Button("Done", id=f"{pfx}_lower_xref_btn", color="primary"),
+                            dbc.Col(dbc.Button("Update", id=f"{pfx}_upd_xref_btn"), width='auto'),
+                            dbc.Col(dbc.Button("Done", id=f"{pfx}_lower_xref_btn"), width='auto')
                         ]))
                     ],
                     id=f"{pfx}_upd_xref_modal", backdrop="static", size="xl", centered=True)
@@ -988,7 +988,7 @@ class SubjectPanel(_BasePanel):
                 dbc.Card(
                     dbc.CardBody([], id="implhist_panel")
                 ),
-                id=f"implhist_collapse", className="mt-3")
+                id=f"implhist_collapse", class_name="mt-3")
         ])
         return base_layout
 
