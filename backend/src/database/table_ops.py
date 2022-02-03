@@ -26,12 +26,11 @@ from typing import Optional, List, Union, Dict, Set, Tuple
 from datetime import date, datetime
 import datajoint as dj
 import numpy as np
-import dash_bootstrap_components as dbc
 from datajoint.expression import QueryExpression
 
 from database.log_ops import log_add_table_row, log_update_table_row, log_delete_from_table, log_mapping_table_update
 from database.table_info import DBTable, AttributeValue, attributes_of, primary_key_of, has_auto_primary_key, \
-    attribute_info, AttrTypeEnum, validate_numeric_attribute_value, allows_form_entry
+    attribute_info, AttrTypeEnum, validate_numeric_attribute_value
 from utils.common import check_date
 import database.sgl_schema as sgl
 
@@ -70,124 +69,6 @@ def database_empty() -> Optional[str]:
         if len(_table_map[table_id]) > 0:
             return f"Found non-empty database table: {str(table_id)}"
     return None
-
-
-def entry_form(table_id: DBTable, include_attrs: Optional[List[str]] = None,
-               exclude_attrs: Optional[List[str]] = None,
-               initial_entry: Optional[Dict[str, AttributeValue]] = None,
-               alert_id: Optional[str] = None) -> dbc.Form:
-    """
-    TODO: Need this for curate_panels.py. Would like to replace that with separate modules for each curate panel...
-
-    Generate a Dash Bootstrap form that may be used to gather information from the user to add a new entity (row)
-    to the specified database table. Each attribute defining a table entity is represented by a form group
-    consisting of a label and an input widget appropriate to the attribute's data type:
-        1) 'enum': A Bootstrap Select widget populated with the fixed set of options for that attribute.
-        2  'bool' : A Bootstrap Select widget with "Yes" (True) and "No" (False) options.
-        2) 'fkey' (foreign key): Similar to 'enum', except that the database is queried for the available choices
-        for that foreign key.
-        3) 'text' (length > 100): A Bootstrap Textarea widget with 2 or 4 rows (depending on max text length).
-        4) Otherwise: A Bootstrap Input widget of type 'number', 'email', or 'text'.
-
-    Selected attributes may be omitted from the form (for tables with an auto-incrementing primary key, that key is
-    always omitted because it is not user-specified), and initial values may be specified for each attribute. The
-    form optionally includes a Bootstrap Alert component in which an error message can be displayed when the user
-    enters an invalid value in the form.
-
-    Do NOT use with the registered users table, DBTable.USER!!!!
-
-    So that you can use the input widgets on the form in a Dash callback, the 'id' of each widget is set to
-    "<attr.id>-input", where <attr.id> is the ID of the table attribute displayed/edited in that widget.
-
-    Args:
-        table_id: ID of the database table.
-        include_attrs: If None, the form will include all table attributes on the form, with these exceptions:
-            auto-incrementing primary key (value controlled by database), any blob-valued attribute (not supported),
-            and, for a part table, any attribute that is part of the master table's primary key. Otherwise, only the
-            attributes identified in this list  -- that are indeed valid attributes of the table and are not among
-            the exceptions above -- are exposed on the form.
-        exclude_attrs: If not None, the form will exclude any table attributes named in this list. However, it will
-            ignore any attempt to exclude a primary key attribute.
-        initial_entry: If not None, this dictionary contains initial values for the attributes, keyed by attribute
-            ID. If present, it must contain a key-value pair for each table attribute that is included on the form.
-        alert_id: If not None, this is the ID assigned to the Alert component included along the bottom of the form;
-            otherwise, no Alert component is generated.
-
-    Returns:
-        A Dash Bootstrap Form component, as described.
-
-    Raises:
-        KeyError: If table ID is invalid or identifies a table that does not support form-based user entry; if
-            any attribute ID specified is invalid; or if any attribute ID is missing in initial_entry.
-    """
-    if not allows_form_entry(table_id):
-        raise KeyError(f"Entry form not supported for the database table {str(table_id)}.")
-    form_rows = []
-    for attr_id in attributes_of(table_id):
-        if include_attrs and not (attr_id in include_attrs):
-            continue
-        attr_info = attribute_info(table_id, attr_id)
-        if exclude_attrs and (attr_id in exclude_attrs) and (not attr_info.pkey):
-            continue
-        if (attr_info.type == AttrTypeEnum.AUTO) or (attr_info.type == AttrTypeEnum.BLOB):
-            continue
-        elif attr_info.type == AttrTypeEnum.ENUM:
-            entry_widget = dbc.Select(
-                id=f"{attr_id}_input",
-                options=[{"label": opt, "value": opt} for opt in attr_info.options],
-                value=initial_entry[attr_id] if initial_entry else attr_info.options[0]
-            )
-        elif attr_info.type == AttrTypeEnum.BOOL:
-            entry_widget = dbc.Select(
-                id=f"{attr_id}_input",
-                options=[{"label": "Yes", "value": 1}, {"label": "No", "value": 0}],
-                value=(1 if initial_entry[attr_id] else 0) if initial_entry else 0
-            )
-        elif attr_info.type == AttrTypeEnum.FKEY:
-            entry_widget = dbc.Select(
-                id=f"{attr_id}_input",
-                options=[{"label": opt[0], "value": opt[1]}
-                         for opt in foreign_key_choices(table_id, attr_id)],
-                value=initial_entry[attr_id] if initial_entry else None
-            )
-        elif (attr_info.type == AttrTypeEnum.TEXT) and attr_info.textrange and (attr_info.textrange[1] > 100):
-            entry_widget = dbc.Textarea(
-                id=f"{attr_id}_input",
-                minlength=attr_info.textrange[0], maxlength=attr_info.textrange[1],
-                rows=2 if attr_info.textrange[1] < 400 else 4,
-                value=initial_entry[attr_id] if initial_entry else "",
-                placeholder=attr_info.placeholder
-            )
-        else:
-            if (attr_info.type == AttrTypeEnum.FLOAT) or (attr_info.type == AttrTypeEnum.INT):
-                input_type = 'number'
-            else:
-                input_type = 'email' if 'email' in attr_id else 'text'
-            entry_widget = dbc.Input(
-                id=f"{attr_id}_input",
-                type=input_type,
-                minlength=attr_info.textrange[0] if attr_info.textrange else 0,
-                maxlength=attr_info.textrange[1] if attr_info.textrange else 100,
-                value=initial_entry[attr_id] if initial_entry else "",
-                placeholder=attr_info.placeholder
-            )
-
-        form_rows.append(dbc.Row(
-            [
-                dbc.Label(attr_info.label, width=2),
-                dbc.Col(entry_widget, width=10)
-            ],
-            class_name='mb-2',
-        ))
-
-    # alert raised when an add operation fails - displays a brief error message. Otherwise hidden.
-    if alert_id:
-        form_rows.append(dbc.Row(
-            dbc.Col(dbc.Alert("", id=f"{alert_id}", dismissable=True, duration=10000, fade=True, is_open=False),
-                    width=12)
-        ))
-
-    return dbc.Form(form_rows)
 
 
 def num_table_rows(table_id: DBTable,
