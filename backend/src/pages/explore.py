@@ -134,9 +134,11 @@ _SEARCH_TABLE_ID: str = "search_table"
 
 _SESSION_TABLE_COLS: List[ti.Column] = [
     ti.Column('session_date', 'Date', '125px', False),
-    ti.Column('full_name', 'Experimenter', '200px', False),
+    ti.Column('full_name', 'Experimenter', '150px', False),
     ti.Column('subj_id', 'Subject', '75px', False),
     ti.Column('study_title', 'Research Project', '250px', False),
+    ti.Column('num_units', '#Units', '75px', False),
+    ti.Column('num_trials', '#Trials', '75px', False),
     ti.Column('committed', 'Added on', '125px', False),
 ]
 """ Defined columns for the search results table when searching by experiment session. """
@@ -208,7 +210,8 @@ def _fetch_search_results(mode: int = _SESSION_MODE, restrictions: Optional[List
             row['full_name'] = user_map[row['experimenter']]
         return rows
     else:
-        rows = fetch_restrict_proj([ti.DBTable.SESSION], [restrictions], ['study_id', 'committed'])
+        rows = fetch_restrict_proj([ti.DBTable.SESSION], [restrictions],
+                                   ['study_id', 'num_units', 'num_trials', 'committed'])
         studies = fetch_restrict_proj([ti.DBTable.STUDY], None, ['study_title'])
         users = fetch_restrict_proj([ti.DBTable.USER], None, ['full_name'])
         if any([(r is None) for r in [rows, studies, users]]):

@@ -389,42 +389,46 @@ def _layout_session_info_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card, i
     brain_areas.sort(key=lambda x: x['ba_name'])
 
     # Widgets for attributes in Session table...
+    initial_value = info.experimenter if (info and info.experimenter) \
+        else (experimenters[0] if (len(experimenters) > 0) else None)
     experimenter_group = dbc.InputGroup([
         dbc.InputGroupText("Experimenter"),
-        dbc.Select(id=_EXPERIMENTER_SELECT_ID,
-                   options=[{"label": user, "value": user} for user in experimenters],
-                   value=info.experimenter if info else None)
+        dbc.Select(id=_EXPERIMENTER_SELECT_ID, options=[{"label": user, "value": user} for user in experimenters],
+                   value=initial_value)
     ], size='sm')
+    initial_value = info.subj_id if (info and info.subj_id) else (subjects[0] if (len(subjects) > 0) else None)
     subject_group = dbc.InputGroup([
         dbc.InputGroupText("Subject"),
-        dbc.Select(id=_SUBJECT_SELECT_ID,
-                   options=[{"label": subject, "value": subject} for subject in subjects],
-                   value=info.subj_id if info else None)
+        dbc.Select(id=_SUBJECT_SELECT_ID, options=[{"label": subject, "value": subject} for subject in subjects],
+                   value=initial_value)
     ], size='sm')
+    initial_value = info.rig_id if (info and info.rig_id) else (rigs[0] if (len(rigs) > 0) else None)
     rig_group = dbc.InputGroup([
         dbc.InputGroupText("Rig"),
-        dbc.Select(id=_RIG_SELECT_ID,
-                   options=[{"label": rig, "value": rig} for rig in rigs],
-                   value=info.rig_id if info else None)
+        dbc.Select(id=_RIG_SELECT_ID, options=[{"label": rig, "value": rig} for rig in rigs], value=initial_value)
     ], size='sm')
+    initial_value = info.study_id if (info and info.study_id) \
+        else (studies[0]['study_id'] if (len(studies) > 0) else None)
     study_group = dbc.InputGroup([
         dbc.InputGroupText("Study"),
         dbc.Select(id=_STUDY_SELECT_ID,
                    options=[{"label": opt['study_title'], "value": opt['study_id']} for opt in studies],
-                   value=info.study_id if info else None)
+                   value=initial_value)
     ], size='sm')
     date_group = dbc.InputGroup([
         dbc.InputGroupText("Recorded On"),
-        dcc.DatePickerSingle(id=_RECORD_DATE_ID, date=info.session_date if info else None, display_format='YYYY-MM-DD')
+        dcc.DatePickerSingle(id=_RECORD_DATE_ID, date=(info and info.session_date),
+                             display_format='YYYY-MM-DD')
     ], size='sm')
     suffix_group = dbc.InputGroup([
         dbc.InputGroupText("Suffix (0-9)"),
         dbc.Input(id=_SUFFIX_INPUT_ID, type='number', minlength=1, maxlength=1,
-                  value=info.session_suffix if info else None)
+                  value=info.session_suffix if (info and info.session_suffix) else 1)
     ], size='sm')
     notes_group = dbc.InputGroup([
         dbc.InputGroupText("Session Notes"),
-        dbc.Textarea(id=_NOTES_AREA_ID, minlength=0, maxlength=2048, rows=4, value=info.session_notes if info else None,
+        dbc.Textarea(id=_NOTES_AREA_ID, minlength=0, maxlength=2048, rows=4,
+                     value=(info and info.session_notes),
                      placeholder='Enter any notes about this particular session (optional, up to 2048 chars)')
     ], size='sm')
 
@@ -440,41 +444,43 @@ def _layout_session_info_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card, i
         dbc.InputGroupText("Recording Source"),
         dbc.Select(id=_RECORDING_SRC_SELECT_ID, disabled=no_ephys,
                    options=[{"label": opt, "value": opt} for opt in source_options],
-                   value=info.ephys_src if info else None)
+                   value=info.ephys_src if (info and info.ephys_src) else source_options[0])
     ], size='sm')
     probe_type_options = attribute_info(DBTable.SESSION_EPHYS, 'probe_type').options
     probe_type_group = dbc.InputGroup([
         dbc.InputGroupText("Probe Type"),
         dbc.Select(id=_PROBE_TYPE_SELECT_ID, disabled=no_ephys,
                    options=[{"label": opt, "value": opt} for opt in probe_type_options],
-                   value=info.probe_type if info else None)
+                   value=info.probe_type if (info and info.probe_type) else probe_type_options[0])
     ], size='sm')
     rate_group = dbc.InputGroup([
         dbc.InputGroupText("Sampling Rate (Hz)"),
         dbc.Input(id=_PROBE_RATE_INPUT_ID, disabled=no_ephys, type='number', minlength=2, maxlength=10,
-                  value=info.sampling_rate if info else None)
+                  value=(info and info.sampling_rate))
     ], size='sm')
     probe_x_group = dbc.InputGroup([
         dbc.InputGroupText("Probe Location: "),
         dbc.InputGroupText("X (mm)"),
         dbc.Input(id=_PROBE_X_INPUT_ID, disabled=no_ephys, type='number', minlength=2, maxlength=10,
-                  value=info.probe_x if info else None)
+                  value=(info and info.probe_x))
     ], size='sm')
     probe_y_group = dbc.InputGroup([
         dbc.InputGroupText("Y (mm)"),
         dbc.Input(id=_PROBE_Y_INPUT_ID, disabled=no_ephys, type='number', minlength=2, maxlength=10,
-                  value=info.probe_y if info else None)
+                  value=(info and info.probe_y))
     ], size='sm')
     probe_z_group = dbc.InputGroup([
         dbc.InputGroupText("Depth (mm)"),
         dbc.Input(id=_PROBE_Z_INPUT_ID, disabled=no_ephys, type='number', minlength=2, maxlength=10,
-                  value=info.probe_depth if info else None)
+                  value=(info and info.probe_depth))
     ], size='sm')
+    initial_value = info.ba_id if (info and info.ba_id) \
+        else (brain_areas[0]['ba_id'] if (len(brain_areas) > 0) else None)
     brain_area_group = dbc.InputGroup([
         dbc.InputGroupText("Brain Area"),
         dbc.Select(id=_AREA_SELECT_ID, disabled=no_ephys,
                    options=[{"label": opt['ba_name'], "value": opt['ba_id']} for opt in brain_areas],
-                   value=info.ba_id if info else None)
+                   value=initial_value)
     ], size='sm')
 
     ephys_label = f"Electrophysiology{' (NOT APPLICABLE - no neural unit recordings found)' if no_ephys else ''}"
@@ -565,7 +571,7 @@ def _layout_protocol_div(proto_candidate: Optional[maestro.ProtocolCandidate]) -
         f"{'; found match' if (proto_candidate and proto_candidate.matches_existing) else ''}",
         color='info', class_name='ms-2 me-5'
     )
-    add_rv_btn = dbc.Button("Add Random Var:", id=_PROTO_ADD_RV_BTN_ID, size='sm', class_name='me-2')
+    add_rv_btn = dbc.Button("Add Random Var:", id=_PROTO_ADD_RV_BTN_ID, size='sm')
     n_segs = len(proto_candidate.trial.segments) if proto_candidate else 0
     n_tgts = len(proto_candidate.trial.targets) if proto_candidate else 0
     select_rv_type = dbc.InputGroup([
@@ -576,7 +582,7 @@ def _layout_protocol_div(proto_candidate: Optional[maestro.ProtocolCandidate]) -
                      t.can_vary_randomly()],
             value=str(maestro.SegParamType.DURATION.value)
         )
-    ], size='sm', class_name='me-2')
+    ], size='sm')
     seg_select = dbc.InputGroup([
         dbc.InputGroupText("Segment"),
         dbc.Select(
@@ -584,7 +590,7 @@ def _layout_protocol_div(proto_candidate: Optional[maestro.ProtocolCandidate]) -
             options=[{'label': str(i), 'value': str(i)} for i in range(n_segs)],
             value='0' if n_segs > 0 else None
         )
-    ], size='sm', class_name='me-2')
+    ], size='sm')
     tgt_select = dbc.InputGroup([
         dbc.InputGroupText("Target"),
         dbc.Select(
@@ -593,14 +599,20 @@ def _layout_protocol_div(proto_candidate: Optional[maestro.ProtocolCandidate]) -
             value='0' if n_tgts > 0 else None
         )
     ], size='sm')
-    validate_form = dbc.Form([
-        valid_btn, reps_badge, tool_tip,
-        dbc.Row(dbc.Col([add_rv_btn, select_rv_type, seg_select, tgt_select], width='auto'), id=_PROTO_RV_GROUP_ID,
-                style={} if needs_validation else {'display': 'none'})
-    ], class_name='mt-3')
+    validate_row = dbc.Row([
+        dbc.Col([valid_btn, tool_tip], width='auto', class_name='me-1'),
+        dbc.Col(reps_badge, width='auto', class_name='me-3'),
+        dbc.Col(dbc.Row([
+            dbc.Col(add_rv_btn, width='auto', class_name='me-2'),
+            dbc.Col(select_rv_type, width='auto', class_name='me-1'),
+            dbc.Col(seg_select, width='auto', class_name='me-1'),
+            dbc.Col(tgt_select, width='auto')
+        ], justify='start', class_name='g-0', id=_PROTO_RV_GROUP_ID,
+            style={} if needs_validation else dict(display='none')))
+    ], justify='start', class_name='g-0 mt-3')
 
     cmpt_list = protocol.display_definition() if protocol else list()
-    cmpt_list.insert(0, validate_form)
+    cmpt_list.insert(0, validate_row)
     return cmpt_list
 
 

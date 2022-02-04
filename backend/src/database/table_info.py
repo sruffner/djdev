@@ -141,7 +141,7 @@ def attribute_info(table_id: DBTable, attr_id: str) -> AttrInfo:
 def validate_numeric_attribute_value(table_id: DBTable, attr_id: str, value: Union[int, float]) -> None:
     """
     Validate the value of a numeric (int or float) attribute of a table in the Lisberger lab database. Currently, the
-    only enforced restriction on a numeric attribute is that the suffix for an experiment session must lie in [0..9].
+    only enforced restriction on a numeric attribute is that the suffix for an experiment session must lie in [1..9].
     No exception is raised if this method is invoked on any other table attribute.
 
     Args:
@@ -153,8 +153,8 @@ def validate_numeric_attribute_value(table_id: DBTable, attr_id: str, value: Uni
         ValueError: If the attribute value is out-of-range or otherwise invalid.
     """
     if (table_id == DBTable.SESSION) and (attr_id == 'session_sfx'):
-        if (value < 0) or (value > 9):
-            raise ValueError("Invalid value for session suffix (must lie in 0..9)")
+        if (value < 1) or (value > 9):
+            raise ValueError("Invalid value for session suffix (must lie in 1..9)")
 
 
 class DBTable(DocEnum):
@@ -463,13 +463,15 @@ _table_info: Dict[DBTable, _TableInfo] = {
                 AttrTypeEnum.DATE, 'Session Date', True, None, None, None, '100px', [10, 10], None, None, 'YYYY-MM-DD'),
             'session_sfx': AttrInfo(
                 AttrTypeEnum.INT, 'Suffix', True, None, None, None, '50px', [1, 1], None, None,
-                'Enter an integer in [0..9] to distinguish multiple sessions on the same date'),
+                'Enter an integer in [1..9] to distinguish multiple sessions on the same date'),
             'rig_id': AttrInfo(AttrTypeEnum.FKEY, 'Rig', False, DBTable.RIG, 'rig_id'),
             'study_id': AttrInfo(AttrTypeEnum.FKEY, 'Study', False, DBTable.STUDY, 'study_id'),
             'session_notes': AttrInfo(
                 AttrTypeEnum.TEXT, 'Notes', False, None, None, None, '500px', [0, 2048], r'[\s\S]*', None,
                 'Enter any notes about this particular session (optional, up to 2048 chars)'),
-            'committed': AttrInfo(AttrTypeEnum.TIME, 'Committed On', False)
+            'committed': AttrInfo(AttrTypeEnum.TIME, 'Committed On', False),
+            'num_units': AttrInfo(AttrTypeEnum.INT, '#Units', False),
+            'num_trials': AttrInfo(AttrTypeEnum.INT, '#Trials', False)
         }),
 
     DBTable.SESSION_EPHYS: _TableInfo(

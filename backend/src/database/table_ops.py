@@ -654,12 +654,20 @@ def _validate_attribute_value(table_id: DBTable, attr_id: str, attr_value: Optio
         if not check_date(attr_value):
             raise ValueError(f"'{attr_info.label}': Date is invalid, earlier than 1900-01-01, or in the future.")
     elif attr_info.type == AttrTypeEnum.FLOAT:
+        if isinstance(attr_value, str) and (attr_info.textrange is not None):
+            min_len, max_len = attr_info.textrange
+            if (len(attr_value) < min_len) | (len(attr_value) > max_len):
+                raise ValueError(f"'{attr_info.label}': Value must be {min_len}-{max_len} characters long.")
         try:
             num_value = float(attr_value)
         except(TypeError, ValueError):
             raise ValueError(f"'{attr_info.label}' = '{attr_value}' cannot be parsed as a floating-point value")
         validate_numeric_attribute_value(table_id, attr_id, num_value)
     elif attr_info.type == AttrTypeEnum.INT:
+        if isinstance(attr_value, str) and (attr_info.textrange is not None):
+            min_len, max_len = attr_info.textrange
+            if (len(attr_value) < min_len) | (len(attr_value) > max_len):
+                raise ValueError(f"'{attr_info.label}': Value must be {min_len}-{max_len} characters long.")
         try:
             num_value = int(attr_value)
         except(TypeError, ValueError):

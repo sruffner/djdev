@@ -221,7 +221,7 @@ def update_portal_user_profile(username: str, full_name: str, email: str, title:
     if len(entry) == 1:   # no changes
         return None
     error_msg = update_table_row(DBTable.USER, entry)
-    logger.debug(f"{username} successfully changed provile." if (error_msg is None) else
+    logger.debug(f"{username} successfully changed profile." if (error_msg is None) else
                  f"User profile change failed for {username}: {error_msg}")
     return error_msg
 

@@ -195,19 +195,18 @@ class Session(dj.Manual):
     """
     While the Session table is 'manual', new entries are added through an interactive web application. The user must
     compress all session data (Maestro trial files, Omniplex PL2 file(s), and the spike sorting results) into a single
-    ZIP archive file which is uploaded through the web app into a staging directory with the data repository. The
+    ZIP archive file which is uploaded through the web app into a staging directory within the data repository. The
     backend server will scan all the Maestro data files within the ZIP (in situ, without extracting the archive) to
     identify the distinct trial protocols presented during the experimental session. It will query the user to verify
     the trial protocols and to collect other session metadata.
 
     The experimenter MUST provide a file containing the results of their spike-sorting analysis to identify the distinct
-    neural units recorded during the session. The exact format of this file is TBD, but it must contain, for each
-    identified unit: Omniplex source channel ID, Omniplex source filename (to support multiple Omniplex files recorded
-    during one session), and a potentially long vector holding the spike occurrence times (in seconds since the Omniplex
-    recording began). The web app will ask the user to specify the (putative) neuron type (choose from an entity in the
-    NeuronType table). The backend will analyze the Omniplex raw data to calculate the unit's mean firing rate in Hz,
-    signal-to-noise ration, and the average spike waveform template. With the exception of the spike times, this
-    information is stored in the Session.Neuron part table.
+    neural units recorded during the session. This file contains, for each identified unit: Omniplex source channel ID,
+    Omniplex source filename (to support multiple Omniplex files recorded during one session), and a potentially long
+    vector holding the spike occurrence times (in seconds since the Omniplex recording began). The web app will ask the
+    user to specify the (putative) neuron type (choose from an entity in the NeuronType table). The backend will analyze
+    the Omniplex raw data to calculate the unit's mean firing rate in Hz, signal-to-noise ration, and the average spike
+    waveform template. With the exception of the spike times, this information is stored in the Session.Neuron table.
 
     Once the script has prepared the session directory and collected all required metadata, it will then insert a new
     entry in the Session table. If the session included an electrophysiological recording, the requisite information is
@@ -221,12 +220,14 @@ class Session(dj.Manual):
     -> User.proj(experimenter='username')  # The user conducting the experiment
     -> Subject                             # The animal subject for the session
     session_date : date                    # Date of session
-    session_sfx : tinyint unsigned         # To distinguish multiple sessions on the same date (range [0..9])
+    session_sfx : tinyint unsigned         # To distinguish multiple sessions on the same date (restrict to [1..9])
     ---
     -> Rig                                 # The lab rig on which experiment session was conducted
     -> Study                               # The research project with which this session is associated
     session_notes : varchar(2048)          # Notes about session
     committed : timestamp                  # When session was committed to database
+    num_units : int                        # number of neural units recorded during the session
+    num_trials : int                       # number of trials presented during the session
     """
 
     class EPhys(dj.Part):

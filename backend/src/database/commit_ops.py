@@ -114,7 +114,7 @@ INFO_NS: str = 'info:'
 """
 Redis namespace for cached session metadata. Append job ID to access session metadata for a commit job. The STRING key
 is a pickled SessionMetaData object containing information to prepare the Session and -- if applicable -- Session.EPhys
-table entries when the expereiment session is committed to the database.
+table entries when the experiment session is committed to the database.
 """
 PROTONAMES_NS: str = 'protonames:'
 """
@@ -294,7 +294,9 @@ class SessionMetaData:
     session_notes: Optional[str] = None
     """ Session notes. """
     num_units: Optional[int] = 0
-    """ Number of neural units recorded during session. Should be 0 for a behavioral-only session. """
+    """ Number of neural units recorded during session; 0 for a behavior-only session. Not user-editable. """
+    num_trials: Optional[int] = 0
+    """ Total number of trials presented during session. Not user-editable. """
     ephys_src: Optional[str] = None
     """ The electrophysiology recording method/source. """
     probe_type: Optional[str] = None
@@ -313,7 +315,7 @@ class SessionMetaData:
     def session_table_entry(self) -> Dict[str, Optional[AttributeValue]]:
         return dict(experimenter=self.experimenter, subj_id=self.subj_id, session_date=self.session_date,
                     session_sfx=self.session_suffix, rig_id=self.rig_id, study_id=self.study_id,
-                    session_notes=self.session_notes)
+                    session_notes=self.session_notes, num_units=self.num_units, num_trials=self.num_trials)
 
     def ephys_table_entry(self) -> Dict[str, Optional[AttributeValue]]:
         return dict(experimenter=self.experimenter, subj_id=self.subj_id, session_date=self.session_date,
@@ -756,6 +758,7 @@ def preprocess_commit_job(job_id: str) -> bool:
                     subj_id_found = choice
                     break
             _initialize_session_metadata(job_status.owner, session_date, subj_id_found, session_info, units)
+            session_info.num_trials = len(trial_info)
 
             # save preprocessing results in a pickle file in the staging directory
             if _background_job_update(job_id, "Saving results from preprocessing..."):
@@ -1018,7 +1021,7 @@ def _process_omniplex_file(job_id: str, omniplex_file: Path, unit_data: Dict[str
         unit_data: The identified neural unit data, including channel ID, PL2 source file, and the spike timestamps
             in seconds since the Omniplex recording started. For a full description of this dictionary, see
             _validate_neural_unit_data().
-        trial_info: [in/out] A dictionasry with partial information about each Maestro trial presented, keyed by trial
+        trial_info: [in/out] A dictionary with partial information about each Maestro trial presented, keyed by trial
             data filename. The method adds the Omniplex-recorded start and stop times for each trial, as culled from
             the Omniplex file.
         units: [in/out] The list of neural units recorded during the experiment session. As the Omniplex file is
@@ -1321,15 +1324,35 @@ def _initialize_session_metadata(
         pk = {k: recent_session[k] for k in primary_key_of(DBTable.SESSION)}
         recent_ephys = fetch_one_row(DBTable.SESSION_EPHYS, pk)
 
+    # get defaults for subject, rig, study, and brain area IDs
+    if subj_id is None:
+        if recent_session:
+            subj_id = recent_session['subj_id']
+        else:
+            subj_ids = fetch_attribute_values(DBTable.SUBJECT, 'subj_id')
+            if subj_ids and (len(subj_ids) > 0):
+                subj_id = subj_ids[0]
+    default_rig_id = recent_session and recent_session['rig_id']
+    default_study_id = recent_session and recent_session['study_id']
+    if recent_session is None:
+        rig_ids = fetch_attribute_values(DBTable.RIG, 'rig_id')
+        study_ids = fetch_attribute_values(DBTable.STUDY, 'study_id')
+        default_rig_id = rig_ids and (len(rig_ids) > 0) and rig_ids[0]
+        default_study_id = study_ids and (len(study_ids) > 0) and int(study_ids[0])   # fetch returns np.int64 !!
+    default_ba_id = recent_ephys and recent_ephys['ba_id']
+    if recent_ephys is None:
+        ba_ids = fetch_attribute_values(DBTable.BRAIN_AREA, 'ba_id')
+        default_ba_id = ba_ids and (len(ba_ids) > 0) and int(ba_ids[0])    # fetch returns np.int64 !!
+
     # to initialize session suffix, we need to check if there are any sessions already committed by user with the
-    # same subject on the same date. If we don't know subject or date, we can't do this and we use 0 for the suffix.
-    session_sfx = 0
+    # same subject on the same date. If we don't know subject or date, we can't do this and we use 1 for the suffix.
+    session_sfx = 1
     if isinstance(session_date, date) and isinstance(subj_id, str):
         used: Set[int] = set()
         for session in sessions_for_user:
             if (session['subj_id'] == subj_id) and (session['session_date'] == session_date):
                 used.add(session['session_sfx'])
-        for i in range(10):
+        for i in range(1, 10):
             if i not in used:
                 session_sfx = i
                 break
@@ -1338,7 +1361,7 @@ def _initialize_session_metadata(
     unspecified_id: Optional[int] = None
     res = fetch_rows(DBTable.NEURON_TYPE, dict(nt_name="Unspecified"))
     if res and (len(res) == 1):
-        unspecified_id = res[0]['nt_id']
+        unspecified_id = int(res[0]['nt_id'])
 
     # fill in whatever session metadata we can. The electrophysiology metadata is left untouched if no neural units
     # were recorded.
@@ -1346,8 +1369,8 @@ def _initialize_session_metadata(
     session_info.subj_id = subj_id
     session_info.session_date = session_date
     session_info.session_suffix = session_sfx
-    session_info.rig_id = None if (recent_session is None) else recent_session['rig_id']
-    session_info.study_id = None if (recent_session is None) else recent_session['study_id']
+    session_info.rig_id = default_rig_id
+    session_info.study_id = default_study_id
     session_info.session_notes = ""
     session_info.num_units = len(units)
     if len(units) > 0:
@@ -1360,7 +1383,7 @@ def _initialize_session_metadata(
         session_info.probe_x = None if (recent_ephys is None) else recent_ephys['probe_x']
         session_info.probe_y = None if (recent_ephys is None) else recent_ephys['probe_y']
         session_info.probe_depth = None if (recent_ephys is None) else recent_ephys['probe_depth']
-        session_info.ba_id = None if (recent_ephys is None) else recent_ephys['ba_id']
+        session_info.ba_id = default_ba_id
 
 
 def session_metadata(job_id: str) -> Optional[SessionMetaData]:
@@ -1396,20 +1419,26 @@ def update_session_metadata(job_id: str, session_info: SessionMetaData) -> bool:
 
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
-        session_info: The updated session metadata. It is not checked for completeness or validity
+        session_info: The updated session metadata. It is not checked for completeness or validity. Select fields are
+            ignored (num_units, num_trials) because these are fixed and cannot be changed by the user.
 
     Returns:
         True if successful; False otherwise
     """
     try:
         conn = get_config().redis_conn
-        status_raw = conn.get(f"{STATUS_NS}{job_id}")
-        if status_raw is None:
-            raise Exception("Did not find commit job status on server!")
-        job_status = pickle.loads(status_raw)
+        with conn.pipeline() as pipe:
+            pipe.get(f"{STATUS_NS}{job_id}")
+            pipe.get(f"{INFO_NS}{job_id}")
+            res = pipe.execute()
+        if res is None:
+            raise Exception("Did not find commit job status or session metadata on server!")
+        job_status = pickle.loads(res[0])
+        old_session_info = pickle.loads(res[1])
         if job_status.state != CommitStateEnum.REVIEW:
             raise Exception("Cannot modify session metadata for a commit job that is not in the 'Review' stage.")
-        session_info.num_units = job_status.units   # the client must not change this
+        session_info.num_units = old_session_info.num_units   # the client must not change these
+        session_info.num_trials = old_session_info.num_trials
         conn.set(f"{INFO_NS}{job_id}", pickle.dumps(session_info))
         return True
     except Exception as e:
@@ -1932,7 +1961,7 @@ def finish_commit_job(job_id: str) -> bool:
         zip_path.replace(zip_path_in_repo)
         results = {'protocols': protocols, 'trials': trial_info, 'units': units,
                    'session': session_info.session_table_entry(),
-                   'ephys': None if session_info.num_units <= 0 else session_info.ephys_table_entry()}
+                   'ephys': None if len(units) <= 0 else session_info.ephys_table_entry()}
         with open(pickle_path_in_repo, 'wb') as file:
             pickle.dump(results, file)
 
@@ -2358,7 +2387,7 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
                                    session_date=session_info['session_date'],
                                    session_suffix=session_info['session_sfx'], rig_id=session_info['rig_id'],
                                    study_id=session_info['study_id'], session_notes=session_info['session_notes'],
-                                   num_units=len(units) if units else 0)
+                                   num_units=len(units) if units else 0, num_trials=session_info['num_trials'])
         if ephys_info:
             metadata.ephys_src = ephys_info['ephys_src']
             metadata.probe_type = ephys_info['probe_type']

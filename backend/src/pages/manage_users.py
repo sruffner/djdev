@@ -9,6 +9,7 @@ change an existing account's access level.
 @created: 12jul2021
 @author: sruffner
 """
+import logging
 from typing import Optional, List, Dict, Union
 
 from dash import callback, clientside_callback, callback_context, no_update, html, dash_table as dt, Input, \
@@ -21,6 +22,9 @@ from app import PortalUser, load_authorized_user
 import database.table_info as ti
 from database.user_ops import ACCESS_LEVELS, get_all_portal_user_records, DOWNLOAD_ACCESS, remove_portal_user, \
     change_portal_user_access_level, register_new_portal_user, ADMIN_ACCESS
+
+
+logger = logging.getLogger(__name__)
 
 _USER_TABLE_ID: str = "user-account-table"
 """ The ID assigned to the Dash DataTable presenting all user accounts registered on the Lisberger lab portal. """
