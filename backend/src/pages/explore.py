@@ -37,7 +37,8 @@ import plotly.express as px
 import database.table_info as ti
 from database.data_plots import average_response_figure, single_trial_response_figure, trial_target_trajectory_figure, \
     discharge_statistics_figure
-from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_attribute_values, num_table_rows, fetch_one_row
+from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_attribute_values, num_table_rows, fetch_one_row, \
+    fetch_any_proj
 from database.trial_data_ops import trial_protocols_for_session, trial_protocols_for_neuron, trials_for_session, \
     trials_for_neuron, get_trial_protocol_definition, retrieve_trial_reps_for_neuron
 from utils.common import check_date
@@ -430,6 +431,23 @@ def clear_filters(n_clear):
     return _FILTER_UNUSED, 0, _FILTER_UNUSED, _FILTER_UNUSED, _FILTER_UNUSED, _FILTER_UNUSED
 
 
+_EXP_POPOVER_TGT: str = 'exp-popover-tgt'
+""" 
+ID of HTML span in session summary table that displays the experimenter's name and serves as a target for the 
+Bootstrap Popover displaying additional information on that experimenter.
+"""
+_SUBJ_POPOVER_TGT: str = 'subj-popover-tgt'
+""" 
+ID of HTML span in session summary table that displays the experiment subject's ID/nickname; it serves as the target for
+the Bootstrap Popover displaying additional information on that subject.
+"""
+_STUDY_POPOVER_TGT: str = 'study-popover-tgt'
+""" 
+ID of HTML span in session summary table that displays the research project to which session belongs; it serves as the
+target for the Bootstrap Popover displaying additional information on that research project.
+"""
+
+
 def _session_info_tabpane(session: Dict[str, Any]) -> html.Div:
     """
     Helper method prepares summary information for the specified experiment session and prepares the content of the
@@ -445,8 +463,8 @@ def _session_info_tabpane(session: Dict[str, Any]) -> html.Div:
     try:
         pk = {k: session[k] for k in ti.primary_key_of(ti.DBTable.SESSION, False)}
         session = fetch_one_row(ti.DBTable.SESSION, pk)
-        user_fullname = fetch_attribute_values(ti.DBTable.USER, 'full_name', dict(username=pk['experimenter']))[0]
-        study_title = fetch_attribute_values(ti.DBTable.STUDY, 'study_title', dict(study_id=session['study_id']))[0]
+        experimenter = fetch_one_row(ti.DBTable.USER, dict(username=session['experimenter']))
+        study = fetch_one_row(ti.DBTable.STUDY, dict(study_id=session['study_id']))
         rig_loc = fetch_attribute_values(ti.DBTable.RIG, 'rig_loc', dict(rig_id=session['rig_id']))[0]
         num_trials_presented = num_table_rows(ti.DBTable.TRIAL, restriction=[pk])
         num_trials_completed = num_table_rows(ti.DBTable.TRIAL, restriction=[pk, dict(trial_success=True)])
@@ -464,9 +482,12 @@ def _session_info_tabpane(session: Dict[str, Any]) -> html.Div:
     info_table_rows = [
         ["Recorded on", f"{session['session_date']} [subsession ID:  {session['session_sfx']}]"],
         ["Committed on", f"{session['committed']}"],
-        ["Experimenter", f"{user_fullname}"],
-        ["Subject", f"{session['subj_id']}"],
-        ["Research Project", f"{study_title}"],
+        ["Experimenter", html.Span(f"{experimenter['full_name']}", id=_EXP_POPOVER_TGT,
+                                   style={"textDecoration": "underline", "cursor": "pointer"})],
+        ["Subject", html.Span(f"{session['subj_id']}", id=_SUBJ_POPOVER_TGT,
+                              style={"textDecoration": "underline", "cursor": "pointer"})],
+        ["Research Project", html.Span(f"{study['study_title']}", id=_STUDY_POPOVER_TGT,
+                                       style={"textDecoration": "underline", "cursor": "pointer"})],
         ["Rig", f"{session['rig_id']} [{rig_loc}]"],
         ["Trials", f"{num_trials_completed} out of {num_trials_presented} completed"]
     ]
@@ -505,13 +526,158 @@ def _session_info_tabpane(session: Dict[str, Any]) -> html.Div:
     ], className='small')
     ephys_table = dbc.Table([ephys_table_body], striped=True, bordered=True)
 
+    # NOTE: popovers display some additional info about the session's experimenter, subject, and research study
     return html.Div([
         dbc.Row([
             dbc.Col(info_table, width=6),
             dbc.Col(ephys_table, width=6)
         ]),
-        dbc.Row(dbc.Col(notes_grp, width=12))
+        dbc.Row(dbc.Col(notes_grp, width=12)),
+        _experimenter_popover(experimenter),
+        _subject_popover(session['subj_id']),
+        _study_popover(study)
     ])
+
+
+def _experimenter_popover(experimenter: Dict[str, ti.AttributeValue]) -> dbc.Popover:
+    """
+    Helper method for _session_info_tabpane(). Prepares the Bootstrap Popover that lists some additional information
+    on the researcher that conducted the experiment session displayed in that tab pane: Full name, title, organization,
+    email address (as a 'mailto' link), total sessions uploaded to portal (and date of most recent upload)
+
+    Args:
+        experimenter: A row in the database User table containing information about the experimenter.
+    Returns:
+        A Bootstrap Popover component displaying the information described.
+    """
+    # get total # of sessions belonging to experimenter, and date of most recent upload (NOT session recording date)
+    sessions_line = '#Sessions uploaded: N/A'
+    try:
+        restriction = dict(experimenter=experimenter['username'])
+        sessions = fetch_restrict_proj([ti.DBTable.SESSION], restrict=[restriction], attributes=['committed'])
+        num_sessions = sessions and len(sessions)
+        if num_sessions > 0:
+            sessions.sort(key=lambda x: x['committed'], reverse=True)
+            last_commit = sessions[0]['committed'].strftime("%Y-%m-%d")
+            sessions_line = f"#Sessions uploaded: {num_sessions} (last upload on: {last_commit})"
+    except Exception as e:
+        logger.error(f"Error while fetching sessions for experimenter {experimenter['username']}: {str(e)}",
+                     exc_info=True)
+
+    title, org, email = experimenter['title'], experimenter['organization'], experimenter['contact_email']
+    if title and (len(title) > 0):
+        title_org = f"{title} - {org}" if (org and len(org) > 0) else f"{title}"
+    elif org and (len(org) > 0):
+        title_org = f"{org}"
+    else:
+        title_org = "Researcher - Lisberger lab"
+    markdown = f"{title_org}  \nEmail inquiries: [{email}](mailto:{email})  \n\n_{sessions_line}_"
+    return dbc.Popover([
+        dbc.PopoverHeader(f"{experimenter['full_name']}"),
+        dbc.PopoverBody(dcc.Markdown(markdown))
+    ], target=_EXP_POPOVER_TGT, trigger='legacy')
+
+
+def _subject_popover(subj_id: str) -> dbc.Popover:
+    """
+    Helper method for _session_info_tabpane(). Prepares the Bootstrap Popover that lists some additional information
+    on the subject of the experiment session displayed in that tab pane: ID/nickname, species name, DOB, sex, and
+    implant history (if applicable).
+
+    Args:
+        subj_id: The subject ID (primary key of Subject table in database).
+    Returns:
+        A Bootstrap Popover component displaying the information described.
+    """
+    ok, subject, implants = False, None, None
+    try:
+        restriction = dict(subj_id=subj_id)
+        subject = fetch_one_row(ti.DBTable.SUBJECT, restriction)
+        implants = fetch_rows(ti.DBTable.IMPLANT, restriction)
+        ok = subject and isinstance(implants, list)
+        if ok and len(implants) > 0:
+            implants.sort(key=lambda x: x['implant_date'], reverse=True)
+    except Exception as e:
+        logger.error(f"Error while fetching information on subject {subj_id}: {str(e)}",
+                     exc_info=True)
+    markdown = f"_ID/Nickname_: **{subj_id}**  \n"
+    if ok:
+        markdown += f"_Species_: {subject['species']}  \n_DOB_: {subject['dob']} (sex: {subject['sex']})  \n\n"
+        if len(implants) == 0:
+            markdown += "_No recorded implants_"
+        else:
+            markdown += "_Implant history:_  \n"
+            for implant in implants:
+                markdown += f"  * {implant['implant_date']} (AP={implant['st_ap']:.2f}mm, " \
+                            f"ML={implant['st_ml']:.2f}mm, DV={implant['st_dv']:.2f}mm; " \
+                            f"\u03b8(AP)={implant['ap_angle']:.1f}\u00b0, " \
+                            f"\u03b8(ML)={implant['ml_angle']:.1f}\u00b0)  \n"
+    else:
+        markdown += "_No information available_"
+    return dbc.Popover([
+        dbc.PopoverHeader("Subject Details"),
+        dbc.PopoverBody(dcc.Markdown(markdown))
+    ], target=_SUBJ_POPOVER_TGT, trigger='legacy')
+
+
+def _study_popover(study: Dict[str, ti.AttributeValue]) -> dbc.Popover:
+    """
+    Helper method for _session_info_tabpane(). Prepares the Bootstrap Popover that lists some additional information
+    on the research project of which the currently displayed experiment session is a part: title, lead author, full
+    description, total sessions (and date of most recent), and list of related publications.
+
+    Args:
+        study: A row in the database Study table containing information about the research project.
+    Returns:
+        A Bootstrap Popover component displaying the information described.
+    """
+    # retrieve user record of study's lead investigator, and list of related publications. Also get # of experiment
+    # sessions uploaded for this study, and total number of neural units recorded.
+    study_lead: Optional[Dict[str, ti.AttributeValue]] = None
+    pubs: Optional[List[Dict[str, ti.AttributeValue]]] = None
+    num_sessions: Optional[int] = None
+    num_units: Optional[int] = None
+    try:
+        study_lead = fetch_one_row(ti.DBTable.USER, dict(username=study['study_lead']))
+        study_to_pub_rows = fetch_rows(ti.DBTable.STUDY_TO_PUB, dict(study_id=study['study_id']))
+        if isinstance(study_to_pub_rows, list) and len(study_to_pub_rows) > 0:
+            restriction = list()
+            for r in study_to_pub_rows:
+                restriction.append(f"pub_id = {r['pub_id']}")
+            pubs = fetch_any_proj(ti.DBTable.PUB, restriction, attributes=[])
+        restriction = dict(study_id=study['study_id'])
+        num_sessions = num_table_rows(ti.DBTable.SESSION, [restriction])
+        units = fetch_restrict_proj([ti.DBTable.SESSION_NEURON, ti.DBTable.SESSION], [None, restriction], ['unit_id'])
+        if isinstance(units, list):
+            num_units = len(units)
+    except Exception as e:
+        logger.error(f"Error while fetching additional info on study {study['study_title']}: {str(e)}",
+                     exc_info=True)
+
+    study_lead_contact = \
+        f"{study_lead['full_name']}, [{study_lead['contact_email']}](mailto:{study_lead['contact_email']})" \
+        if study_lead else "Not available"
+
+    stats_line = f"_# of experiment sessions_: {'Not available' if (not num_sessions) else num_sessions}, " \
+                 f"_# neural units_: {'Not available' if (not num_units) else num_units}"
+    pubs_markdown = "_Related Publications_:  "
+    if pubs is None:
+        pubs_markdown += "Not available."
+    elif len(pubs) == 0:
+        pubs_markdown += "None."
+    else:
+        for p in pubs:
+            pubs_markdown += f"\n  * {p['citation']}  " + (f"[[&#x21d7;]]({p['doi']})" if len(p['doi']) > 0 else "")
+
+    return dbc.Popover([
+        dbc.PopoverHeader("Project Details"),
+        dbc.PopoverBody([
+            dcc.Markdown(f"_Title_: {study['study_title']}  \n_Lead Investigator_: {study_lead_contact}  "
+                         f"\n{stats_line}  \n  \n_Project Description_:"),
+            dbc.Textarea(value=study['study_desc'], rows=6, cols=120, readonly=True, class_name='mb-3'),
+            dcc.Markdown(pubs_markdown)
+        ])
+    ], target=_STUDY_POPOVER_TGT, trigger='legacy')
 
 
 _UNIT_SELECT_ID: str = 'td_unit_select'
