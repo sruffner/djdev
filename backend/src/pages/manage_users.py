@@ -21,8 +21,8 @@ from app import PortalUser, load_authorized_user
 
 import database.table_info as ti
 from database.user_ops import ACCESS_LEVELS, get_all_portal_user_records, DOWNLOAD_ACCESS, remove_portal_user, \
-    change_portal_user_access_level, register_new_portal_user, ADMIN_ACCESS
-
+    change_portal_user_access_level, register_new_portal_user, ADMIN_ACCESS, validate_username, validate_fullname, \
+    validate_email_address, validate_password
 
 logger = logging.getLogger(__name__)
 
@@ -157,24 +157,24 @@ def serve_layout() -> html.Div:
 
     # form that gathers essential information to register a new user account
     form_rows = list()
+    entry_widget = dbc.Input(id=_USERNAME_ID, type='text', minlength=3, maxlength=20, value=None, placeholder="jjdoe5")
+    feedback = dbc.FormFeedback("User ID must be 3-20 lowercase letters or digits, starting with a letter",
+                                type='invalid')
+    form_rows.append(dbc.Row([dbc.Label("Username", width=2), dbc.Col([entry_widget, feedback], width=8)],
+                             class_name='mb-2'))
     entry_widget = dbc.Input(
-        id=_USERNAME_ID, type='text', minlength=3, maxlength=20,
-        value=None,
-        placeholder="Enter account user ID (3-20 lowercase letters or digits, starting with a letter)"
+        id=_FULL_NAME_ID, type='text', minlength=5, maxlength=50, value=None, placeholder="Jane J Doe"
     )
-    form_rows.append(dbc.Row([dbc.Label("Username", width=2), dbc.Col(entry_widget, width=8)], class_name='mb-2'))
+    feedback = dbc.FormFeedback("Must be 5-50 chars from [A-Za-z'-], up to 3 name parts, with each part capitalized",
+                                type='invalid')
+    form_rows.append(dbc.Row([dbc.Label("Full Name", width=2), dbc.Col([entry_widget, feedback], width=10)],
+                             class_name='mb-2'))
     entry_widget = dbc.Input(
-        id=_FULL_NAME_ID, type='text', minlength=5, maxlength=50,
-        value=None,
-        placeholder="Enter full name (5-50 chars; eg. 'John J. Doe', 'Jane Smith, PhD')"
+        id=_EMAIL_ID, type='email', minlength=0, maxlength=80, value=None, placeholder="jjdoe@university.edu"
     )
-    form_rows.append(dbc.Row([dbc.Label("Full Name", width=2), dbc.Col(entry_widget, width=10)], class_name='mb-2'))
-    entry_widget = dbc.Input(
-        id=_EMAIL_ID, type='email', minlength=0, maxlength=80,
-        value=None,
-        placeholder="Enter a valid email address up to 80 chars long"
-    )
-    form_rows.append(dbc.Row([dbc.Label("Email Address", width=2), dbc.Col(entry_widget, width=10)], class_name='mb-2'))
+    feedback = dbc.FormFeedback("Does not appear to be a valid email address!", type='invalid')
+    form_rows.append(dbc.Row([dbc.Label("Email Address", width=2), dbc.Col([entry_widget, feedback], width=10)],
+                             class_name='mb-2'))
     entry_widget = dbc.Select(
         id=_ACCESS_SELECT_ID,
         options=[{"label": opt, "value": opt} for opt in ACCESS_LEVELS],
@@ -182,17 +182,16 @@ def serve_layout() -> html.Div:
     )
     form_rows.append(dbc.Row([dbc.Label("Access Level", width=2), dbc.Col(entry_widget, width='auto')],
                              class_name='mb-2'))
-    entry_widget = dbc.Input(
-        id=_PASSWORD_ID, type='password', minlength=8, maxlength=32,
-        placeholder="Enter user's password (8-32 chars with at least 1 digit and 1 uppercase letter)"
-    )
-    form_rows.append(dbc.Row([dbc.Label("Initial password", width=2), dbc.Col(entry_widget, width=8)],
+    entry_widget = dbc.Input(id=_PASSWORD_ID, type='password', minlength=8, maxlength=32)
+    feedback = dbc.FormFeedback("Must be 8-32 characters long, with at least 1 digit and 1 uppercase letter",
+                                type='invalid')
+    form_rows.append(dbc.Row([dbc.Label("Initial password", width=2), dbc.Col([entry_widget, feedback], width=8)],
                              class_name='mb-2'))
     entry_widget = dbc.Input(
-        id=_CONFIRM_PWD_ID, type='password', minlength=8, maxlength=32,
-        placeholder="Reenter the same password to confirm"
+        id=_CONFIRM_PWD_ID, type='password', minlength=8, maxlength=32, placeholder="Reenter password to confirm"
     )
-    form_rows.append(dbc.Row([dbc.Label("", width=2), dbc.Col(entry_widget, width=8)], class_name='mb-2'))
+    feedback = dbc.FormFeedback("Password entries do not match", type='invalid')
+    form_rows.append(dbc.Row([dbc.Label("", width=2), dbc.Col([entry_widget, feedback], width=8)], class_name='mb-2'))
 
     form_rows.append(dbc.Row([
         dbc.Col(dbc.Alert("", id=_REG_ALERT_ID, color='danger', dismissable=True, fade=True, is_open=False), width=10)
@@ -321,6 +320,49 @@ def toggle_register_users_modal(*args):
     if trigger_id not in [_REGISTER_USERS_BTN, _DONE_BTN]:
         return no_update
     return not args[2]
+
+
+@callback(
+    [Output(_USERNAME_ID, 'valid'), Output(_USERNAME_ID, 'invalid'), Output(_FULL_NAME_ID, 'valid'),
+     Output(_FULL_NAME_ID, 'invalid'), Output(_EMAIL_ID, 'valid'), Output(_EMAIL_ID, 'invalid'),
+     Output(_PASSWORD_ID, 'valid'), Output(_PASSWORD_ID, 'invalid'), Output(_CONFIRM_PWD_ID, 'valid'),
+     Output(_CONFIRM_PWD_ID, 'invalid')],
+    [Input(_USERNAME_ID, 'value'), Input(_FULL_NAME_ID, 'value'), Input(_EMAIL_ID, 'value'),
+     Input(_PASSWORD_ID, 'value'), Input(_CONFIRM_PWD_ID, 'value')],
+    [State(_PASSWORD_ID, 'value'), State(_CONFIRM_PWD_ID, 'value')]
+)
+def update_feedback_on_register_modal(*args):
+    out = [no_update] * 10
+    ctx = callback_context
+    if (ctx.triggered is None) or len(ctx.triggered) == 0:
+        return tuple(out)
+    # normally, only one field changes at a time -- but all get reset when modal opens; and some browsers will could
+    # auto-fill multiple fields (like name and email address) in one go
+    for trigger in ctx.triggered:
+        trigger_id = trigger['prop_id'].split('.')[0]
+        if trigger_id == _USERNAME_ID:
+            is_set, is_valid = (args[0] is not None) and (len(args[0]) > 0), validate_username(args[0])
+            out[0:2] = is_set and is_valid, is_set and not is_valid
+        elif trigger_id == _FULL_NAME_ID:
+            is_set, is_valid = (args[1] is not None) and (len(args[1]) > 0), validate_fullname(args[1]) is None
+            out[2:4] = is_set and is_valid, is_set and not is_valid
+        elif trigger_id == _EMAIL_ID:
+            is_set, is_valid = (args[2] is not None) and (len(args[2]) > 0), validate_email_address(args[2]) is None
+            out[4:6] = is_set and is_valid, is_set and not is_valid
+        elif trigger_id == _PASSWORD_ID:
+            is_set, is_valid = (args[3] is not None) and (len(args[3]) > 0), validate_password(args[3]) is None
+            out[6:8] = is_set and is_valid, is_set and not is_valid
+            # confirm password entry is ignored if current password is invalid
+            c_set = is_valid and (args[6] is not None) and (len(args[6]) > 0)
+            c_valid = is_valid and (args[3] == args[6])
+            out[8:10] = c_set and c_valid, c_set and not c_valid
+        elif trigger_id == _CONFIRM_PWD_ID:
+            # confirm password entry is ignored if current password is invalid
+            is_valid = validate_password(args[5]) is None
+            c_set = is_valid and (args[4] is not None) and (len(args[4]) > 0)
+            c_valid = is_valid and (args[4] == args[5])
+            out[8:10] = c_set and c_valid, c_set and not c_valid
+    return tuple(out)
 
 
 @callback(

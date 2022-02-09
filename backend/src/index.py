@@ -36,7 +36,7 @@ import dash_bootstrap_components as dbc
 import flask_login
 
 from app import app, load_authorized_user
-from database.user_ops import authenticate_portal_user
+from database.user_ops import authenticate_portal_user, validate_username, validate_password
 from pages import curate, commit, explore, user_profile, manage_users
 
 
@@ -85,19 +85,29 @@ def _serve_layout() -> html.Div:
             dbc.ModalBody(dbc.Form([
                 dbc.Row([
                     dbc.Label("Username", width=2),
-                    dbc.Col(dbc.Input(type="text", id=_LOGIN_USERNAME_ID, placeholder="Enter username"), width=10)
+                    dbc.Col([
+                        dbc.Input(type="text", id=_LOGIN_USERNAME_ID, placeholder="Enter username"),
+                        dbc.FormFeedback(
+                            "Username must be 3-20 lowercase letters or digits, starting with a lowercase letter",
+                            type='invalid')
+                    ], width=10)
                 ], class_name='mb-2'),
                 dbc.Row([
                     dbc.Label("Password", width=2),
-                    dbc.Col(dbc.Input(type="password", id=_LOGIN_PASSWORD_ID, placeholder="Enter password"), width=10)
+                    dbc.Col([
+                        dbc.Input(type="password", id=_LOGIN_PASSWORD_ID, placeholder="Enter password"),
+                        dbc.FormFeedback(
+                            "Password must be 8-32 chars with at least one digit and one uppercase letter",
+                            type='invalid')
+                    ], width=10)
                 ], class_name='mb-2'),
                 dbc.Row(
-                    dbc.Col(dbc.Alert("", id=_LOGIN_ALERT_ID, is_open=False), width=12)
+                    dbc.Col(dbc.Alert("", id=_LOGIN_ALERT_ID, is_open=False, duration=3000), width=12)
                 )
             ])),
             dbc.ModalFooter(
                 dbc.Row([
-                    dbc.Col(dbc.Button("Login", id=_LOGIN_SUBMIT_ID, n_clicks=0), width='auto'),
+                    dbc.Col(dbc.Button("Login", id=_LOGIN_SUBMIT_ID, n_clicks=0, disabled=True), width='auto'),
                     dbc.Col(dbc.Button("Cancel", id=_LOGIN_CANCEL_ID, n_clicks=0), width='auto')
                 ], justify='end')
             )
@@ -237,6 +247,26 @@ def display_page(pathname, n_intervals, current_href):
         url_parts = urlparse(current_href)
         update_href = urlunparse([(part if i != 2 else '/explore') for i, part in enumerate(url_parts)])
     return layout, update_href, redirect
+
+
+@app.callback(
+    [Output(_LOGIN_SUBMIT_ID, 'disabled'), Output(_LOGIN_USERNAME_ID, 'valid'), Output(_LOGIN_USERNAME_ID, 'invalid'),
+     Output(_LOGIN_PASSWORD_ID, 'valid'), Output(_LOGIN_PASSWORD_ID, 'invalid')],
+    [Input(_LOGIN_USERNAME_ID, 'value'), Input(_LOGIN_PASSWORD_ID, 'value')],
+    [State(_LOGIN_USERNAME_ID, 'value'), State(_LOGIN_PASSWORD_ID, 'value')]
+)
+def enable_login_submit(*args):
+    ctx = callback_context
+    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if (ctx.triggered is not None) else ""
+    uname, pwd = None, None
+    if trigger_id == _LOGIN_USERNAME_ID:
+        uname, pwd = args[0], args[3]
+    elif trigger_id == _LOGIN_PASSWORD_ID:
+        uname, pwd = args[2], args[1]
+    uname_set, uname_valid = ((uname is not None) and (len(uname) > 0)), validate_username(uname)
+    pwd_set, pwd_valid = ((pwd is not None) and (len(pwd) > 0)), (validate_password(pwd) is None)
+    return not (uname_valid and pwd_valid), uname_set and uname_valid, uname_set and not uname_valid, \
+        pwd_set and pwd_valid, pwd_set and not pwd_valid
 
 
 @app.callback(

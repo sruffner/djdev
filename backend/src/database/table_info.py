@@ -332,7 +332,7 @@ _table_info: Dict[DBTable, _TableInfo] = {
                 ["admin", "commit", "download"], '75px'),
             'full_name': AttrInfo(
                 AttrTypeEnum.TEXT, 'Full Name', False, None, None, None, '150px', [3, 50],
-                r"^[A-Z][a-zA-Z'-]{3,}(?: [A-Z][a-zA-Z'-]*){0,2}$",
+                r"^[A-Z][a-zA-Z'-]{1,}(?: [A-Z][a-zA-Z'-]*){0,2}$",
                 "Too many names, not capitalized, or contains a character other than [A-Za-z'-]",
                 'Enter full name (as it would appear in publication; 50 chars max)'),
             'contact_email': AttrInfo(

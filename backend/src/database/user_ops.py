@@ -1,7 +1,8 @@
 """
 user_ops.py: Operations on the table of users registered with the Lisberger lab portal.
 
-TODO: DESCRIBE
+This module handles any operation that adds or removes a registered user from the portal database (User table), and
+it also handles login/authentication of a user.
 
 @author: sruffner
 @created: 11oct2021
@@ -15,7 +16,7 @@ from typing import Optional, Union, Dict, List
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from database.table_info import DBTable
+from database.table_info import DBTable, attribute_info
 from database.table_ops import update_table_row, fetch_rows, insert_into_table, row_exists, \
     delete_from_table, fetch_one_row, fetch_restrict_proj
 
@@ -47,15 +48,21 @@ def authenticate_portal_user(username: str, password: str, admin_only: bool = Fa
     Returns:
         None if account was authenticated; else a brief error description (invalid username, etc.)
     """
+    # protect against bad arguments
+    if not validate_username(username):
+        return f"Invalid username: {username}"
+    elif (emsg := validate_password(password)) is not None:
+        return emsg
+
     pk = dict(username=username)
     error_msg = None
     logger.debug(f"Trying to authenticate {username}")
     res = fetch_restrict_proj([DBTable.USER], [pk], ['password', 'access'])
     if (res is None) or (len(res) != 1):
         error_msg = 'Unrecognized username or database error'
-    if not check_password_hash(res[0]['password'], password):
+    elif not check_password_hash(res[0]['password'], password):
         error_msg = "Incorrect password"
-    if admin_only and (res[0]['access'] != 'admin'):
+    elif admin_only and (res[0]['access'] != 'admin'):
         error_msg = "Admin-level access required"
 
     # when a user is authenticated, update their last login timestamp, but don't fail if this update fails, as
@@ -64,7 +71,8 @@ def authenticate_portal_user(username: str, password: str, admin_only: bool = Fa
         last_login = datetime.now().isoformat(sep=' ', timespec='seconds')  # 'YYYY-MM-DD HH:MM:SS'
         entry = dict(username=username, last_login=last_login)
         update_table_row(DBTable.USER, entry)
-
+    else:
+        logger.debug(f"...authentication failed: {error_msg}")
     return error_msg
 
 
@@ -164,7 +172,7 @@ def validate_username(username: str) -> bool:
         True only is candidate username is 3-20 characters long, starts with a lowercase letter, and contans only
             lowercase letters and digis.
     """
-    return not (re.fullmatch(r'^[a-z][a-z0-9]{2,19}$', username) is None)
+    return not (isinstance(username, str) and (re.fullmatch(r'^[a-z][a-z0-9]{2,19}$', username) is None))
 
 
 def validate_password(password: str) -> Optional[str]:
@@ -177,11 +185,53 @@ def validate_password(password: str) -> Optional[str]:
     Returns:
         None if password if valid, else a brief error description
     """
-    if not (8 <= len(password) <= 32):
+    if not isinstance(password, str):
+        return "Invalid password"
+    elif not (8 <= len(password) <= 32):
         return "Password must have 8-32 characters"
-    elif (re.search(r"[\d]+", password) is None) and (re.search(r"[A-Z]+", password) is None):
+    elif (re.search(r"[\d]+", password) is None) or (re.search(r"[A-Z]+", password) is None):
         return 'Password must contain at least 1 digit and at least 1 uppercase character'
     return None
+
+
+def validate_fullname(fullname: str) -> Optional[str]:
+    """
+    Enforce restrictions on the full name of a user registered on the Lisberger lab portal. The user's full name must
+    be 5-50 characters long; have no more than 3 name parts, and contain only the characters A-Z, a-z, plus " ' " or
+    " - ".
+
+    Args:
+        fullname: The candidate name string.
+    Returns:
+        None if valid, else a brief error description.
+    """
+    attr_info = attribute_info(DBTable.USER, 'full_name')
+    if not isinstance(fullname, str):
+        return "Not a string"
+    elif not (5 <= len(fullname) <= 50):
+        return "Full name must be at least 5 and no more than 50 characters long"
+    elif re.fullmatch(attr_info.regex, fullname) is None:
+        return attr_info.regex_hint
+
+
+def validate_email_address(email: str) -> Optional[str]:
+    """
+    Enforce restrictions on the email address of a user registered on the Lisberger lab portal. The address must be
+    be 7-80 characters long and satisfy a regular expression for typical email addresses. Of course, this does not
+    check whether the email address actually exists.
+
+    Args:
+        email: The candidate email address string.
+    Returns:
+        None if valid, else a brief error description.
+    """
+    attr_info = attribute_info(DBTable.USER, 'contact_email')
+    if not isinstance(email, str):
+        return "Not a string"
+    elif attr_info.textrange and not (attr_info.textrange[0] <= len(email) <= attr_info.textrange[1]):
+        return "Email address must be at least 7 and no more than 80 characters long"
+    elif re.fullmatch(attr_info.regex, email) is None:
+        return attr_info.regex_hint
 
 
 def remove_portal_user(username: str) -> Optional[str]:

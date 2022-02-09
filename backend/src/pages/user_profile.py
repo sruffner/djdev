@@ -15,7 +15,8 @@ import dash_bootstrap_components as dbc
 import flask_login
 
 from app import PortalUser, load_authorized_user
-from database.user_ops import update_portal_user_profile, change_portal_user_password
+from database.user_ops import update_portal_user_profile, change_portal_user_password, validate_fullname, \
+    validate_email_address, validate_password
 
 _FULL_NAME_ID: str = "full_name_in"
 """ ID of form widget for user's full name. """
@@ -57,15 +58,20 @@ def serve_layout() -> html.Div:
     entry_widget = dbc.Input(
         id=_FULL_NAME_ID, type='text', minlength=5, maxlength=50,
         value=portal_user.full_name() if portal_user else None,
-        placeholder="Enter full name (5-50 chars; eg. 'John J. Doe', 'Jane Smith, PhD')"
+        placeholder="Enter full name (5-50 chars; eg: 'Jane J Doe')"
     )
-    form_rows.append(dbc.Row([dbc.Label("Full Name", width=2), dbc.Col(entry_widget, width=10)], class_name='mb-2'))
+    feedback = dbc.FormFeedback("Must be 5-50 chars from [A-Za-z'-], up to 3 name parts, with each part capitalized",
+                                type='invalid')
+    form_rows.append(dbc.Row([dbc.Label("Full Name", width=2), dbc.Col([entry_widget, feedback], width=10)],
+                             class_name='mb-2'))
     entry_widget = dbc.Input(
         id=_EMAIL_ID, type='email', minlength=0, maxlength=80,
         value=portal_user.contact_email() if portal_user else None,
-        placeholder="Enter a valid email address up to 80 chars long"
+        placeholder="Enter a valid email address up to 80 chars long: me@myplace.com"
     )
-    form_rows.append(dbc.Row([dbc.Label("Email Address", width=2), dbc.Col(entry_widget, width=10)], class_name='mb-2'))
+    feedback = dbc.FormFeedback("Does not appear to be a valid email address!", type='invalid')
+    form_rows.append(dbc.Row([dbc.Label("Email Address", width=2), dbc.Col([entry_widget, feedback], width=10)],
+                             class_name='mb-2'))
     entry_widget = dbc.Input(
         id=_TITLE_ID, type='text', minlength=0, maxlength=50,
         value=portal_user.title() if portal_user else None,
@@ -97,16 +103,16 @@ def serve_layout() -> html.Div:
     )
     form_rows.append(dbc.Row([dbc.Label("Current password", width=2), dbc.Col(entry_widget, width=6)],
                              class_name='mb-2'))
-    entry_widget = dbc.Input(
-        id=_NEW_PWD_ID, type='password', minlength=8, maxlength=32,
-        placeholder="Enter new password (8-32 chars with at least 1 digit and 1 uppercase letter)"
-    )
-    form_rows.append(dbc.Row([dbc.Label("New password", width=2), dbc.Col(entry_widget, width=6)], class_name='mb-2'))
-    entry_widget = dbc.Input(
-        id=_CONFIRM_PWD_ID, type='password', minlength=8, maxlength=32,
-        placeholder="Reenter new password"
-    )
-    form_rows.append(dbc.Row([dbc.Label("", width=2), dbc.Col(entry_widget, width=6)], class_name='mb-2'))
+    entry_widget = dbc.Input(id=_NEW_PWD_ID, type='password', minlength=8, maxlength=32,
+                             placeholder="Enter new password")
+    feedback = dbc.FormFeedback("Must be 8-32 characters long, with at least 1 digit and 1 uppercase letter",
+                                type='invalid')
+    form_rows.append(dbc.Row([dbc.Label("New password", width=2), dbc.Col([entry_widget, feedback], width=6)],
+                             class_name='mb-2'))
+    entry_widget = dbc.Input(id=_CONFIRM_PWD_ID, type='password', minlength=8, maxlength=32,
+                             placeholder="Reenter new password")
+    feedback = dbc.FormFeedback("Password entries do not match", type='invalid')
+    form_rows.append(dbc.Row([dbc.Label("", width=2), dbc.Col([entry_widget, feedback], width=6)], class_name='mb-2'))
 
     # alert raised when a password change fails - displays a brief error message. Otherwise hidden.
     form_rows.append(dbc.Row(
@@ -123,16 +129,41 @@ def serve_layout() -> html.Div:
 
 
 @callback(
+    [Output(_FULL_NAME_ID, 'valid'), Output(_FULL_NAME_ID, 'invalid'), Output(_EMAIL_ID, 'valid'),
+     Output(_EMAIL_ID, 'invalid')],
+    [Input(_FULL_NAME_ID, 'value'), Input(_EMAIL_ID, 'value')]
+)
+def profile_entry_feedback(*args):
+    out = [no_update] * 4
+    ctx = callback_context
+    if (ctx.triggered is None) or len(ctx.triggered) == 0:
+        return tuple(out)
+    # normally, only one field changes at a time -- but all get set on page layout or refresh; and some browsers will
+    # could auto-fill multiple fields (like name and email address) in one go
+    for trigger in ctx.triggered:
+        trigger_id = trigger['prop_id'].split('.')[0]
+        if trigger_id == _FULL_NAME_ID:  # a required field -- cannot be empty
+            is_valid = validate_fullname(args[0]) is None
+            out[0:2] = is_valid, not is_valid
+        elif trigger_id == _EMAIL_ID:  # also required -- cannot be empty
+            is_valid = validate_email_address(args[1]) is None
+            out[2:4] = is_valid, not is_valid
+    return tuple(out)
+
+
+@callback(
     [Output(_PROFILE_ALERT_ID, 'children'), Output(_PROFILE_ALERT_ID, 'color'),
-     Output(_PROFILE_ALERT_ID, 'is_open')],
+     Output(_PROFILE_ALERT_ID, 'is_open'), Output(_FULL_NAME_ID, 'value'), Output(_EMAIL_ID, 'value'),
+     Output(_TITLE_ID, 'value'), Output(_ORG_ID, 'value')],
     [Input(_SAVE_PROFILE_BTN, 'n_clicks')],
     [State(_FULL_NAME_ID, 'value'), State(_EMAIL_ID, 'value'), State(_TITLE_ID, 'value'), State(_ORG_ID, 'value')]
 )
 def update_profile_callback(*args):
+    out = [no_update] * 7
     ctx = callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if (ctx.triggered is not None) else ""
     if trigger_id != _SAVE_PROFILE_BTN:
-        return no_update, no_update, no_update
+        return tuple(out)
 
     msg: Optional[str]
     portal_user = None
@@ -142,7 +173,46 @@ def update_profile_callback(*args):
         msg = "You must be logged in to update your profile."
     else:
         msg = update_portal_user_profile(portal_user.get_id(), args[1], args[2], args[3], args[4])
-    return ("Profile updated.", "success", True) if (msg is None) else (msg, "danger", True)
+    if msg is None:
+        out[0:3] = "Profile updated.", "success", True
+    else:
+        out[0:3] = msg, "danger", True
+        # restore profile attributes to current values if change was unsuccessful
+        if portal_user:
+            out[3:7] = portal_user.full_name(), portal_user.contact_email(), portal_user.title(), \
+                       portal_user.organization()
+    return tuple(out)
+
+
+@callback(
+    [Output(_NEW_PWD_ID, 'valid'), Output(_NEW_PWD_ID, 'invalid'), Output(_CONFIRM_PWD_ID, 'valid'),
+     Output(_CONFIRM_PWD_ID, 'invalid')],
+    [Input(_NEW_PWD_ID, 'value'), Input(_CONFIRM_PWD_ID, 'value')],
+    [State(_NEW_PWD_ID, 'value'), State(_CONFIRM_PWD_ID, 'value')]
+)
+def password_entry_feedback(*args):
+    out = [no_update] * 4
+    ctx = callback_context
+    if (ctx.triggered is None) or len(ctx.triggered) == 0:
+        return tuple(out)
+    # normally, only one field changes at a time -- but all get set on page layout or refresh, or if password change
+    # failed for whatever reason
+    for trigger in ctx.triggered:
+        trigger_id = trigger['prop_id'].split('.')[0]
+        if trigger_id == _NEW_PWD_ID:
+            is_set, is_valid = (args[0] is not None) and (len(args[0]) > 0), validate_password(args[0]) is None
+            out[0:2] = is_set and is_valid, is_set and not is_valid
+            # confirm password entry is ignored if current password is invalid
+            c_set = is_valid and (args[3] is not None) and (len(args[3]) > 0)
+            c_valid = is_valid and (args[0] == args[3])
+            out[2:4] = c_set and c_valid, c_set and not c_valid
+        elif trigger_id == _CONFIRM_PWD_ID:
+            # confirm password entry is ignored if current password is invalid
+            is_valid = validate_password(args[2]) is None
+            c_set = is_valid and (args[1] is not None) and (len(args[1]) > 0)
+            c_valid = is_valid and (args[1] == args[2])
+            out[2:4] = c_set and c_valid, c_set and not c_valid
+    return tuple(out)
 
 
 @callback(
