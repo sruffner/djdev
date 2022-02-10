@@ -1,5 +1,6 @@
 stages:
   - build
+  - tag
   - scan
 
 include:
@@ -13,8 +14,6 @@ build_backend:
   before_script:
     - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/backend"
     - echo "$CI_PROJECT_DIR"
-  after_script:
-    - docker tag ${THE_IMAGE} ${THE_IMAGE}-${CI_COMMIT_SHORT_SHA}
   extends: .kaniko_build
   only:
     - devel
@@ -26,8 +25,6 @@ build_mariadb:
   before_script:
     - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/mariadb"
     - echo "$CI_PROJECT_DIR"
-  after_script:
-    - docker tag ${THE_IMAGE} ${THE_IMAGE}-${CI_COMMIT_SHORT_SHA}
   extends: .kaniko_build
   only:
     - devel
@@ -39,9 +36,34 @@ build_redis:
   before_script:
     - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/redis"
     - echo "$CI_PROJECT_DIR"
-  after_script:
-    - docker tag ${THE_IMAGE} ${THE_IMAGE}-${CI_COMMIT_SHORT_SHA}
   extends: .kaniko_build
+  only:
+    - devel
+
+tag_backend:
+  stage: tag
+  variables:
+    FROM_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME
+    TO_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
+  extends: .docker_tag
+  only:
+    - devel
+
+tag_mariadb:
+  stage: tag
+  variables:
+    FROM_IMAGE: ${CI_REGISTRY_IMAGE}/mariadb:$CI_COMMIT_REF_NAME
+    TO_IMAGE: ${CI_REGISTRY_IMAGE}/mariadb:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
+  extends: .docker_tag
+  only:
+    - devel
+
+tag_redis:
+  stage: tag
+  variables:
+    FROM_IMAGE: ${CI_REGISTRY_IMAGE}/redis:$CI_COMMIT_REF_NAME
+    TO_IMAGE: ${CI_REGISTRY_IMAGE}/redis:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
+  extends: .docker_tag
   only:
     - devel
 
