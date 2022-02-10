@@ -10,22 +10,18 @@ include:
 build_backend:
   stage: build
   variables:
-    THE_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME
-    ALT_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
+    THE_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
   before_script:
     - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/backend"
     - echo "$CI_PROJECT_DIR"
   extends: .kaniko_build
-  after_script:
-    - echo "Trying to build again to $CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA"
-    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $THE_DOCKERFILE --destination $ALT_IMAGE $BUILD_ARGS
   only:
     - devel
 
 build_mariadb:
   stage: build
   variables:
-    THE_IMAGE: ${CI_REGISTRY_IMAGE}/mariadb:$CI_COMMIT_REF_NAME
+    THE_IMAGE: ${CI_REGISTRY_IMAGE}/mariadb:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
   before_script:
     - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/mariadb"
     - echo "$CI_PROJECT_DIR"
@@ -36,7 +32,7 @@ build_mariadb:
 build_redis:
   stage: build
   variables:
-    THE_IMAGE: ${CI_REGISTRY_IMAGE}/redis:$CI_COMMIT_REF_NAME
+    THE_IMAGE: ${CI_REGISTRY_IMAGE}/redis:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
   before_script:
     - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/redis"
     - echo "$CI_PROJECT_DIR"
@@ -47,7 +43,7 @@ build_redis:
 scan_backend:
   stage: scan
   variables:
-    THE_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME
+    THE_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
   extends: .docker_scan
   only:
     - devel
@@ -55,7 +51,7 @@ scan_backend:
 scan_mariadb:
   stage: scan
   variables:
-    THE_IMAGE: ${CI_REGISTRY_IMAGE}/mariadb:$CI_COMMIT_REF_NAME
+    THE_IMAGE: ${CI_REGISTRY_IMAGE}/mariadb:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
   extends: .docker_scan
   only:
     - devel
@@ -63,7 +59,7 @@ scan_mariadb:
 scan_redis:
   stage: scan
   variables:
-    THE_IMAGE: ${CI_REGISTRY_IMAGE}/redis:$CI_COMMIT_REF_NAME
+    THE_IMAGE: ${CI_REGISTRY_IMAGE}/redis:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
   extends: .docker_scan
   only:
     - devel
