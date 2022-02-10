@@ -13,6 +13,8 @@ build_backend:
   before_script:
     - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/backend"
     - echo "$CI_PROJECT_DIR"
+  after_script:
+    - docker tag ${THE_IMAGE} ${THE_IMAGE}-${CI_COMMIT_SHORT_SHA}
   extends: .kaniko_build
   only:
     - devel
@@ -24,6 +26,8 @@ build_mariadb:
   before_script:
     - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/mariadb"
     - echo "$CI_PROJECT_DIR"
+  after_script:
+    - docker tag ${THE_IMAGE} ${THE_IMAGE}-${CI_COMMIT_SHORT_SHA}
   extends: .kaniko_build
   only:
     - devel
@@ -35,6 +39,8 @@ build_redis:
   before_script:
     - export CI_PROJECT_DIR="${CI_PROJECT_DIR}/redis"
     - echo "$CI_PROJECT_DIR"
+  after_script:
+    - docker tag ${THE_IMAGE} ${THE_IMAGE}-${CI_COMMIT_SHORT_SHA}
   extends: .kaniko_build
   only:
     - devel
