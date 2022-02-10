@@ -5,7 +5,7 @@ stages:
 
 include:
   - project: 'utility/project-templates/ci-templates'
-    file: '/docker2.yml'
+    file: '/docker.yml'
 
 build_backend:
   stage: build
