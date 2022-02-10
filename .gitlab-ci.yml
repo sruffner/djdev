@@ -17,7 +17,7 @@ build_backend:
     - echo "$CI_PROJECT_DIR"
   extends: .kaniko_build
   after_script:
-    - echo "Trying to build again to $CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
+    - echo "Trying to build again to $CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA"
     - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $THE_DOCKERFILE --destination $ALT_IMAGE $BUILD_ARGS
   only:
     - devel
