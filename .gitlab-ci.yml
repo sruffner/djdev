@@ -42,28 +42,46 @@ build_redis:
 
 tag_backend:
   stage: tag
+  tags:
+    - docker-executor
   variables:
     FROM_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME
     TO_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
-  extends: .docker_tag
+  script:
+    - echo "Tagging $FROM_IMAGE as $TO_IMAGE"
+    - docker pull $FROM_IMAGE
+    - docker tag ${FROM_IMAGE} ${TO_IMAGE}
+    - docker push $TO_IMAGE
   only:
     - devel
 
 tag_mariadb:
   stage: tag
+  tags:
+    - docker-executor
   variables:
     FROM_IMAGE: ${CI_REGISTRY_IMAGE}/mariadb:$CI_COMMIT_REF_NAME
     TO_IMAGE: ${CI_REGISTRY_IMAGE}/mariadb:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
-  extends: .docker_tag
+  script:
+    - echo "Tagging $FROM_IMAGE as $TO_IMAGE"
+    - docker pull $FROM_IMAGE
+    - docker tag ${FROM_IMAGE} ${TO_IMAGE}
+    - docker push $TO_IMAGE
   only:
     - devel
 
 tag_redis:
   stage: tag
+  tags:
+    - docker-executor
   variables:
     FROM_IMAGE: ${CI_REGISTRY_IMAGE}/redis:$CI_COMMIT_REF_NAME
     TO_IMAGE: ${CI_REGISTRY_IMAGE}/redis:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
-  extends: .docker_tag
+  script:
+    - echo "Tagging $FROM_IMAGE as $TO_IMAGE"
+    - docker pull $FROM_IMAGE
+    - docker tag ${FROM_IMAGE} ${TO_IMAGE}
+    - docker push $TO_IMAGE
   only:
     - devel
 
