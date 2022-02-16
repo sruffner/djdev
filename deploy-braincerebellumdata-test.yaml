@@ -2,23 +2,30 @@
 # braincerebellumdata-test namespace. This namespace is used solely to test and evaluate the application whenever the
 # implementation changes in any way (bug fixes, new features, etc).
 #
-# The application is deployed in a single pod with independent containers for the MariaDB database and the Dash-based
-# portal backend running on a GUnicorn WSGI server. Three additional containers in the pod provide a Redis server and
-# two Redis Queue workers (that listen to the default queue). The portal backend uses Redis to store information on
-# in-progress session commit jobs (so that the backend itself remains stateless), and the RQ workers handle two types of
-# background tasks in the workflow for a commit job -- preprocessing of an experiment session archive after upload, and
-# pushing session data into the database after the user has reviewed/edited the results from preprocessing.
-#
-# Since all of the containers are running in a single pod, then the host is really "localhost" or "127.0.0.1". So
-# REDIS_HOST=127.0.0.1 (and the same for MARIADB_HOSTNAME!), and the command that starts the RQ worker is "rq worker
-# --url redis://127.0.0.0:6379".
+# The application now consists of 3 interdependent deployments:
+#   1) data-store: A single-pod deployment with the application's two persistence mechanisms: the MariaDB server and its
+#      underlying database files; and a Redis instance for Redis worker queueing and temporary storage of information
+#      during a long-running experiment commit workflow.
+#   2) web-server: A 2-replica deployment of the GUnicorn-based Python/Flask/Dash web backend.
+#   3) web-worker: A 2-replica deployment of the Redis Queue workers that handle background tasks for the experiment
+#      session commit workflow.
+# The web-server backend replicas use Redis to store information on in-progress session commit jobs (so that the backend
+# itself remains stateless), and the RQ workers handle two types of background tasks in the workflow for a commit job --
+# preprocessing of an experiment session archive after upload, and pushing session data into the database after the user
+# has reviewed/edited the results from preprocessing.
 #
 # NOTES --
 #  1) The PVCs listed were created on the Duke OCP console. The PVs are dynamically provisioned.
-#  2) The Route resource named 'inbound-route' provides TLS edge termination to the Service sgl-portal-svc, a ClusterIP
+#  2) The Route resource named 'inbound-route' provides TLS edge termination to the Service portal-server, a ClusterIP
 #     type service that routes to the GUnicorn-served Dash/Flask backend listening on the node's 8050 port. With this
 #     configuration, you access the portal at https://braincerebellumdata-test.ocp.dhe.duke.edu -- BUT you must be on
 #     the Duke VPN. We'll want to configure this differently for production.
+#  3) Take note of the image names for the backend, mariadb, and redis containers. These images are built in Gitlab
+#     whenever we push changes to the 'devel' branch. The image tags end in 'devel-<sha>', where <sha> is a shortened
+#     version of the commit SHA for that image. This is important. Previously, there was just the 'devel' tag, which
+#     was overwritten each time a commit to the devel branch was pushed. If a pod failed or was kicked out on the
+#     cluster, OpenShift pulled from Gitlab when recreating the pod. This meant loss of control of what is running on
+#     the cluster.
 #
 ---
 apiVersion: route.openshift.io/v1
@@ -101,7 +108,7 @@ spec:
       - name: sgl-portal-pull-secret
       containers:
       - name: sgl-db
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel-51301422
         imagePullPolicy: Always
         volumeMounts:
           - name: db-data
@@ -125,7 +132,7 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 5
       - name: sgl-redis
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel-51301422
         imagePullPolicy: Always
         ports:
           - containerPort: 6379
@@ -176,7 +183,7 @@ spec:
             value: "6379"
       containers:
       - name: sgl-worker
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-51301422
         imagePullPolicy: Always
         command: ["rq"]
         args: ["worker", "--url", "redis://$(REDIS_HOST):$(REDIS_PORT)"]
@@ -253,7 +260,7 @@ spec:
             value: data-store.braincerebellumdata-test.svc.cluster.local
       containers:
       - name: sgl-server
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-51301422
         imagePullPolicy: Always
         ports:
           - containerPort: 8050

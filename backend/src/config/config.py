@@ -58,6 +58,12 @@ def get_config() -> AppConfig:
 
         get_config.config = AppConfig(repo_root=repo_root, dash_upload_dir=upload_dir, dj_database_host=db_host,
                                       dj_database_password=db_password, flask_secret_key=secret_key, redis_conn=conn)
+        if ('AWS_ACCESS_KEY_ID' in os.environ) and ('AWS_ACCESS_KEY_SECRET' in os.environ):
+            get_config.config.aws_access_key_id = os.environ['AWS_ACCESS_KEY_ID']
+            get_config.config.aws_access_key_secret = os.environ['AWS_ACCESS_KEY_SECRET']
+        if 'REPO_S3_BUCKET_NAME' in os.environ:
+            get_config.config.repo_bucket = os.environ['REPO_S3_BUCKET_NAME']
+
     return get_config.config
 
 
@@ -95,6 +101,13 @@ class AppConfig:
     """ Enable/disable python native blobs in DataJoint. """
     flask_permanent_session_lifetime: timedelta = timedelta(hours=24)
     """ Flask session lifetime. Flask-Login uses this to timeout client login sessions. """
+
+    aws_access_key_id: Optional[str] = None
+    """ Amazon Web Services (AWS) access key ID for IAM user with access privileges to S3."""
+    aws_access_key_secret: Optional[str] = None
+    """ AWS secret access key for IAM user with access privileges to S3. """
+    repo_bucket: Optional[str] = None
+    """ Name of S3 bucket in which portal backing repository is maintained. """
 
     def init_database_connection(self) -> bool:
         """
