@@ -174,7 +174,7 @@ def single_trial_response_figure(session: Dict[str, Any], trial_idx: int, unit_i
         margin=dict(l=20, r=20, t=60, b=20),
         height=800,
         xaxis=dict(domain=[0, 0.95], title='time (milliseconds)' if (unit_id is None) else None),
-        xaxis2=None if (unit_id is None) else dict(title='time (milliseconds)'),
+        xaxis2=None if (unit_id is None) else dict(domain=[0, 0.95], title='time (milliseconds)'),
         yaxis=dict(title='position (degrees)'),
         yaxis2=dict(title='velocity (degrees/second)', anchor="x", overlaying="y", side="right"),
         yaxis3=None if (unit_id is None) else dict(title='firing rate (Hz)'),

@@ -267,6 +267,146 @@ def data_for_trial(trial_key: Dict[str, AttributeValue], unit_ids: Optional[List
         return None
 
 
+def retrieve_trial_block(
+        session_key: Dict[str, AttributeValue], start: int, end: int = -1, unit_ids: List[int] = None,
+        completed_only: bool = False, remove_saccades: bool = False, include_fixtgts: bool = False
+) -> Optional[List[TrialData]]:
+    """
+    Retrieve data for a specified block of trials recorded during the specified experiment session. NOTE that this
+    method could take a significant amount of time depending on the number of trials that must be retrieved from the
+    database.
+
+    Args:
+        session_key: At a minimum, this dictionary must contain the primary keys that uniquely identify one experiment
+            session in the database.
+        start: Index of first trial in block. Must lie in [1..N], where N is the number of trials in the session.
+        end: Index of last trial in block, where -1 extends block to the last trial. Default = -1.
+        unit_ids: Use this argument to request the responses of one or more neural units (identified by their
+            integer unit ID). Any invalid unit IDs are ignored. If None or [], no neuronal responses are retrieved.
+            Default = None.
+        completed_only: If True, skip any trials that did not run to completion. Default = False.
+        remove_saccades: If True, eye velocity traces are adjusted for baseline offset and any detecte saccade epochs
+            in the traces are replaced with NaNs. Otherwise, the eye velocity traces are as recorded. Default = False.
+        include_fixtgts: If True, compute position trajectories of fixation targets and include with retrieved trial
+            response data.
+    Returns:
+        A list of trial data containers. The list could be empty if completed_only=True and there were no completed
+            trials in the specified block. Returns None if an error occurs while retrieving the trial data.
+    Raises:
+        ValueError: If the session was not found or the trial block range is invalid.
+    """
+    try:
+        session_info = fetch_one_row(DBTable.SESSION, session_key)
+        if session_info is None:
+            raise ValueError("Session not found, or internal database error")
+        if (start < 1) or (start > end) or (start > session_info['num_trials']):
+            raise ValueError(f"Invalid trial block range {start} - {end}")
+        if (end <= 0) or (end > session_info['num_trials']):
+            end = session_info['num_trials']
+        trial_restrictions = [
+            f'experimenter = "{session_key["experimenter"]}"',
+            f'subj_id = "{session_key["subj_id"]}"',
+            f'session_date = "{str(session_key["session_date"])}"',
+            f'session_sfx = {session_key["session_sfx"]}',
+            f'trial_idx >= {start}', f'trial_idx <= {end}'
+        ]
+        if completed_only:
+            trial_restrictions.append(f'trial_success = True')
+
+        relevant_trials = fetch_restrict_proj([DBTable.TRIAL], [trial_restrictions], [])
+        if relevant_trials is None:
+            return None
+        relevant_trials.sort(key=lambda k: k['trial_idx'], reverse=True)
+        behavioral_responses = \
+            fetch_restrict_proj([DBTable.TRIAL_BEHAVIORAL, DBTable.TRIAL], [None, trial_restrictions], [])
+        if behavioral_responses is None:
+            return None
+        behavioral_responses.sort(key=lambda k: k['trial_idx'], reverse=True)
+        units: Dict[int, List[Dict[str, AttributeValue]]] = dict()
+        if isinstance(unit_ids, list) and (len(unit_ids) > 0):
+            neuron_pk = {k: session_key[k] for k in primary_key_of(DBTable.SESSION)}
+            for unit_id in unit_ids:
+                neuron_pk['unit_id'] = unit_id
+                res = fetch_restrict_proj([DBTable.TRIAL_NEURONAL, DBTable.TRIAL], [neuron_pk, trial_restrictions], [])
+                if res is None:
+                    return None
+                res.sort(key=lambda k: k['trial_idx'], reverse=True)
+                units[unit_id] = res
+
+        protocols: Dict[str, maestro.Protocol] = dict()
+        trial_data: List[TrialData] = list()
+        while len(relevant_trials) > 0:
+            trial_info = relevant_trials.pop()
+            if not (trial_info['proto_hash'] in protocols):
+                proto = fetch_one_row(DBTable.TRIAL_PROTOCOL, dict(proto_hash=trial_info['proto_hash']))
+                if proto is None:
+                    return None
+                protocols[trial_info['proto_hash']] = pickle.loads(proto['proto_def'])
+
+            neuronal_field: Dict[int, Optional[np.ndarray]] = dict()
+            for unit_id in unit_ids:
+                u = units[unit_id]
+                # IMPORTANT: A given unit may not have been recorded during a given trial.
+                if (len(u) > 0) and u[-1]['trial_idx'] == trial_info['trial_idx']:
+                    neuronal_response = u.pop()
+                    neuronal_field[unit_id] = neuronal_response['spike_times']
+                else:
+                    neuronal_field[unit_id] = None
+
+            behavioral_field: Dict[str, np.ndarray] = dict()
+            while (len(behavioral_responses) > 0) and \
+                    (behavioral_responses[-1]['trial_idx'] == trial_info['trial_idx']):
+                response = behavioral_responses.pop()
+                behavioral_field[response['response_id']] = response['response_trace']
+
+            trial_rvs = pickle.loads(trial_info['trial_rvs'])
+            fix1, fix2 = None, None
+            if include_fixtgts:
+                fix1, fix2 = protocols[trial_info['proto_hash']].compute_fixation_target_trajectories(
+                    trial_rvs=trial_rvs,
+                    hgpos=behavioral_field['HEPOS'] if 'HEPOS' in behavioral_field else None,
+                    vepos=behavioral_field['VEPOS'] if 'VEPOS' in behavioral_field else None,
+                    vstab_win_len=trial_info['vstab_win_len']
+                )
+
+            td = TrialData(
+                experimenter=trial_info['experimenter'],
+                subj_id=trial_info['subj_id'],
+                session_date=trial_info['session_date'],
+                session_sfx=trial_info['session_sfx'],
+                trial_idx=trial_info['trial_idx'],
+                protocol=protocols[trial_info['proto_hash']],
+                filename=trial_info['trial_filename'],
+                duration_ms=trial_info['trial_dur'],
+                record_start_ms=trial_info['trial_record_start'],
+                success=trial_info['trial_success'],
+                rewarded=trial_info['trial_rewarded'],
+                reward1_ms=trial_info['trial_rew1'],
+                reward2_ms=trial_info['trial_rew2'],
+                vstab_win_len_ms=trial_info['vstab_win_len'],
+                timestamp_sec=trial_info['trial_ts'],
+                trial_rvs=trial_rvs,
+                behavior=behavioral_field,
+                neuronal=neuronal_field,
+                fix1_pos=fix1,
+                fix2_pos=fix2
+            )
+            if remove_saccades:
+                hv, vv = td.eye_velocity_saccades_removed()
+                if 'HEVEL' in td.behavior:
+                    td.behavior['HEVEL'] = hv
+                if 'VEVEL' in td.behavior:
+                    td.behavior['VEVEL'] = vv
+            trial_data.append(td)
+
+        return trial_data
+    except KeyError:
+        raise ValueError("Incomplete session key")
+    except Exception as e:
+        logger.error(str(e), exc_info=True)
+        return None
+
+
 def retrieve_trial_reps_for_neuron(neuron_key: Dict[str, AttributeValue], proto_hash: str,
                                    complete_reps: bool = True) -> Optional[List[TrialData]]:
     """
@@ -463,8 +603,26 @@ class TrialData:
     """ List of random variable values, in same order in which random variables are defined in trial protocol. """
     behavior: Dict[str, np.ndarray]
     """ Behavioral responses (in deg or deg/sec) for recorded duration of trial, keyed by channel ID. 1KHz rate. """
-    neuronal: Dict[int, np.ndarray]
-    """ Neural unit spike trains during trial - spike times in seconds since trial start. Keyed by unit ID. """
+    neuronal: Dict[int, Optional[np.ndarray]]
+    """ 
+    Neural unit spike trains during trial - spike times in seconds since trial start. Keyed by unit ID. If a unit
+    was recorded during trial but no spikes occurred, the spike train is an empty array. However, if the unit was not
+    recorded during the trial, the spike train is None.
+    """
+    fix1_pos: Optional[np.ndarray] = None
+    """ 
+    An Tx2 Numpy float array holding the computed position trajectory (H,V) of fixation target #1 over the recorded
+    duration T of trial, in degrees and sampled at same rate as behavioral traces. During any epoch in which there is
+    no defined fixation target #1, the samples are NaN. If None, either the trajectory has not been computed or the
+    trial protocol did not define a fixation target #1. 
+    """
+    fix2_pos: Optional[np.ndarray] = None
+    """ 
+    An Tx2 Numpy float array holding the computed position trajectory (H,V) of fixation target #2 over the recorded
+    duration T of trial, in degrees and sampled at same rate as behavioral traces. During any epoch in which there is
+    no defined fixation target #2, the samples are NaN. If None, either the trajectory has not been computed or the
+    trial protocol did not define a fixation target #2. 
+    """
 
     def instantaneous_firing_rate(self, unit_id: int, smooth: bool = False) -> np.ndarray:
         """

@@ -19,7 +19,7 @@ from database.user_ops import get_portal_user_record, ADMIN_ACCESS, COMMIT_ACCES
 setup_logging(cfg_file='config/logging.yaml')
 
 cfg: AppConfig = get_config()
-app = Dash(__name__, external_stylesheets=[dbc.themes.SPACELAB])
+app = Dash(__name__, external_stylesheets=[dbc.themes.SPACELAB, dbc.icons.BOOTSTRAP])
 server = app.server
 
 # Dash adds a stream handler to the 'app' logger. We don't want this.

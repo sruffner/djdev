@@ -41,6 +41,7 @@ from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_attribute_
     fetch_any_proj
 from database.trial_data_ops import trial_protocols_for_session, trial_protocols_for_neuron, trials_for_session, \
     trials_for_neuron, get_trial_protocol_definition, retrieve_trial_reps_for_neuron
+from pages.download_modal import render_download_modal_and_button
 from utils.common import check_date
 
 logger = logging.getLogger(__name__)
@@ -811,21 +812,26 @@ def _trial_data_tabpane(session: Dict[str, Any]) -> html.Div:
         *Aggregate response data is available only for those trial protocols for which 3 or more **successfully 
         completed** trial reps were recorded. In addition, the trial protocol can have no random variables, or a 
         single random-duration segment (highlighted in red in the figures for "Mean firing rate" and "Discharge 
-        statistics").*'''
+        statistics").*  \n  \nClick the "Download" button if you wish to download response data for this session 
+        (you must be logged into the portal with download access).'''
     )
     help_popover = dbc.Popover(
         [dbc.PopoverBody(markdown)],
-        id=_TD_HELP_POPOVER_ID, target=_TD_HELP_BADGE_ID, trigger='hover', placement='left-start')
+        id=_TD_HELP_POPOVER_ID, target=_TD_HELP_BADGE_ID, trigger='hover', placement='top-end')
+
+    # the modal component for requesting downloads and the invoking button are handled in a sub-module
+    download_modal, download_btn = render_download_modal_and_button(session)
 
     nav_row = dbc.Row([
         dbc.Col(dbc.Row([
+            dbc.Col([help_badge, help_popover], width='auto', class_name='me-4'),
             dbc.Col(unit_grp, width='auto', class_name='me-1'),
             dbc.Col([view_unit_btn, unit_stats_modal], width='auto', class_name='me-5'),
             dbc.Col(proto_grp, width='auto', class_name='me-1'),
             dbc.Col([view_proto_btn, proto_modal], width='auto', class_name='me-5'),
             dbc.Col(disp_grp, width='auto')
         ], class_name='g-0'), width=10),
-        dbc.Col([help_badge, help_popover], width=1)
+        dbc.Col([download_btn, download_modal], width='auto')
     ], align='center', justify='between', class_name='mb-2')
 
     loading_figure = dcc.Loading(id=_DISP_VIEW_LOADING_ID, children=figure_view, type='circle')

@@ -31,4 +31,4 @@ def setup_logging(cfg_file_env: str = 'LOG_CFG', cfg_file: str = 'logging.yaml',
             config = yaml.safe_load(f.read())
         logging.config.dictConfig(config)
     else:
-        logging.basicConfig(level=level)
+        logging.basicConfig(format="[%(asctime)s] %(name)s: %(levelname)s - %(message)s", level=level)
