@@ -58,3 +58,4 @@ PyYAML==5.4.1
 redis==3.5.3
 rq==1.10.0
 fasteners==0.16.3
+boto3==1.21.0
