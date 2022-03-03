@@ -1,8 +1,6 @@
 """
 download_ops.py: Operations involved in downloading experimental data from the Lisberger lab portal database.
 
-TODO: UNDER DEVELOPMENT
-
 Authenticated users with download access can submit requests to download trial-aligned behavioral and neuronal
 response data recorded during a particular experiment session. Preparing a file with the requested data can take a
 significant amount of time and must be offloaded to a background process so that the portal backend remains responsive
@@ -17,15 +15,21 @@ stateful workflow. The workflow has the following stages:
       from the portal database and written to the data file IAW the download request. This happens in a background
       process, not in the Dash/Flask backend. The file is stored in a temporary location in the portal's backup
       repository.
-    - On a separate page on the frontend, the logged-in user can see any pending or completed download requests. The
-      user initiates the actual download from this page. Download requests may fail for whatever reason. They also
+    - Back on the frontend, the logged-in user can monitor the progress of the pending download. Once the data file is
+      ready, the user can initiate the actural download. Download requests may fail for whatever reason. They also
       expire after a set period of time; upon expiration, the data file is removed permanently from the backup
       repository, and the request is marked as "expired".
 
-To safeguard data provenance, it is important to maintain a record of all data download requests. For this reason,
-each request is logged to a dedicated table in the portal's MySQL/MariaDB database. However, while the file is being
-generated on a background worker process, progress messages are cached on the Redis server under the following keys.
-    - DOWNLOAD_NS:<req_id> : Redis ZSET of progress messages for download request <req_id>, scored by timestamp.
+To safeguard data provenance, it is important to maintain a record of all *FULFILLED* data download requests. For this
+reason, each completed download is logged to a dedicated table in the portal's MySQL/MariaDB database -- recording info
+on what was downloaded and by whom. However, while the download request is being prepared in the background and before
+the client receives the download URL, information about the download request is cached on the Redis server under the
+following keys.
+    - DOWNLOAD_KEY : Redis LIST of all currently pending donwload requests. Each element is a string "<usr>-<req_id>",
+      where <usr> is the portal username of the request originator, while <req_id> is the download request ID,
+      a 32-char hex string.
+    - DOWNLOAD_INFO_NS:<req_id> : A STRING key holding a description of the request <req_id>.
+    - DOWNLOAD_STATUS_NS:<req_id> : A STRING key holding status information for the request <req_id>.
 
 The Redis server does double-duty, since we use Redis Queue (RQ) workers to handle the work of preparing the data file
 and storing it in the backup repository.
@@ -38,7 +42,6 @@ protected by a mechanism that verifies the specified user is logged in with the 
 """
 import logging
 import pickle
-import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -298,7 +301,6 @@ def fulfill_pending_download_request(req_id: str) -> bool:
         idx_start = 1
         n_trials = session_info['num_trials']
         trial_data: List[TrialData] = list()
-        t_start = time.time()   # TODO: DEBUG
         while idx_start < n_trials:
             idx_end = int(min(n_trials - idx_start + 1, 50)) + idx_start - 1
             block = retrieve_trial_block(
@@ -312,8 +314,6 @@ def fulfill_pending_download_request(req_id: str) -> bool:
             if _request_status_update(req_id, f"Retrieved response data for {idx_start-1} of {n_trials} trials",
                                       int(50 * (idx_start - 1) / n_trials)):
                 return False
-        print(f"DEBUG: Retrieved trial data from database in {time.time()-t_start} seconds.",
-              file=sys.stderr, flush=True)   # TODO: DEBUG
 
         # make sure the downloads/ folder exists in the repository root
         downloads_dir = get_data_downloads_directory()
@@ -324,9 +324,7 @@ def fulfill_pending_download_request(req_id: str) -> bool:
         file_path = get_data_download_file_path(req_info)
         if _request_status_update(req_id, f"Writing trial data to {file_path.name}. This will take a while...", 55):
             return False
-        t_start = time.time()
         _save_trial_data_to_file(file_path, trial_data)
-        print(f"DEBUG: Wrote data file in {time.time() - t_start} seconds.", file=sys.stderr, flush=True)  # TODO: DEBUG
 
         if _request_status_update(req_id, f"Pushing {file_path.name} to temporary storage", 90):
             return False
