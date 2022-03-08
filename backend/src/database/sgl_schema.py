@@ -395,3 +395,28 @@ class Trial(dj.Imported):
         if not self._trial_producer:
             raise Exception("Missing trial producer delegate")
         self._trial_producer.insert_trials_for_session(key)
+
+
+@schema
+class DataDownload(dj.Manual):
+    """
+    Any registered portal user may download behavioral and neuronal response data from a specified experiment session.
+    Per-trial eye position and velocity traces, fixation target position trajectories, and neural unit spike trains are
+    included in the generated data file, along with metadata to assist in aggregation and analysis. Responses from up to
+    5 different neural units may be included in a single download.
+
+    In order to protect the data's provenance, every download is recorded in the portal database using this manual
+    table.
+    """
+    definition = """
+    # Record of data download requests fulfilled through the lab portal
+    request_id : char(32)    # the hex-digit UUID assigned to the original download request
+    ---
+    -> User.proj(requester='username')  # The portal user that requested the download
+    -> Session                              # The experiment session from which data was extracted
+    complete_reps : bool                    # If True, only data from completed trials is included in download
+    remove_sacc : bool                      # If True, saccade epochs in eye velocity traces replaced with NaNs
+    out_format: enum('npz', 'mat')          # Format of the downloaded data file.
+    selected_units: varchar(30)             # whitespace-separated list of unit IDs included in download
+    downloaded: timestamp                   # approximate date-time of download request
+    """

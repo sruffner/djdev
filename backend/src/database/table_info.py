@@ -178,6 +178,7 @@ class DBTable(DocEnum):
     TRIAL_EVENT = 15, "Part table: Marker events recorded in a trial"
     TRIAL_BEHAVIORAL = 16, "Part table: Behavioral responses recorded in a trial"
     TRIAL_NEURONAL = 17, "Part table: Neural unit responses recorded in a trial"
+    DATA_DOWNLOAD = 18, "Tabular record of all data downloads from the lab portal"
 
     def is_mapping_table(self) -> bool:
         """ Return True for a cross-reference table. """
@@ -197,7 +198,7 @@ class DBTable(DocEnum):
 
     def allow_delete(self) -> bool:
         """ Return True if user-initiated deletions from table are permitted. User-initiated deletions are not
-        permitted for the Session, Trial, and TrialProtocol tables (and their part tables). """
+        permitted for the Session, Trial, and TrialProtocol tables (and their part tables), nor for DataDownload. """
         return self.value < DBTable.SESSION.value
 
 
@@ -563,5 +564,21 @@ _table_info: Dict[DBTable, _TableInfo] = {
         attributes={
             'unit_id': AttrInfo(AttrTypeEnum.FKEY, 'Unit #', True, DBTable.SESSION_NEURON, 'unit_id'),
             'spike_times': AttrInfo(AttrTypeEnum.BLOB, 'Spike Train', False)
+        }),
+
+    DBTable.DATA_DOWNLOAD: _TableInfo(
+        'Portal data download records', 'download', None, False, False,
+        attributes={
+            'request_id': AttrInfo(AttrTypeEnum.TEXT, 'Request ID', True, None, None, None, '0px', [32, 32]),
+            'requester': AttrInfo(AttrTypeEnum.FKEY, 'Requester', False, DBTable.USER, 'username'),
+            'experimenter': AttrInfo(AttrTypeEnum.FKEY, 'Experimenter', False, DBTable.USER, 'username'),
+            'subj_id': AttrInfo(AttrTypeEnum.FKEY, 'Subject ID', False, DBTable.SUBJECT, 'subj_id'),
+            'session_date': AttrInfo(AttrTypeEnum.FKEY, 'Session Date', False, DBTable.SESSION, 'session_date'),
+            'session_sfx': AttrInfo(AttrTypeEnum.FKEY, 'Session Suffix', False, DBTable.SESSION, 'session_sfx'),
+            'complete_reps': AttrInfo(AttrTypeEnum.BOOL, 'Completed Trials Only', False),
+            'remove_sacc': AttrInfo(AttrTypeEnum.BOOL, 'Remove Saccades', False),
+            'out_format': AttrInfo(AttrTypeEnum.ENUM, 'Output Format', False, None, None, ["npz", "mat"]),
+            'selected_units': AttrInfo(AttrTypeEnum.TEXT, 'Selected Units', False, None, None, None, '0px', [0, 30]),
+            'downloaded': AttrInfo(AttrTypeEnum.TIME, 'Downloaded On', False)
         })
 }

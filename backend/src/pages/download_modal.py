@@ -10,8 +10,9 @@ experiment session on the /explore page.
 @author: sruffner
 @created: 23feb2022
 """
-import json
 import logging
+import json
+from datetime import datetime
 from typing import Optional, Dict, List, Tuple
 
 import flask_login
@@ -19,7 +20,8 @@ from dash import html, dcc, callback, Output, Input, callback_context, State, no
 import dash_bootstrap_components as dbc
 
 from database.download_ops import MAX_UNITS_PER_DOWNLOAD, DOWNLOAD_FORMATS, request_data_download, \
-    pending_download_request_status, DOWNLOAD_PREPPING, DOWNLOAD_READY, cancel_pending_download_request
+    pending_download_request_status, DOWNLOAD_PREPPING, DOWNLOAD_READY, cancel_pending_download_request, \
+    get_data_download_url
 from database.table_info import AttributeValue, primary_key_of, DBTable
 from database.table_ops import fetch_restrict_proj, fetch_rows
 
@@ -40,7 +42,7 @@ _DOWNLOAD_MODAL_CLOSE_ID: str = 'td_download_modal_close'
 """ ID of button that extinguishes the Bootstrap Modal component on which a dataset download is requested. """
 
 _DOWNLOAD_SESSION_KEY_DIV: str = 'down_session'
-""" ID of hidden DIV holding primary key (as JSON string) of the experiment session from which data is downloaded. """
+""" ID of hidden DIV holding primary key (as Pickle string) of the experiment session from which data is downloaded. """
 _DOWNLOAD_UNIT_DROP_ID: str = 'down_unit_dropdown'
 """ ID of Dash Dropdown component by which user selects up to 10 neural units to include in download. """
 _DOWNLOAD_OK_TRIALS_CHK: str = 'down_ok_trials_chk'
@@ -57,13 +59,13 @@ data file download once the file is ready. The button label indicates the action
 _ACTION_SUBMIT: str = 'Submit download request'
 """ Label on action button before a request is submitted. """
 _ACTION_CANCEL: str = 'Cancel'
-""" Label on action button while a download request is being fulfilled on server (or failed). """
+""" Label on action button while a download request is being processed on server. """
 _ACTION_RESET: str = 'Try again'
 """ Label on action button when a download request has failed (so user can view error message before resetting). """
 _ACTION_DOWNLOAD: str = 'Download data file'
 """ 
-Label on action button when a download request has been successfully fulfilled and the generated data file is
-awaiting download to the client.
+Label on action button once the file is ready for download. The button is configured with the download URL so that
+clicking it will trigger the download.
 """
 _DOWNLOAD_PROG_BAR: str = 'down_prog_bar'
 """ ID of Bootstrap Progress component to display progress of a pending download request after submission. """
@@ -165,7 +167,9 @@ def render_download_modal_and_button(session: Dict[str, AttributeValue]) -> Tupl
     ], id=_DOWNLOAD_PROG_DIV, className='mt-2', style=dict(display='none'))
 
     action_row = dbc.Row([
-        dbc.Col(dbc.Button(_ACTION_SUBMIT, id=_DOWNLOAD_ACTION, n_clicks=0, size='sm'), width='auto'),
+        dbc.Col([
+            dbc.Button(_ACTION_SUBMIT, id=_DOWNLOAD_ACTION, n_clicks=0, size='sm', external_link=True, href=None)
+        ], width='auto'),
         dbc.Col(prog_div)
     ], align='center')
 
@@ -178,11 +182,11 @@ def render_download_modal_and_button(session: Dict[str, AttributeValue]) -> Tupl
                               disabled=not flask_login.current_user.is_authenticated)
     download_modal = dbc.Modal(
         [
-            dbc.ModalHeader(dbc.ModalTitle("Request dataset download")),
+            dbc.ModalHeader(dbc.ModalTitle("Request dataset download"), close_button=False),
             dbc.ModalBody(download_panel, id=_DOWNLOAD_MODAL_BODY_ID),
             dbc.ModalFooter(dbc.Row([dbc.Button("Close", id=_DOWNLOAD_MODAL_CLOSE_ID)]))
         ],
-        id=_DOWNLOAD_MODAL_ID, backdrop="static", size="xl", centered=True
+        id=_DOWNLOAD_MODAL_ID, backdrop="static", keyboard=False, size="xl", centered=True
     )
 
     return download_modal, download_btn
@@ -212,7 +216,8 @@ def restrict_num_units_in_download_request(sel_units):
      Output(_DOWNLOAD_PROG_INTV, 'disabled'), Output(_DOWNLOAD_PROG_BAR, "value"),
      Output(_DOWNLOAD_PROG_BAR, "label"), Output(_DOWNLOAD_PROG_BAR, 'color'), Output(_DOWNLOAD_PROG_BAR, 'animated'),
      Output(_DOWNLOAD_PROG_LABEL, 'children'), Output(_DOWNLOAD_PROG_LABEL, 'class_name'),
-     Output(_DOWNLOAD_ACTION, "children")],
+     Output(_DOWNLOAD_ACTION, "children"), Output(_DOWNLOAD_ACTION, 'href'),
+     Output(_DOWNLOAD_MODAL_CLOSE_ID, 'disabled')],
     [Input(_DOWNLOAD_ACTION, 'n_clicks'), Input(_DOWNLOAD_MODAL_CLOSE_ID, 'n_clicks'),
      Input(_DOWNLOAD_PROG_INTV, 'n_intervals')],
     [State(_DOWNLOAD_UNIT_DROP_ID, "value"), State(_DOWNLOAD_OK_TRIALS_CHK, "value"),
@@ -220,7 +225,7 @@ def restrict_num_units_in_download_request(sel_units):
      State(_DOWNLOAD_SESSION_KEY_DIV, 'children'), State(_DOWNLOAD_REQID_DIV, 'children')]
 )
 def on_submit_cancel_or_update_progress(*args):
-    out = [no_update] * 10
+    out = [no_update] * 12
 
     # user must be logged into portal to perform data download
     requester = flask_login.current_user.get_id() if flask_login.current_user.is_authenticated else None
@@ -230,7 +235,9 @@ def on_submit_cancel_or_update_progress(*args):
     ctx = callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ""
     action_label = args[-3]
+    # IMPORTANT: A Python date is converted to string form when JSONified, so convert back since a date is expected
     session_key = json.loads(args[-2])
+    session_key['session_date'] = datetime.strptime(session_key['session_date'], '%Y-%m-%d').date()
     req_id = args[-1]
     if (trigger_id == _DOWNLOAD_ACTION) and (action_label == _ACTION_SUBMIT):
         # submit a new download request
@@ -240,26 +247,24 @@ def on_submit_cancel_or_update_progress(*args):
         action_label = _ACTION_CANCEL if ok else _ACTION_RESET
         status = [html.I(className="bi bi-info-circle-fill me-2"), "Request submitted successfully"] if ok else \
             [html.I(className="bi bi-x-octagon-fill me-2"), req_id]
-        out[0:10] = req_id if ok else "", None, not ok, 0 if ok else 100, "0%" if ok else "FAILED", \
-            "info" if ok else "danger", ok, status, 'text-primary' if ok else 'text-danger', action_label
+        out[0:12] = req_id if ok else "", None, not ok, 0 if ok else 100, "0%" if ok else "FAILED", \
+            "info" if ok else "danger", ok, status, 'text-primary' if ok else 'text-danger', action_label, None, ok
     elif (trigger_id == _DOWNLOAD_ACTION) and (action_label == _ACTION_CANCEL):
         # cancel a download request while it is being fulfilled on server, then reset GUI
         if len(req_id) > 0:
             cancel_pending_download_request(requester, req_id)
-        out[0:10] = "", dict(display='none'), True, 0, "0%", "info", False, "", None, _ACTION_SUBMIT
+        out[0:12] = "", dict(display='none'), True, 0, "0%", "info", False, "", None, _ACTION_SUBMIT, None, False
     elif (trigger_id == _DOWNLOAD_ACTION) and (action_label == _ACTION_RESET):
         if len(req_id) > 0:
             cancel_pending_download_request(requester, req_id)
-        out[0:10] = "", dict(display='none'), True, 0, "0%", "info", False, "", None, _ACTION_SUBMIT
+        out[0:12] = "", dict(display='none'), True, 0, "0%", "info", False, "", None, _ACTION_SUBMIT, None, False
     elif (trigger_id == _DOWNLOAD_ACTION) and (action_label == _ACTION_DOWNLOAD):
-        # trigger download of the data file, then reset.
-        # TODO - download not yet implemented. For now, just cancel the job
-        if len(req_id) > 0:
-            cancel_pending_download_request(requester, req_id)
-        out[0:10] = "", dict(display='none'), True, 0, "0%", "info", False, "", None, _ACTION_SUBMIT
+        # record that user has initiated file download, then reset form
+        # TODO: IMPLEMENT
+        out[0:12] = "", dict(display='none'), True, 0, "0%", "info", False, "", None, _ACTION_SUBMIT, None, False
     elif trigger_id == _DOWNLOAD_MODAL_CLOSE_ID:
         # if there's a pending download request, let it continue. Reset all widgets to start a new request.
-        out[0:10] = "", dict(display='none'), True, 0, "0%", "info", False, "", None, _ACTION_SUBMIT
+        out[0:12] = "", dict(display='none'), True, 0, "0%", "info", False, "", None, _ACTION_SUBMIT, None, False
     elif trigger_id == _DOWNLOAD_PROG_INTV:
         # get status update for an in-progress request and update widgets accordingly
         req_status = pending_download_request_status(req_id)
@@ -267,15 +272,26 @@ def on_submit_cancel_or_update_progress(*args):
             # an error occurred while retrieving status update
             status = [html.I(className="bi bi-x-octagon-fill me-2"),
                       "Unknown error occurred while checking status of download request"]
-            out[0:10] = "", no_update, True, 100, "FAILED", "danger", False, status, 'text-danger', _ACTION_RESET
+            out[0:12] = "", no_update, True, 100, "FAILED", "danger", False, status, 'text-danger', _ACTION_RESET, \
+                None, False
         elif req_status.state == DOWNLOAD_PREPPING:
             out[3:5] = req_status.pct_complete, f"{req_status.pct_complete}%"
             out[7] = [html.I(className="bi bi-info-circle-fill me-2"), req_status.msg]
         elif req_status.state == DOWNLOAD_READY:
-            status = [html.I(className="bi bi-check-circle-fill me-2"), req_status.msg]
-            out[2:10] = False, 100, "100%", "success", False, status, 'text-success', _ACTION_DOWNLOAD
+            # file is ready for download. Embed URL in action button so that clicking it again triggers the download.
+            # We disable the modal's close button to emphasize that the user needs complete the download -- once the URL
+            # is retrieved from the server, the requester "owns" the download.
+            ok, url = get_data_download_url(requester, req_id)
+            if ok:
+                status = [html.I(className="bi bi-check-circle-fill me-2"), req_status.msg]
+            else:
+                status = [html.I(className="bi bi-x-octagon-fill me-2"), url]
+            out[2:12] = True, 100, "100%", "success" if ok else "danger", False, status, \
+                'text-success' if ok else 'text-danger', _ACTION_DOWNLOAD if ok else _ACTION_RESET, \
+                url if ok else None, ok
         else:  # DOWNLOAD_FAIL
             status = [html.I(className="bi bi-x-octagon-fill me-2"), req_status.msg]
-            out[0:10] = "", no_update, True, 100, "FAILED", "danger", False, status, 'text-danger',  _ACTION_RESET
+            out[0:12] = "", no_update, True, 100, "FAILED", "danger", False, status, 'text-danger',  _ACTION_RESET, \
+                None, False
 
     return tuple(out)

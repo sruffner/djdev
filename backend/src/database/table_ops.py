@@ -53,7 +53,8 @@ _table_map: Dict[DBTable, dj.Table] = {
     DBTable.TRIAL: sgl.Trial(),
     DBTable.TRIAL_EVENT: sgl.Trial.Event(),
     DBTable.TRIAL_BEHAVIORAL: sgl.Trial.BehavioralResponse(),
-    DBTable.TRIAL_NEURONAL: sgl.Trial.NeuronalResponse()
+    DBTable.TRIAL_NEURONAL: sgl.Trial.NeuronalResponse(),
+    DBTable.DATA_DOWNLOAD: sgl.DataDownload()
 }
 """ Maps enumerated database table ID to the corresponding DataJoint table class in the Lisberger lab schema. """
 
@@ -465,11 +466,12 @@ def _check_row_deletion(table_id: DBTable, row_pk: Dict[str, AttributeValue]) ->
     cascade deletions. If a relation exists, the deletion is forbidden.
         User, Subject, Rig, Study -> Session.
         User -> Study.
+        User -> DataDownload.
         BrainArea -> Session.EPhys
         NeuronType -> Session.Neuron
     Some foreign-key relations are not checked because the cascade deletions are permssible, or because deletions
     in the independent table are not allowed: Subject -> SubjectImplant; Study, Publication -> StudyPub; Session,
-    TrialProtocol -> Trial; Session.Neuron -> Trial.NeuronalResponse.
+    TrialProtocol -> Trial; Session.Neuron -> Trial.NeuronalResponse; Session -> DataDownload.
 
     Args:
         table_id: ID of the database table.
@@ -483,6 +485,8 @@ def _check_row_deletion(table_id: DBTable, row_pk: Dict[str, AttributeValue]) ->
             if len(_table_map[DBTable.SESSION] & {'experimenter': row_pk['username']}) > 0:
                 return False
             elif len(_table_map[DBTable.STUDY] & {'study_lead': row_pk['username']}) > 0:
+                return False
+            elif len(_table_map[DBTable.DATA_DOWNLOAD] & {'requester': row_pk['username']}) > 0:
                 return False
         elif table_id in [DBTable.SUBJECT, DBTable.RIG, DBTable.STUDY]:
             if len(_table_map[DBTable.SESSION] & row_pk) > 0:

@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 from boto3 import Session
 from boto3.s3.transfer import TransferConfig
@@ -73,6 +73,28 @@ def upload_file_to_bucket(file_path: Path, bucket_name: str, key: str) -> bool:
     except Exception:
         logger.error(f"Failed to upload file {file_path} to S3 bucket {bucket_name}", exc_info=True)
         return False
+
+
+def presigned_url_for_file(bucket_name: str, key: str, expires: int = 3600) -> Tuple[bool, str]:
+    """
+    Generate a presigned URL by which the specified file may be downloaded from the specified S3 bucket.
+
+    Args:
+        bucket_name: THe bucket name.
+        key: The file object key.
+        expires: Expiration time for the URL, in seconds. Range 1-86400 (24 hours). Default = 3600 (1 hour).
+    Returns:
+        A 2-tuple: (False, error message) if operation fails; (True, URL string) otherwise.
+    """
+    try:
+        session = aws_session()
+        s3_client = session.client('s3')
+        url = s3_client.generate_presigned_url(ClientMethod='get_object', Params={'Bucket': bucket_name, 'Key': key},
+                                               ExpiresIn=expires)
+        return True, url
+    except Exception as e:
+        logger.error(f"Failed to generate presigned URL for {key} in S3 bucket {bucket_name}", exc_info=True)
+        return False, "Unable to generate download URL - file does not exist or internal error"
 
 
 def download_file_from_bucket(bucket_name: str, key: str, dst: Path) -> bool:

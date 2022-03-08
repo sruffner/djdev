@@ -45,6 +45,7 @@ import pickle
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -53,8 +54,9 @@ import scipy.io
 from rq import Queue
 from config.config import get_config
 from config.logging import setup_logging
+from database.repo import upload_file_to_bucket, presigned_url_for_file
 from database.table_info import AttributeValue, DBTable, primary_key_of
-from database.table_ops import row_exists, fetch_attribute_values, fetch_one_row
+from database.table_ops import row_exists, fetch_attribute_values, fetch_one_row, insert_into_table
 from database.trial_data_ops import TrialData, retrieve_trial_block
 
 logger = logging.getLogger(__name__)
@@ -321,17 +323,22 @@ def fulfill_pending_download_request(req_id: str) -> bool:
             logger.debug("Creating downloads/ folder in backend repository")
             downloads_dir.mkdir(parents=True, exist_ok=False)
 
+        # write data file
         file_path = get_data_download_file_path(req_info)
         if _request_status_update(req_id, f"Writing trial data to {file_path.name}. This will take a while...", 55):
             return False
         _save_trial_data_to_file(file_path, trial_data)
 
         if _request_status_update(req_id, f"Pushing {file_path.name} to temporary storage", 90):
+            file_path.unlink(missing_ok=True)
             return False
 
-        # TODO: Push the data file to S3, then remove it from downloads/ folder. It should be configured to expire in
-        #  a short period of time.
-        time.sleep(2)
+        # ... then upload it to temporary storage in S3 (it will be auto-deleted after 1 dqy)
+        if not upload_file_to_bucket(file_path, get_config().repo_bucket, f"/{_DOWNLOAD_SUBFOLDER}/{file_path.name}"):
+            raise Exception("An error occurred while uploading data file to S3 bucket")
+
+        # remove the data file from local storage -- we're done with it.
+        file_path.unlink(missing_ok=True)
 
         if _request_status_update(req_id, f"DONE!", 100, DOWNLOAD_READY):
             return False
@@ -441,3 +448,83 @@ def _request_status_update(req_id: str, msg: str, pct: int, next_state: Optional
     # TODO: Issue - The key could disappear between the previous read and this write.
     conn.set(status_key, pickle.dumps(req_status))
     return False
+
+
+def get_data_download_url(requester: str, req_id: str) -> Tuple[bool, str]:
+    """
+    Get the presigned URL by which a data file -- previously prepared in response to a data download request -- can be
+    downloaded from the portal's backend repository.
+
+    Once a data download request is fulfilled, the prepared data file is available for download from the backend
+    repository, implemented in an AWS S3 bucket. By design, the data file will "expire" (ie, it is deleted permanently)
+    approximately 24 hours after it is uploaded to S3. Since all files in the S3 bucket are private, a presigned URL
+    must be supplied to download any given file.
+
+    Only one presigned URL will be supplied per download request. The URL should be accessed immediately, as it is set
+    to expire in one hour. After preparing the URL, this method removes the completed download request from the Redis
+    cache and stores a permanent record of the download in the portal database as a data provenance measure.
+
+    Args:
+        requester: The username of the registered portal user that originally requested the download.
+        req_id: The download request identifier.
+    Returns:
+        A 3-tuple: (False, error message) if an error occurs; (True, url-string) otherwise.
+    """
+    clear = False  # if set, clear the download request from Redis cache
+    info_key = f"{_DOWNLOAD_INFO_NS}{req_id}"
+    status_key = f"{_DOWNLOAD_STATUS_NS}{req_id}"
+    try:
+        # get download request info and status from Redis
+        conn = get_config().redis_conn
+        with conn.pipeline() as pipe:
+            pipe.get(info_key)
+            pipe.get(status_key)
+            res = pipe.execute()
+        req_info: Optional[DownloadRequest] = None if res[0] is None else pickle.loads(res[0])
+        req_status: Optional[DownloadRequestStatus] = None if res[1] is None else pickle.loads(res[1])
+        if (req_info is None) or (req_status is None):
+            clear = True
+            return False, f"Download request {req_id} not found on server."
+
+        # verify requester and check that file has not expired.
+        if req_info.requester != requester:
+            return False, f"You did not request download {req_id}. Permission denied."
+        elif time.time() - req_info.requested > 24 * 3600:
+            clear = True
+            return False, f"The prepared data file has expired and is no longer available for download."
+
+        # generate presigned URL
+        file_key = f"/{_DOWNLOAD_SUBFOLDER}/{get_data_download_file_path(req_info).name}"
+        ok, url = presigned_url_for_file(get_config().repo_bucket, file_key)
+        if not ok:
+            return False, url
+
+        # push a record of the completed download into the portal database. If this fails, do not consider it
+        # catastrophic, but log the issue
+        download_entry = dict(
+            request_id=req_info.id, requester=req_info.requester, experimenter=req_info.session_key['experimenter'],
+            subj_id=req_info.session_key['subj_id'], session_date=req_info.session_key['session_date'],
+            session_sfx=req_info.session_key['session_sfx'], complete_reps=req_info.complete_reps,
+            remove_sacc=req_info.remove_saccades, out_format=req_info.output_fmt,
+            selected_units=" ".join([str(i) for i in sorted(req_info.selected_units)]),
+            downloaded=datetime.now().isoformat(sep=' ', timespec='seconds')
+        )
+        err_msg = insert_into_table(DBTable.DATA_DOWNLOAD, download_entry)
+        if err_msg is not None:
+            logger.error(f"Failed to record completed data download in database: {err_msg}")
+
+        clear = True
+        return True, url
+    except Exception as e:
+        logger.error(f"Failed to get download URL for request {req_id}: {str(e)}", exc_info=True)
+        return False, f"Internal error while trying to generate URL for data file download."
+    finally:
+        if clear:
+            try:
+                conn = get_config().redis_conn
+                with conn.pipeline() as pipe:
+                    pipe.lrem(_DOWNLOAD_KEY, 0, f"{requester}-{req_id}")
+                    pipe.delete(info_key, status_key)
+                    pipe.execute()
+            except Exception:
+                pass
