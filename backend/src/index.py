@@ -37,8 +37,7 @@ import flask_login
 
 from app import app, load_authorized_user
 from database.user_ops import authenticate_portal_user, validate_username, validate_password
-from pages import curate, commit, explore, user_profile, manage_users
-
+from pages import curate, commit, explore, user_profile, manage_users, download_history
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +64,8 @@ _LINK_COMMIT_ID = "link-commit"
 """ ID of link-style menu item in navigation bar's dropdown menu that links to the 'commit session' page. """
 _LINK_USERS_ID = "link-manage-users"
 """ ID of link-style menu item in navigation bar's dropdown menu that links to the 'portal user management' page. """
+_LINK_DOWNLOADS_ID = "link-download-history"
+""" ID of link-style menu item in navigation bar's dropdown menu that links to the 'download history' page. """
 _LOGOUT_ID = "logout-btn"
 """ ID of button-style menu item in navigation bar's dropdown menu that logs out the current user. """
 _URL_ID = "url"
@@ -153,6 +154,9 @@ def _serve_layout() -> html.Div:
                                 dbc.DropdownMenuItem("Commit experiment sessions (access restricted)",
                                                      id=_LINK_COMMIT_ID, href="/commit",
                                                      disabled=not can_commit),
+                                dbc.DropdownMenuItem("Download history (access restricted)", href='/downloads',
+                                                     id=_LINK_DOWNLOADS_ID, disabled=not can_commit),
+                                dbc.DropdownMenuItem(divider=True),
                                 dbc.DropdownMenuItem("Curate lab information (administrators only)", id=_LINK_CURATE_ID,
                                                      href="/curate", disabled=not is_admin),
                                 dbc.DropdownMenuItem("Manage user accounts (administrators only)", href='/manage_users',
@@ -211,7 +215,8 @@ def display_page(pathname, n_intervals, current_href):
                 is_admin = portal_user.is_admin()
         if ((url_parts.path == '/curate') and not is_admin) or \
                 ((url_parts.path == '/commit') and not can_commit) or \
-                ((url_parts.path == '/manage_users') and not is_admin) or (not is_logged_in):
+                ((url_parts.path == '/manage_users') and not is_admin) or \
+                ((url_parts.path == '/downloads') and not can_commit) or (not is_logged_in):
             url_parts = [(part if i != 2 else '/explore') for i, part in enumerate(url_parts)]
             return no_update, urlunparse(url_parts), True
         return no_update, no_update, False
@@ -239,6 +244,9 @@ def display_page(pathname, n_intervals, current_href):
         elif pathname == '/manage_users':
             layout = manage_users.serve_layout() if is_admin else None
             redirect = not is_admin
+        elif pathname == '/downloads':
+            layout = download_history.serve_layout() if can_commit else None
+            redirect = not can_commit
         else:
             layout = explore.serve_layout()
             redirect = not (pathname in ['/', '/explore'])   # eg, someone enters a bogus path manually
@@ -273,6 +281,7 @@ def enable_login_submit(*args):
     [Output(_LOGIN_MODAL_ID, 'is_open'), Output(_LOGIN_USERNAME_ID, 'value'), Output(_LOGIN_PASSWORD_ID, 'value'),
      Output(_NAV_MENU_ID, 'label'), Output(_NAV_MENU_ID, 'style'), Output(_LOGIN_ID, 'style'),
      Output(_LINK_CURATE_ID, 'disabled'), Output(_LINK_COMMIT_ID, 'disabled'), Output(_LINK_USERS_ID, 'disabled'),
+     Output(_LINK_DOWNLOADS_ID, 'disabled'),
      Output(_LOGIN_ALERT_ID, 'children'), Output(_LOGIN_ALERT_ID, 'is_open'), Output(_URL_ID, 'pathname')],
     [Input(_LOGIN_ID, 'n_clicks'), Input(_LOGIN_SUBMIT_ID, 'n_clicks'), Input(_LOGIN_CANCEL_ID, 'n_clicks'),
      Input(_LOGOUT_ID, 'n_clicks')],
@@ -280,13 +289,13 @@ def enable_login_submit(*args):
 )
 def login_callback(*args):
     ctx = callback_context
-    out = [no_update] * 12
+    out = [no_update] * 13
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if (ctx.triggered is not None) else ""
 
     if trigger_id == _LOGIN_ID:
         out[0] = True
         out[1] = out[2] = ""
-        out[10] = False
+        out[11] = False
     elif trigger_id == _LOGIN_SUBMIT_ID:
         username = args[4] if isinstance(args[4], str) else ""
         password = args[5] if isinstance(args[5], str) else ""
@@ -299,7 +308,7 @@ def login_callback(*args):
             else:
                 flask_login.login_user(portal_user)
         if portal_user:  # successful login!
-            logger.info(f"{username} logged in successfully")  # TODO: Are we OK with usernames in logs?
+            logger.info(f"{username} logged in successfully")
             out[0] = False
             out[1] = out[2] = ""
             out[3] = f"Welcome, {portal_user.first_name()}"
@@ -308,20 +317,21 @@ def login_callback(*args):
             out[6] = not portal_user.is_admin()
             out[7] = not portal_user.can_commit_to_database()
             out[8] = not portal_user.is_admin()
-            out[9] = ""
-            out[10] = False
-            out[11] = '/explore'
+            out[9] = not portal_user.can_commit_to_database()
+            out[10] = ""
+            out[11] = False
+            out[12] = '/explore'
         else:
             logger.warning(f"Unsuccessful login attempt ({error_msg})")
-            out[9] = error_msg
-            out[10] = True
+            out[10] = error_msg
+            out[11] = True
     elif trigger_id == _LOGIN_CANCEL_ID:
         out[0] = False
         out[1] = out[2] = ""
-        out[10] = False
+        out[11] = False
     elif trigger_id == _LOGOUT_ID:
         if flask_login.current_user.is_authenticated:
-            logger.info(f"{flask_login.current_user.get_id()} logging out")  # TODO: Are we OK with usernames in logs?
+            logger.info(f"{flask_login.current_user.get_id()} logging out")
         flask_login.logout_user()
         out[3] = "Welcome"
         out[4] = dict(display='none')
@@ -329,7 +339,7 @@ def login_callback(*args):
         out[6] = True
         out[7] = True
         out[8] = True
-        out[11] = '/explore'
+        out[12] = '/explore'
     return tuple(out)
 
 
