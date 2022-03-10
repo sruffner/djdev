@@ -15,7 +15,6 @@ MAT file.
 @created: 08mar2022
 @author: sruffner
 """
-import logging
 from typing import Optional, List, Dict
 
 from dash import html, dash_table as dt
@@ -27,7 +26,6 @@ from app import PortalUser, load_authorized_user
 import database.table_info as ti
 from database.table_ops import fetch_rows, fetch_restrict_proj
 
-logger = logging.getLogger(__name__)
 
 _DNLD_HIST_TABLE: str = "downhist-table"
 """ The ID assigned to the Dash DataTable presenting the response data downloads history. """

@@ -10,7 +10,6 @@ TODO: DESCRIBE This module builds upon the lower-level table_ops module to retre
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
 import functools
-import logging
 import pickle
 from dataclasses import dataclass
 from datetime import date
@@ -18,11 +17,10 @@ from typing import List, Union, Dict, Tuple, Optional
 import numpy as np
 from numpy.lib import stride_tricks
 
+from config.config import get_application_logger
 from database import maestro
 from database.table_info import AttributeValue, DBTable, primary_key_of
 from database.table_ops import fetch_one_row, fetch_rows, fetch_restrict_proj, fetch_any_proj, fetch_attribute_values
-
-logger = logging.getLogger(__name__)
 
 
 def trial_protocols_for_session(session_key: Dict[str, AttributeValue], aggregate: bool = False) \
@@ -68,7 +66,7 @@ def trial_protocols_for_session(session_key: Dict[str, AttributeValue], aggregat
         sorted_tuples = sorted(out.items(), key=lambda item: item[1])
         return {k: v for k, v in sorted_tuples}
     except Exception as e:
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
         return None
 
 
@@ -118,7 +116,7 @@ def trial_protocols_for_neuron(neuron_key: Dict[str, AttributeValue], aggregate:
         sorted_tuples = sorted(out.items(), key=lambda item: item[1])
         return {k: v for k, v in sorted_tuples}
     except Exception as e:
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
         return None
 
 
@@ -136,7 +134,7 @@ def get_trial_protocol_definition(proto_hash: str) -> Optional[maestro.Protocol]
         if protocol_entry:
             return pickle.loads(protocol_entry['proto_def'])
     except Exception as e:
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
     return None
 
 
@@ -166,7 +164,7 @@ def trials_for_session(session_key: Dict[str, AttributeValue], proto_hash: Optio
         relevant_trial_indices.sort()
         return relevant_trial_indices
     except Exception as e:
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
         return None
 
 
@@ -199,7 +197,7 @@ def trials_for_neuron(neuron_key: Dict[str, AttributeValue], proto_hash: Optiona
             return None
         return [t['trial_idx'] for t in relevant_trials]
     except Exception as e:
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
         return None
 
 
@@ -219,11 +217,11 @@ def data_for_trial(trial_key: Dict[str, AttributeValue], unit_ids: Optional[List
         trial_pk = {k: trial_key[k] for k in primary_key_of(DBTable.TRIAL)}
         trial_info = fetch_one_row(DBTable.TRIAL, trial_pk)
         if trial_info is None:
-            logger.error(f"Trial ({trial_pk}) not found in database!")
+            get_application_logger().error(f"Trial ({trial_pk}) not found in database!")
             return None
         proto_info = fetch_one_row(DBTable.TRIAL_PROTOCOL, dict(proto_hash=trial_info['proto_hash']))
         if proto_info is None:
-            logger.error(f"Trial protocol (hash={trial_info['proto_hash']}) not found in database!")
+            get_application_logger().error(f"Trial protocol (hash={trial_info['proto_hash']}) not found in database!")
             return None
         behavioral_responses = fetch_rows(DBTable.TRIAL_BEHAVIORAL, trial_pk)
         if behavioral_responses is None:
@@ -263,7 +261,7 @@ def data_for_trial(trial_key: Dict[str, AttributeValue], unit_ids: Optional[List
         )
         return trial_data
     except Exception as e:
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
         return None
 
 
@@ -403,7 +401,7 @@ def retrieve_trial_block(
     except KeyError:
         raise ValueError("Incomplete session key")
     except Exception as e:
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
         return None
 
 
@@ -431,7 +429,7 @@ def retrieve_trial_reps_for_neuron(neuron_key: Dict[str, AttributeValue], proto_
 
         proto_info = fetch_one_row(DBTable.TRIAL_PROTOCOL, dict(proto_hash=proto_hash))
         if proto_info is None:
-            logger.error(f"Trial protocol (hash={proto_hash}) not found in database!")
+            get_application_logger().error(f"Trial protocol (hash={proto_hash}) not found in database!")
             return None
         proto_def: maestro.Protocol = pickle.loads(proto_info['proto_def'])
 
@@ -486,7 +484,7 @@ def retrieve_trial_reps_for_neuron(neuron_key: Dict[str, AttributeValue], proto_
 
         return trial_data
     except Exception as e:
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
         return None
 
 
@@ -513,7 +511,7 @@ def retrieve_trial_reps_for_session(session_key: Dict[str, AttributeValue], prot
 
         proto_info = fetch_one_row(DBTable.TRIAL_PROTOCOL, dict(proto_hash=proto_hash))
         if proto_info is None:
-            logger.error(f"Trial protocol (hash={proto_hash}) not found in database!")
+            get_application_logger().error(f"Trial protocol (hash={proto_hash}) not found in database!")
             return None
         proto_def: maestro.Protocol = pickle.loads(proto_info['proto_def'])
 
@@ -560,7 +558,7 @@ def retrieve_trial_reps_for_session(session_key: Dict[str, AttributeValue], prot
 
         return trial_data
     except Exception as e:
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
         return None
 
 

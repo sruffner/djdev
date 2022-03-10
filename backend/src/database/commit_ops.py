@@ -61,7 +61,6 @@ protected by a mechanism that verifies the specified user is logged in with the 
 """
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
-import logging
 import pickle
 import re
 import shutil
@@ -81,7 +80,7 @@ from dash_uploader.httprequesthandler import get_chunk_name
 from rq import Queue
 from werkzeug.security import generate_password_hash
 
-from config.config import get_config
+from config.config import get_config, get_application_logger
 from database import maestro, PL2
 from database.log_ops import log_session_commit, log_file_path
 from database.table_info import DBTable, AttributeValue, primary_key_of
@@ -91,7 +90,7 @@ from database.table_ops import fetch_attribute_values, fetch_one_row, fetch_rows
 from database.user_ops import validate_username, PASSWORD_HASH_METHOD, prompt_for_password
 from utils.common import DocEnum
 
-logger = logging.getLogger(__name__)
+_logger = get_application_logger()
 
 
 job_queue = Queue(connection=get_config().redis_conn)
@@ -347,7 +346,7 @@ def remove_staging_dir(staging_dir: Path) -> None:
         if staging_dir.exists():
             shutil.rmtree(str(staging_dir))
     except OSError:
-        logger.error(f"Failed to delete staging directory in repository at {str(staging_dir)}", exc_info=True)
+        _logger.error(f"Failed to delete staging directory in repository at {str(staging_dir)}", exc_info=True)
 
 
 def initiate_session_commit(username: str, upload_id: str) -> Union[str, CommitJobStatus]:
@@ -373,7 +372,7 @@ def initiate_session_commit(username: str, upload_id: str) -> Union[str, CommitJ
         upload_dir.mkdir(parents=True, exist_ok=False)
     except Exception as err:
         msg = f"Failed to create temporary upload directory for commit job {job_id}: {str(err)}"
-        logger.error(msg, exc_info=True)
+        _logger.error(msg, exc_info=True)
         return msg
 
     now = time.time()
@@ -391,7 +390,7 @@ def initiate_session_commit(username: str, upload_id: str) -> Union[str, CommitJ
             pipe.zadd(job_progress_key, {init_progress_msg: now})
             pipe.execute()
     except Exception as e:
-        logger.error(f"Failed to persist commit job info: {str(e)}", exc_info=True)
+        _logger.error(f"Failed to persist commit job info: {str(e)}", exc_info=True)
         remove_staging_dir(upload_dir)
         return f"Failed to persist commit job information on server. Job dropped."
     return job_status
@@ -427,7 +426,7 @@ def get_pending_commit_jobs_for(username: str) -> Union[str, List[CommitJobStatu
                 out.append(job_status)
         return out
     except Exception as e:
-        logger.error(f"Failed to retrieve status for pending commit jobs: {str(e)}", exc_info=True)
+        _logger.error(f"Failed to retrieve status for pending commit jobs: {str(e)}", exc_info=True)
         return "Unable to retrieve commit job status information on server!"
 
 
@@ -445,12 +444,12 @@ def commit_job_status(job_id: str) -> Union[str, CommitJobStatus]:
         conn = get_config().redis_conn
         job = conn.get(f"{STATUS_NS}{job_id}")
         if job is None:
-            logger.debug(f"Got request for status info on a commit job (id={job_id}) that does not exist.")
+            _logger.debug(f"Got request for status info on a commit job (id={job_id}) that does not exist.")
             return f"Commit job (id={job_id}) not found on server."
         job_status: CommitJobStatus = pickle.loads(job)
         return job_status
     except Exception as e:
-        logger.error(f"Error while retrieving commit job status info: {str(e)}", exc_info=True)
+        _logger.error(f"Error while retrieving commit job status info: {str(e)}", exc_info=True)
         return "An error occurred while retrieving commit job status on server"
 
 
@@ -470,13 +469,13 @@ def commit_job_progress(job_id: str) -> Union[str, List[str]]:
         conn = get_config().redis_conn
         timestamped_messages = conn.zrevrange(f"{PROGRESS_NS}{job_id}", 0, -1, withscores=True)
         if (not isinstance(timestamped_messages, list)) or (len(timestamped_messages) == 0):
-            logger.debug(f"Got request for progress history on a commit task (id={job_id}) that does not exist.")
+            _logger.debug(f"Got request for progress history on a commit task (id={job_id}) that does not exist.")
             return f"Commit job (id={job_id}) not found on server."
         out = [f"(**{datetime.fromtimestamp(x[1]).isoformat(' ', 'seconds')}**) {x[0].decode('utf-8')}"
                for x in timestamped_messages]
         return out
     except Exception as e:
-        logger.error(f"Error retrieving progress history for commit job {job_id}: {str(e)}", exc_info=True)
+        _logger.error(f"Error retrieving progress history for commit job {job_id}: {str(e)}", exc_info=True)
         return "An error occurred while retrieving commit job progress history on server"
 
 
@@ -503,11 +502,11 @@ def update_commit_job_on_archive_upload(job_id: str, filename: str) -> Union[str
         conn = get_config().redis_conn
         job = conn.get(status_key)
         if job is None:
-            logger.debug(f"Got upload complete for a commit job (id={job_id}) that does not exist.")
+            _logger.debug(f"Got upload complete for a commit job (id={job_id}) that does not exist.")
             return f"Commit job (id={job_id}) not found on server."
         job_status: CommitJobStatus = pickle.loads(job)
         if job_status.state != CommitStateEnum.UPLOADING:
-            logger.debug(f"Got upload complete for a commit task (id={job_id}), but upload was already finished.")
+            _logger.debug(f"Got upload complete for a commit task (id={job_id}), but upload was already finished.")
 
         # the upload folder name is initially stored in the job status object in the 'zip' field. Rename that folder
         # with the job ID. This frees the original upload folder name for the next upload from the same client session.
@@ -531,7 +530,7 @@ def update_commit_job_on_archive_upload(job_id: str, filename: str) -> Union[str
 
         return job_status
     except Exception as e:
-        logger.error(f"Error while checking or updating commit job status info: {str(e)}", exc_info=True)
+        _logger.error(f"Error while checking or updating commit job status info: {str(e)}", exc_info=True)
         return "An error occurred while checking or updating commit job status on server"
 
 
@@ -560,7 +559,7 @@ def cancel_or_remove_commit_job(job_id: str) -> Tuple[bool, str, Optional[Commit
         job = conn.get(status_key)
         if job is None:
             # job not found -- assume it was already removed
-            logger.debug(f"Got request to remove a commit job (id={job_id}) that was not found.")
+            _logger.debug(f"Got request to remove a commit job (id={job_id}) that was not found.")
             return True, "", None
         job_status: CommitJobStatus = pickle.loads(job)
         if job_status.state.can_delete_job_in_this_state():
@@ -595,7 +594,7 @@ def cancel_or_remove_commit_job(job_id: str) -> Tuple[bool, str, Optional[Commit
                 pipe.execute()
         return False, "", job_status
     except Exception as e:
-        logger.error(f"Failed to cancel commit job {job_id}: {str(e)}", exc_info=True)
+        _logger.error(f"Failed to cancel commit job {job_id}: {str(e)}", exc_info=True)
         return False, "An error occurred while trying to cancel commit job on server", None
 
 
@@ -625,7 +624,7 @@ def preprocess_commit_job(job_id: str) -> bool:
     Returns:
         True if preprocessing is successful; False otherwise.
     """
-    logger.debug(f"Started preprocessing phase for commit job {job_id}")
+    _logger.debug(f"Started preprocessing phase for commit job {job_id}")
 
     zip_path: Path
     """ Location of session archive in portal repository. """
@@ -653,10 +652,10 @@ def preprocess_commit_job(job_id: str) -> bool:
         # verify job status and ZIP file location in repo
         job_status = commit_job_status(job_id)
         if isinstance(job_status, str):
-            logger.error(f"Failed to retrieve job status from Redis for {job_id}")
+            _logger.error(f"Failed to retrieve job status from Redis for {job_id}")
             return False
         elif job_status.state != CommitStateEnum.PREPROCESS:
-            logger.error(f"Commit job is not in the correct stage for background preprocessing: {job_status.state}")
+            _logger.error(f"Commit job is not in the correct stage for background preprocessing: {job_status.state}")
             return False
         elif not _reassemble_archive_from_chunked_upload(job_id, job_status.zip):
             return False
@@ -664,7 +663,7 @@ def preprocess_commit_job(job_id: str) -> bool:
             zip_path = Path(get_subfolder_in_staging_directory(job_id), job_status.zip)
         if not zip_path.is_file():
             msg_pfx = f"Cannot find archive file for commit job {job_id}: "
-            logger.debug(f"{msg_pfx}: {str(zip_path)}")
+            _logger.debug(f"{msg_pfx}: {str(zip_path)}")
             _background_job_update(job_id, f"{msg_pfx}: {zip_path.name}", CommitStateEnum.FAIL)
             return False
         if _background_job_update(job_id, f"Preprocessing session archive {job_status.zip}"):
@@ -799,7 +798,7 @@ def preprocess_commit_job(job_id: str) -> bool:
                 return False
     except Exception as err:
         error_msg = f"Error during preprocessing: {str(err)}"
-        logger.error(error_msg)
+        _logger.error(error_msg)
         _background_job_update(job_id, error_msg, CommitStateEnum.FAIL)
         return False
 
@@ -1404,7 +1403,7 @@ def session_metadata(job_id: str) -> Optional[SessionMetaData]:
             raise Exception("Session metadata not found!")
         return pickle.loads(info_raw)
     except Exception as e:
-        logger.error(f"Error while retrieving session metadata for commit job {job_id}: {str(e)}", exc_info=True)
+        _logger.error(f"Error while retrieving session metadata for commit job {job_id}: {str(e)}", exc_info=True)
         return None
 
 
@@ -1442,7 +1441,7 @@ def update_session_metadata(job_id: str, session_info: SessionMetaData) -> bool:
         conn.set(f"{INFO_NS}{job_id}", pickle.dumps(session_info))
         return True
     except Exception as e:
-        logger.error(f"Error while updating session metadata for commit job {job_id}: {str(e)}", exc_info=True)
+        _logger.error(f"Error while updating session metadata for commit job {job_id}: {str(e)}", exc_info=True)
         return False
 
 
@@ -1471,7 +1470,7 @@ def protocol_names(job_id: str) -> Optional[List[str]]:
             raise Exception(f"Cached protocol names not found")
         return [r.decode('utf-8') for r in raw_names]
     except Exception as e:
-        logger.error(f"Error while retrieving trial protocol names for commit job {job_id}: {str(e)}", exc_info=True)
+        _logger.error(f"Error while retrieving trial protocol names for commit job {job_id}: {str(e)}", exc_info=True)
         return None
 
 
@@ -1497,8 +1496,8 @@ def protocol_definition(job_id: str, index: int) -> Optional[maestro.ProtocolCan
             raise Exception(f"Cached protocol definition not found at index {index}")
         return pickle.loads(raw_proto)
     except Exception as e:
-        logger.error(f"Error while retrieving trial protocol definition for commit job {job_id}: {str(e)}",
-                     exc_info=True)
+        _logger.error(f"Error while retrieving trial protocol definition for commit job {job_id}: {str(e)}",
+                      exc_info=True)
         return None
 
 
@@ -1533,8 +1532,8 @@ def add_rv_to_protocol(job_id: str, index: int, rv: maestro.SegParam) -> Optiona
         conn.lset(f"{PROTODEFS_NS}{job_id}", index, pickle.dumps(proto_candidate))
         return proto_candidate
     except Exception as e:
-        logger.error(f"Error while adding RV to trial protocol definition for commit job {job_id}: {str(e)}",
-                     exc_info=True)
+        _logger.error(f"Error while adding RV to trial protocol definition for commit job {job_id}: {str(e)}",
+                      exc_info=True)
         return None
 
 
@@ -1570,8 +1569,8 @@ def validate_protocol(job_id: str, index: int) -> bool:
             pipe.execute()
         return True
     except Exception as e:
-        logger.error(f"Error while validating trial protocol definition for commit job {job_id}: {str(e)}",
-                     exc_info=True)
+        _logger.error(f"Error while validating trial protocol definition for commit job {job_id}: {str(e)}",
+                      exc_info=True)
         return False
 
 
@@ -1604,8 +1603,8 @@ def metrics_for_neural_unit(job_id: str, index: int) -> Optional[OmniplexUnit]:
         unit.neuron_type = None if type_id == -1 else type_id
         return unit
     except Exception as e:
-        logger.error(f"Error while retrieving neural unit metrics for commit job {job_id}: {str(e)}",
-                     exc_info=True)
+        _logger.error(f"Error while retrieving neural unit metrics for commit job {job_id}: {str(e)}",
+                      exc_info=True)
         return None
 
 
@@ -1648,8 +1647,8 @@ def set_unit_type(job_id: str, index: int, neuron_type: int) -> bool:
             conn.lset(f"{UNITTYPES_NS}{job_id}", index, neuron_type)
         return True
     except Exception as e:
-        logger.error(f"Error while updating neural unit type for commit job {job_id}, index={index}: {str(e)}",
-                     exc_info=True)
+        _logger.error(f"Error while updating neural unit type for commit job {job_id}, index={index}: {str(e)}",
+                      exc_info=True)
         return False
 
 
@@ -1716,7 +1715,7 @@ def ready_to_commit(job_id: str) -> Tuple[bool, bool, str]:
                     return True, True, f"\u2713 OK. Ready to commit, but {n} units have 'Unspecified' neuron type."
         return True, True, "\u2713 OK. Ready to commit."
     except Exception as e:
-        logger.error(f"Error while checking if commit job {job_id} is ready to commit: {str(e)}", exc_info=True)
+        _logger.error(f"Error while checking if commit job {job_id} is ready to commit: {str(e)}", exc_info=True)
         return False, False, "A server error occurred while checking cached session data."
 
 
@@ -1746,11 +1745,11 @@ def commit_to_database(job_id: str) -> Optional[str]:
         conn = get_config().redis_conn
         job = conn.get(status_key)
         if job is None:
-            logger.debug(f"Got request to finalize a commit job (id={job_id}) that does not exist.")
+            _logger.debug(f"Got request to finalize a commit job (id={job_id}) that does not exist.")
             return f"Commit job (id={job_id}) not found on server."
         job_status: CommitJobStatus = pickle.loads(job)
         if job_status.state != CommitStateEnum.REVIEW:
-            logger.debug(f"Got request to finalize a commit job (id={job_id}) that is not in the review phase.")
+            _logger.debug(f"Got request to finalize a commit job (id={job_id}) that is not in the review phase.")
             return f"Commit job must be in the 'Review' stage before committing to database"
 
         now = time.time()
@@ -1767,7 +1766,7 @@ def commit_to_database(job_id: str) -> Optional[str]:
         job_queue.enqueue(finish_commit_job, job_id, job_id=f"{job_id}-commit", job_timeout='60m')
         return None
     except Exception as e:
-        logger.error(f"Error while transitioning commit job {job_id} to commit phase: {str(e)}", exc_info=True)
+        _logger.error(f"Error while transitioning commit job {job_id} to commit phase: {str(e)}", exc_info=True)
         return "An error occurred while checking or updating commit job status on server"
 
 
@@ -1814,7 +1813,7 @@ def finish_commit_job(job_id: str) -> bool:
     Returns:
         True if successful, in which case the session is fully committed to the database; False otherwise.
     """
-    logger.debug(f"Started final commit phase for commit job {job_id}")
+    _logger.debug(f"Started final commit phase for commit job {job_id}")
 
     zip_path: Path
     """ Location of session archive in staging directory. """
@@ -1844,22 +1843,22 @@ def finish_commit_job(job_id: str) -> bool:
         # verify job status, existence of ZIP archive and preprocessing results file in staging directory
         job_status = commit_job_status(job_id)
         if isinstance(job_status, str):
-            logger.error(f"Failed to retrieve job status from Redis for {job_id}")
+            _logger.error(f"Failed to retrieve job status from Redis for {job_id}")
             return False
         elif job_status.state != CommitStateEnum.COMMIT:
-            logger.error(f"Commit job is not in the final commit phase: {job_status.state}")
+            _logger.error(f"Commit job is not in the final commit phase: {job_status.state}")
             return False
         else:
             zip_path = Path(get_subfolder_in_staging_directory(job_id), job_status.zip)
             preproc_path = Path(get_subfolder_in_staging_directory(job_id), PREPROC_FNAME)
         if not zip_path.is_file():
             msg_pfx = f"Cannot find archive file for commit job {job_id}: "
-            logger.debug(f"{msg_pfx}: {str(zip_path)}")
+            _logger.debug(f"{msg_pfx}: {str(zip_path)}")
             _background_job_update(job_id, f"{msg_pfx}: {zip_path.name}", CommitStateEnum.FAIL)
             return False
         if not preproc_path.is_file():
             msg_pfx = f"Cannot find temporary file with preprocessed data for commit job {job_id}: "
-            logger.debug(f"{msg_pfx}: {str(preproc_path)}")
+            _logger.debug(f"{msg_pfx}: {str(preproc_path)}")
             _background_job_update(job_id, f"{msg_pfx}: {preproc_path.name}", CommitStateEnum.FAIL)
             return False
 
@@ -1878,25 +1877,25 @@ def finish_commit_job(job_id: str) -> bool:
             msg = check_row(DBTable.SESSION_EPHYS, session_info.ephys_table_entry(), omit_master=True)
         if msg:
             msg = f"Error: Session metadata incomplete: {msg}"
-            logger.debug(f"Commit job {job_id} failed: {msg}")
+            _logger.debug(f"Commit job {job_id} failed: {msg}")
             _background_job_update(job_id, msg, CommitStateEnum.FAIL)
             return False
         proto_candidates = [pickle.loads(proto_raw) for proto_raw in res[1]]
         for p in proto_candidates:
             if p.needs_validation():
                 msg = f"Error: At least one trial protocol ({p.trial.path_name()} still requires user validation!"
-                logger.debug(f"Commit job {job_id} failed: {msg}")
+                _logger.debug(f"Commit job {job_id} failed: {msg}")
                 _background_job_update(job_id, msg, CommitStateEnum.FAIL)
                 return False
         unit_types: List[int] = [raw.decode('utf-8') for raw in res[2]] if num_units > 0 else list()
         if len(unit_types) != num_units:
             msg = f"Error: Number of cached units inconsistent with job status info!"
-            logger.debug(f"Commit job {job_id} failed: {msg}")
+            _logger.debug(f"Commit job {job_id} failed: {msg}")
             _background_job_update(job_id, msg, CommitStateEnum.FAIL)
             return False
         if unit_types.count(-1) > 0:   # in Redis key, an undefined neuron type is specified as -1
             msg = f"Error: The neuron type is undefined for at least one neural unit!"
-            logger.debug(f"Commit job {job_id} failed: {msg}")
+            _logger.debug(f"Commit job {job_id} failed: {msg}")
             _background_job_update(job_id, msg, CommitStateEnum.FAIL)
             return False
 
@@ -1910,7 +1909,7 @@ def finish_commit_job(job_id: str) -> bool:
             units = res['units']
             if len(units) != num_units:
                 msg = f"Error: Number of preprocessed units inconsistent with job status info!"
-                logger.debug(f"Commit job {job_id} failed: {msg}")
+                _logger.debug(f"Commit job {job_id} failed: {msg}")
                 _background_job_update(job_id, msg, CommitStateEnum.FAIL)
                 return False
             for i, u in enumerate(units):
@@ -1924,7 +1923,7 @@ def finish_commit_job(job_id: str) -> bool:
             t_info.proto_hash = protocol.md5_digest
     except Exception as err:
         error_msg = f"Error occurred before starting commit: {str(err)}"
-        logger.error(error_msg)
+        _logger.error(error_msg)
         try:
             _background_job_update(job_id, error_msg, CommitStateEnum.FAIL)
         except Exception:
@@ -1977,13 +1976,13 @@ def finish_commit_job(job_id: str) -> bool:
         # if the exception occurs AFTER we've logged the session commit, don't rollback. Technically, everything is
         # OK with the database and repository -- something went wrong with Redis at the worst possible time!
         if commit_logged:
-            logger.critical("Exception occurred after session successfully committed. Check Redis server.")
+            _logger.critical("Exception occurred after session successfully committed. Check Redis server.")
             return True
-        logger.error(f"Session commit {job_id} failed in final phase, after database insertions: {str(e)}")
+        _logger.error(f"Session commit {job_id} failed in final phase, after database insertions: {str(e)}")
         # rollback the session commit, including any added trial protocols.
         err_msg = rollback_session_commit(session_info.session_table_entry(), added_proto_hashes)
         if err_msg:
-            logger.critical(f"Session commit rollback failed: {str(e)}")
+            _logger.critical(f"Session commit rollback failed: {str(e)}")
         zip_path_in_repo.unlink(missing_ok=True)
         pickle_path_in_repo.unlink(missing_ok=True)
         err_msg = f"Commit failed after database insertions; rollback {'FAILED!' if err_msg else 'successful'}"

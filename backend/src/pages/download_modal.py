@@ -10,7 +10,6 @@ experiment session on the /explore page.
 @author: sruffner
 @created: 23feb2022
 """
-import logging
 import json
 from datetime import datetime
 from typing import Optional, Dict, List, Tuple
@@ -19,14 +18,12 @@ import flask_login
 from dash import html, dcc, callback, Output, Input, callback_context, State, no_update
 import dash_bootstrap_components as dbc
 
+from config.config import get_application_logger
 from database.download_ops import MAX_UNITS_PER_DOWNLOAD, DOWNLOAD_FORMATS, request_data_download, \
     pending_download_request_status, DOWNLOAD_PREPPING, DOWNLOAD_READY, cancel_pending_download_request, \
     get_data_download_url
 from database.table_info import AttributeValue, primary_key_of, DBTable
 from database.table_ops import fetch_restrict_proj, fetch_rows
-
-
-logger = logging.getLogger(__name__)
 
 
 _DOWNLOAD_MODAL_OPEN_ID: str = 'td_download_btn'
@@ -109,7 +106,8 @@ def render_download_modal_and_button(session: Dict[str, AttributeValue]) -> Tupl
         else:
             raise Exception("Database retrieval failed")
     except Exception as e:
-        logger.error(f"Error while fetching information needed to prepare download modal: {str(e)}", exc_info=True)
+        get_application_logger().error(
+            f"Error while fetching information needed to prepare download modal: {str(e)}", exc_info=True)
         units = []
 
     # keep the session key in a hidden DIV because we need it in some callbacks

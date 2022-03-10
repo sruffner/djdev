@@ -9,7 +9,6 @@ TODO: UNDER DEVELOPMENT - Testing access to an S3 bucket I created using my own 
 @author: sruffner
 @created: 15feb2022
 """
-import logging
 import sys
 import threading
 import time
@@ -19,9 +18,7 @@ from typing import Optional, List, Tuple
 from boto3 import Session
 from boto3.s3.transfer import TransferConfig
 
-from config.config import get_config
-
-logger = logging.getLogger(__name__)
+from config.config import get_config, get_application_logger
 
 MB = 1024 ** 2
 """ Number of bytes in a megabyte. """
@@ -40,7 +37,7 @@ def aws_session(region_name: str = 'us-west-1') -> Optional[Session]:
     """
     cfg = get_config()
     if (not cfg.aws_access_key_id) or (not cfg.aws_access_key_secret):
-        logger.error("Cannot open AWS session - Missing access credentials.")
+        get_application_logger().error("Cannot open AWS session - Missing access credentials.")
         return None
     return Session(cfg.aws_access_key_id, cfg.aws_access_key_secret, region_name=region_name)
 
@@ -57,7 +54,7 @@ def existing_buckets() -> None:
             print(f"  {bucket.name}")
         print('\n\n', flush=True)
     except Exception:
-        logger.error("ERROR: Failed to list existing buckets in S3 account", exc_info=True)
+        get_application_logger().error("ERROR: Failed to list existing buckets in S3 account", exc_info=True)
         print('Sorry, an error occurred.\n\n', flush=True)
 
 
@@ -71,7 +68,7 @@ def upload_file_to_bucket(file_path: Path, bucket_name: str, key: str) -> bool:
                            Callback=ProgressToConsole(file_path), Config=xfer_cfg)
         return True
     except Exception:
-        logger.error(f"Failed to upload file {file_path} to S3 bucket {bucket_name}", exc_info=True)
+        get_application_logger().error(f"Failed to upload file {file_path} to S3 bucket {bucket_name}", exc_info=True)
         return False
 
 
@@ -92,8 +89,9 @@ def presigned_url_for_file(bucket_name: str, key: str, expires: int = 3600) -> T
         url = s3_client.generate_presigned_url(ClientMethod='get_object', Params={'Bucket': bucket_name, 'Key': key},
                                                ExpiresIn=expires)
         return True, url
-    except Exception as e:
-        logger.error(f"Failed to generate presigned URL for {key} in S3 bucket {bucket_name}", exc_info=True)
+    except Exception:
+        get_application_logger().error(f"Failed to generate presigned URL for {key} in S3 bucket {bucket_name}",
+                                       exc_info=True)
         return False, "Unable to generate download URL - file does not exist or internal error"
 
 
@@ -110,10 +108,11 @@ def download_file_from_bucket(bucket_name: str, key: str, dst: Path) -> bool:
         if dst.is_file():
             return True
         else:
-            logger.error(f"File downloaded from S3 successfully not found at specified destination {str(dst)}")
+            get_application_logger().error(
+                f"File downloaded from S3 successfully not found at specified destination {str(dst)}")
             return False
     except Exception:
-        logger.error(f"Failed to download object {key} from S3 bucket {bucket_name}", exc_info=True)
+        get_application_logger().error(f"Failed to download object {key} from S3 bucket {bucket_name}", exc_info=True)
         return False
 
 
@@ -124,7 +123,7 @@ def delete_file_in_bucket(bucket_name: str, key: str) -> bool:
         s3_resource.Object(bucket_name, key).delete()
         return True
     except Exception:
-        logger.error(f"Failed to delete object {key} from S3 bucket {bucket_name}", exc_info=True)
+        get_application_logger().error(f"Failed to delete object {key} from S3 bucket {bucket_name}", exc_info=True)
         return False
 
 
@@ -136,7 +135,7 @@ def bucket_contents(bucket_name: str) -> Optional[List]:
         obj_list = [obj for obj in bucket.objects.all()]
         return obj_list
     except Exception:
-        logger.error(f"Failed to get object listing for S3 bucket {bucket_name}", exc_info=True)
+        get_application_logger().error(f"Failed to get object listing for S3 bucket {bucket_name}", exc_info=True)
         return None
 
 

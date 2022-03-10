@@ -12,6 +12,8 @@ Flask sessions or the username/password for the MySQL server.
 from __future__ import annotations  # Needed in Python 3.7 to type-hint a method with the type of enclosing class
 
 import logging
+import logging.config
+import yaml
 import os
 import time
 from dataclasses import dataclass
@@ -19,10 +21,37 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
+
+_LOG_CFG_FILE = 'config/logging.yaml'
+
+
+def get_application_logger() -> logging.Logger:
+    """
+    Get the singleton logger used to emit all logs from application code in the portal server app. On the first call,
+    application-side logger is configured, along with the 'app' log that the Dash/Flask library uses, and the root
+    logger. The root logger is configured only to emit logs at "WARNING" level and above -- so that we don't get too
+    much crap from third-party libraries. The logging configuration is in config/logging.yaml.
+
+    Returns:
+        The logger to use in all portal server application code.
+    Raises:
+        RuntimeError: If unable to configure the application-wide logger on first invocation.
+    """
+    if not ('portal' in logging.root.manager.loggerDict):
+        try:
+            with open(_LOG_CFG_FILE, 'rt') as f:
+                config = yaml.safe_load(f.read())
+            logging.config.dictConfig(config)
+            if not ('portal' in logging.root.manager.loggerDict):
+                raise Exception('The "portal" logger not found after configuration')
+        except Exception as e:
+            raise RuntimeError(f"Failed to create application-wide logger for portal server: {str(e)}")
+
+    return logging.getLogger('portal')
+
+
 import datajoint as dj
 from redis import Redis, RedisError
-
-logger = logging.getLogger(__name__)
 
 
 def get_config() -> AppConfig:
@@ -34,6 +63,7 @@ def get_config() -> AppConfig:
     Returns:
         An AppConfig object encapsulating configuration parameters needed for the Lisberger lab data portal.
     """
+    logger = get_application_logger()
     if not hasattr(get_config, 'config'):
         if 'DJDEV_ROOT_REPO' not in os.environ:
             raise RuntimeError('The environment variable DJDEV_ROOT_REPO is required.')
@@ -121,6 +151,7 @@ class AppConfig:
         Returns:
             True if connection was established; else False, in which case the application should exit.
         """
+        logger = get_application_logger()
         dj.config['database.host'] = self.dj_database_host
         dj.config['database.user'] = self.dj_database_user
         dj.config['database.password'] = self.dj_database_password

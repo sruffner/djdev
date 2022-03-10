@@ -30,7 +30,6 @@ TODO: IMPLEMENTATION ISSUES --
 @author: sruffner
 @created: 18oct2021
 """
-import logging
 import uuid
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
@@ -43,6 +42,7 @@ import flask_login
 import plotly.express as px
 
 from app import load_authorized_user
+from config.config import get_application_logger
 from database import maestro
 from database.commit_ops import CommitStateEnum, initiate_session_commit, get_pending_commit_jobs_for, \
     cancel_or_remove_commit_job, update_commit_job_on_archive_upload, commit_job_progress, CommitJobStatus, \
@@ -50,8 +50,6 @@ from database.commit_ops import CommitStateEnum, initiate_session_commit, get_pe
     add_rv_to_protocol, validate_protocol, OmniplexUnit, metrics_for_neural_unit, set_unit_type, commit_to_database
 from database.table_info import Column, DBTable, attribute_info
 from database.table_ops import fetch_restrict_proj, fetch_attribute_values, fetch_rows
-
-logger = logging.getLogger(__name__)
 
 
 _JOBS_TABLE_COLS: List[Column] = [
@@ -113,7 +111,7 @@ def _get_current_username() -> Optional[str]:
         if portal_user and portal_user.can_commit_to_database():
             username = portal_user.get_id()
         else:
-            logger.debug("On commit page, but client not authenticated or lacks commit access.")
+            get_application_logger().debug("On commit page, but client not authenticated or lacks commit access.")
     return username
 
 
@@ -778,10 +776,11 @@ def all_in_one_callback(*args):
         upload_id = args[-3]
         if not is_completed:
             if file_names is not None:
-                logger.debug(f"Upload initiated on client, upload_id={upload_id}, file_names={file_names}")
+                get_application_logger().debug(f"Upload initiated on client, upload_id={upload_id}, "
+                                               f"file_names={file_names}")
             raise dash_exc.PreventUpdate
         else:
-            logger.debug(f"Upload completed, upload_id={upload_id}, file={file_names}")
+            get_application_logger().debug(f"Upload completed, upload_id={upload_id}, file={file_names}")
             fname = str(file_names[0] if isinstance(file_names, list) else file_names)
             upload_job_idx = -1
             for i, r in enumerate(job_rows):
@@ -789,7 +788,8 @@ def all_in_one_callback(*args):
                     upload_job_idx = i
                     break
             if upload_job_idx == -1:
-                logger.error(f"Upload just completed, but no current commit job is in the uploading phase!")
+                get_application_logger().error(
+                    f"Upload just completed, but no current commit job is in the uploading phase!")
                 err_msg = f"Internal error - no commit job is currently uploading"
                 return False, no_update, no_update, False, err_msg, True
 
@@ -799,7 +799,7 @@ def all_in_one_callback(*args):
                 return True, no_update, no_update, False, err_msg, True
             job_rows[upload_job_idx] = _job_table_row_from_job_status_info(job_status)
             return False, job_rows, no_update, False, "", False
-    logger.debug(f"On commit page, failed to identify trigger for all-in-one callback: {trigger}")
+    get_application_logger().debug(f"On commit page, failed to identify trigger for all-in-one callback: {trigger}")
     raise dash_exc.PreventUpdate
 
 

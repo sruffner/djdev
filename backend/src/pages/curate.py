@@ -15,17 +15,15 @@ foreign key) in another table, the portal app may not allow deletion and/or upda
 @created: 28jan2022
 """
 import json
-import logging
 from typing import List, Dict, Optional
 
 from dash import callback, callback_context, no_update, Input, Output, State, html, dcc, dash_table as dt
 import dash_bootstrap_components as dbc
 
+from config.config import get_application_logger
 from database.table_info import DBTable, Column, AttributeValue, attribute_info
 from database.table_ops import fetch_rows, delete_from_table, row_exists, update_table_row, insert_into_table, \
     update_mapping_table
-
-logger = logging.getLogger(__name__)
 
 tabs: List[dbc.Tab] = [
     dbc.Tab(label="Experiment Subjects", tab_id='subj_tab'),
@@ -922,7 +920,7 @@ def _prepare_rows_for_study_table() -> Optional[List[Dict[str, AttributeValue]]]
     study_to_pub_rows = fetch_rows(DBTable.STUDY_TO_PUB)
     user_rows = fetch_rows(DBTable.USER)
     if (rows is None) or (study_to_pub_rows is None) or (user_rows is None):
-        logger.debug("Unable to prepare rows for research studies table; database retrieval error")
+        get_application_logger().debug("Unable to prepare rows for research studies table; database retrieval error")
         return None
     for r in rows:
         r['n_pubs'] = [(k['study_id'] == r['study_id']) for k in study_to_pub_rows].count(True)
@@ -931,7 +929,8 @@ def _prepare_rows_for_study_table() -> Optional[List[Dict[str, AttributeValue]]]
                 r['study_lead_full'] = user_row['full_name']
                 break
         if 'study_lead_full' not in r:
-            logger.debug(f"Database inconsistency! Did not find study lead with username '{r['study_lead']}'.")
+            get_application_logger().debug(
+                f"Database inconsistency! Did not find study lead with username '{r['study_lead']}'.")
             return None
     return rows
 
@@ -950,7 +949,7 @@ def _prepare_rows_for_publication_table() -> Optional[List[Dict[str, AttributeVa
     """
     rows = fetch_rows(DBTable.PUB)
     if rows is None:
-        logger.debug("Unable to prepare rows for research publications table; database retrieval error")
+        get_application_logger().debug("Unable to prepare rows for publications table; database retrieval error")
         return None
     for r in rows:
         r['link'] = f"[[&#x21d7;]]({r['doi']})" if len(r['doi']) > 0 else ""

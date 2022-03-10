@@ -24,7 +24,6 @@ unit. Either way, the user selects a session or neural unit, and a detail pane a
 @created: 15jun2021
 """
 import json
-import logging
 from datetime import date
 from typing import List, Optional, Dict, Any, Tuple, Union
 
@@ -35,6 +34,7 @@ import numpy as np
 import plotly.express as px
 
 import database.table_info as ti
+from config.config import get_application_logger
 from database.data_plots import average_response_figure, single_trial_response_figure, trial_target_trajectory_figure, \
     discharge_statistics_figure
 from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_attribute_values, num_table_rows, fetch_one_row, \
@@ -43,8 +43,6 @@ from database.trial_data_ops import trial_protocols_for_session, trial_protocols
     trials_for_neuron, get_trial_protocol_definition, retrieve_trial_reps_for_neuron
 from pages.download_modal import render_download_modal_and_button
 from utils.common import check_date
-
-logger = logging.getLogger(__name__)
 
 
 _SESSION_TAB_ID: str = "explore_session_tab"
@@ -200,8 +198,8 @@ def _fetch_search_results(mode: int = _SESSION_MODE, restrictions: Optional[List
         n_types = fetch_rows(ti.DBTable.NEURON_TYPE)
         users = fetch_restrict_proj([ti.DBTable.USER], None, ['full_name'])
         if (rows is None) or (n_types is None) or (users is None):
-            logger.error("A database error occurred while fetching neural unit information from database",
-                         exc_info=True)
+            get_application_logger().error(
+                "A database error occurred while fetching neural unit information from database", exc_info=True)
             return []
 
         # prepare values in "composed" columns
@@ -217,8 +215,8 @@ def _fetch_search_results(mode: int = _SESSION_MODE, restrictions: Optional[List
         studies = fetch_restrict_proj([ti.DBTable.STUDY], None, ['study_title'])
         users = fetch_restrict_proj([ti.DBTable.USER], None, ['full_name'])
         if any([(r is None) for r in [rows, studies, users]]):
-            logger.error("A database error occurred while fetching experiment session information from database",
-                         exc_info=True)
+            get_application_logger().error(
+                "A database error occurred while fetching experiment session information from database", exc_info=True)
             return []
 
         # sort in reverse chrono order by date that session was added to the database (so most recent adds are first!)
@@ -477,7 +475,8 @@ def _session_info_tabpane(session: Dict[str, Any]) -> html.Div:
             ephys = None
             brain_area = None
     except Exception as e:
-        logger.error(f"Error while fetching info for experiment session summary: {str(e)}", exc_info=True)
+        get_application_logger().error(
+            f"Error while fetching info for experiment session summary: {str(e)}", exc_info=True)
         return html.Div(dbc.Alert("Failed to retrieve information on selected session from the database", is_open=True))
 
     info_table_rows = [
@@ -562,8 +561,8 @@ def _experimenter_popover(experimenter: Dict[str, ti.AttributeValue]) -> dbc.Pop
             last_commit = sessions[0]['committed'].strftime("%Y-%m-%d")
             sessions_line = f"#Sessions uploaded: {num_sessions} (last upload on: {last_commit})"
     except Exception as e:
-        logger.error(f"Error while fetching sessions for experimenter {experimenter['username']}: {str(e)}",
-                     exc_info=True)
+        get_application_logger().error(
+            f"Error while fetching sessions for experimenter {experimenter['username']}: {str(e)}", exc_info=True)
 
     title, org, email = experimenter['title'], experimenter['organization'], experimenter['contact_email']
     if title and (len(title) > 0):
@@ -599,8 +598,7 @@ def _subject_popover(subj_id: str) -> dbc.Popover:
         if ok and len(implants) > 0:
             implants.sort(key=lambda x: x['implant_date'], reverse=True)
     except Exception as e:
-        logger.error(f"Error while fetching information on subject {subj_id}: {str(e)}",
-                     exc_info=True)
+        get_application_logger().error(f"Error while fetching info on subject {subj_id}: {str(e)}", exc_info=True)
     markdown = f"_ID/Nickname_: **{subj_id}**  \n"
     if ok:
         markdown += f"_Species_: {subject['species']}  \n_DOB_: {subject['dob']} (sex: {subject['sex']})  \n\n"
@@ -652,8 +650,8 @@ def _study_popover(study: Dict[str, ti.AttributeValue]) -> dbc.Popover:
         if isinstance(units, list):
             num_units = len(units)
     except Exception as e:
-        logger.error(f"Error while fetching additional info on study {study['study_title']}: {str(e)}",
-                     exc_info=True)
+        get_application_logger().error(
+            f"Error while fetching additional info on study {study['study_title']}: {str(e)}", exc_info=True)
 
     study_lead_contact = \
         f"{study_lead['full_name']}, [{study_lead['contact_email']}](mailto:{study_lead['contact_email']})" \
@@ -744,7 +742,7 @@ def _trial_data_tabpane(session: Dict[str, Any]) -> html.Div:
         pk = {k: session[k] for k in ti.primary_key_of(ti.DBTable.SESSION, False)}
         num_units = num_table_rows(ti.DBTable.SESSION_NEURON, restriction=[pk])
     except Exception as e:
-        logger.error(f"Error while fetching #units recorded during session: {str(e)}", exc_info=True)
+        get_application_logger().error(f"Error while fetching #units recorded during session: {str(e)}", exc_info=True)
         pass
 
     # ID of unit initiallly displayed: When search table row selected includes a unit ID, select that unit. Else, select
@@ -931,7 +929,7 @@ def _unit_summary(unit_pk: Dict[str, Any]) -> html.Div:
         sampling_rate = fetch_attribute_values(ti.DBTable.SESSION_EPHYS, 'sampling_rate', unit_pk)[0]
         neuron_type = fetch_attribute_values(ti.DBTable.NEURON_TYPE, 'nt_name', dict(nt_id=unit['unit_type']))[0]
     except Exception as e:
-        logger.error(f"Error while fetching info for unit summary: {str(e)}", exc_info=True)
+        get_application_logger().error(f"Error while fetching info for unit summary: {str(e)}", exc_info=True)
         return html.Div(dbc.Alert("Failed to retrieve information on selected neuron from the database", is_open=True))
 
     unit_template: np.ndarray = unit['unit_template']

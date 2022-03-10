@@ -28,18 +28,16 @@ command "python ./index.py". The Dash application instance is created in app.py.
 @created: oct2020
 @author: sruffner
 """
-import logging
-from urllib.parse import urlparse, urlunparse
+from app import app, load_authorized_user
 
+from urllib.parse import urlparse, urlunparse
 from dash import callback, callback_context, no_update, Input, Output, State, dcc, html
 import dash_bootstrap_components as dbc
 import flask_login
 
-from app import app, load_authorized_user
+from config.config import get_application_logger
 from database.user_ops import authenticate_portal_user, validate_username, validate_password
 from pages import curate, commit, explore, user_profile, manage_users, download_history
-
-logger = logging.getLogger(__name__)
 
 
 _LOGIN_MODAL_ID = "login-modal"
@@ -308,7 +306,7 @@ def login_callback(*args):
             else:
                 flask_login.login_user(portal_user)
         if portal_user:  # successful login!
-            logger.info(f"{username} logged in successfully")
+            get_application_logger().info(f"{username} logged in successfully")
             out[0] = False
             out[1] = out[2] = ""
             out[3] = f"Welcome, {portal_user.first_name()}"
@@ -322,7 +320,7 @@ def login_callback(*args):
             out[11] = False
             out[12] = '/explore'
         else:
-            logger.warning(f"Unsuccessful login attempt ({error_msg})")
+            get_application_logger().warning(f"Unsuccessful login attempt ({error_msg})")
             out[10] = error_msg
             out[11] = True
     elif trigger_id == _LOGIN_CANCEL_ID:
@@ -331,7 +329,7 @@ def login_callback(*args):
         out[11] = False
     elif trigger_id == _LOGOUT_ID:
         if flask_login.current_user.is_authenticated:
-            logger.info(f"{flask_login.current_user.get_id()} logging out")
+            get_application_logger().info(f"{flask_login.current_user.get_id()} logged out")
         flask_login.logout_user()
         out[3] = "Welcome"
         out[4] = dict(display='none')
@@ -354,6 +352,6 @@ def get_app():
 
 # To run the backend on the Flask development server, run 'python index.py'
 if __name__ == '__main__':
-    logger.info("Starting portal app on Flask development server.")
+    get_application_logger().info("Starting portal app on Flask development server.")
     # force single-threaded server to avoid thread conflicts in servicing requests.
     app.run_server(host='0.0.0.0', port='8050', debug=True, threaded=False)

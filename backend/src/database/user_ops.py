@@ -7,7 +7,6 @@ it also handles login/authentication of a user.
 @author: sruffner
 @created: 11oct2021
 """
-import logging
 import re
 import sys
 from datetime import datetime
@@ -16,11 +15,10 @@ from typing import Optional, Union, Dict, List
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from config.config import get_application_logger
 from database.table_info import DBTable, attribute_info
 from database.table_ops import update_table_row, fetch_rows, insert_into_table, row_exists, \
     delete_from_table, fetch_one_row, fetch_restrict_proj
-
-logger = logging.getLogger(__name__)
 
 
 PASSWORD_HASH_METHOD = 'pbkdf2:sha256:10000'
@@ -56,7 +54,7 @@ def authenticate_portal_user(username: str, password: str, admin_only: bool = Fa
 
     pk = dict(username=username)
     error_msg = None
-    logger.debug(f"Trying to authenticate {username}")
+    get_application_logger().debug(f"Trying to authenticate {username}")
     res = fetch_restrict_proj([DBTable.USER], [pk], ['password', 'access'])
     if (res is None) or (len(res) != 1):
         error_msg = 'Unrecognized username or database error'
@@ -72,7 +70,7 @@ def authenticate_portal_user(username: str, password: str, admin_only: bool = Fa
         entry = dict(username=username, last_login=last_login)
         update_table_row(DBTable.USER, entry)
     else:
-        logger.debug(f"...authentication failed: {error_msg}")
+        get_application_logger().debug(f"...authentication failed: {error_msg}")
     return error_msg
 
 
@@ -133,10 +131,10 @@ def register_new_portal_user(username: str, password: str, access: str, full_nam
                    access=access, full_name=full_name, contact_email=contact_email, registered=now, pwd_changed=now)
         error_msg = insert_into_table(DBTable.USER, row)
     if error_msg is None:
-        logger.debug(f"Registered new user {username} with access level {access}.")
+        get_application_logger().debug(f"Registered new user {username} with access level {access}.")
     else:
         error_msg = f"Failed to register new user {username}: {error_msg}"
-        logger.debug(error_msg)
+        get_application_logger().debug(error_msg)
     return error_msg
 
 
@@ -245,7 +243,7 @@ def remove_portal_user(username: str) -> Optional[str]:
     Returns:
         None if successful, else a brief error description
     """
-    logger.debug(f"Trying to remove portal user {username}...")
+    get_application_logger().debug(f"Trying to remove portal user {username}...")
     return delete_from_table(DBTable.USER, dict(username=username))
 
 
@@ -271,8 +269,8 @@ def update_portal_user_profile(username: str, full_name: str, email: str, title:
     if len(entry) == 1:   # no changes
         return None
     error_msg = update_table_row(DBTable.USER, entry)
-    logger.debug(f"{username} successfully changed profile." if (error_msg is None) else
-                 f"User profile change failed for {username}: {error_msg}")
+    get_application_logger().debug(f"{username} successfully changed profile." if (error_msg is None) else
+                                   f"User profile change failed for {username}: {error_msg}")
     return error_msg
 
 
@@ -305,8 +303,8 @@ def change_portal_user_password(username: str, old_password: str, new_password: 
         entry['pwd_changed'] = datetime.now().isoformat(sep=' ', timespec='seconds')  # 'YYYY-MM-DD HH:MM:SS'
         error_msg = update_table_row(DBTable.USER, entry, log=False)  # we don't record password changes in DB ops log
 
-    logger.debug(f"{username} successfully changed password." if (error_msg is None) else
-                 f"Password change failed for {username}: {error_msg}")
+    get_application_logger().debug(f"{username} successfully changed password." if (error_msg is None) else
+                                   f"Password change failed for {username}: {error_msg}")
     return error_msg
 
 
@@ -326,8 +324,8 @@ def change_portal_user_access_level(username: str, access: str) -> Optional[str]
     else:
         error_msg = update_table_row(DBTable.USER, dict(username=username, access=access))
 
-    logger.debug(f"Changed {username}'s access level to {access}." if (error_msg is None) else
-                 f"Access level change failed for {username}: {error_msg}")
+    get_application_logger().debug(f"Changed {username}'s access level to {access}." if (error_msg is None) else
+                                   f"Access level change failed for {username}: {error_msg}")
     return error_msg
 
 

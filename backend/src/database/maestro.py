@@ -1,13 +1,8 @@
 """
 maestro.py: Structures and functions for digesting Maestro trial data files.
 
-TODO: UNDER DEVELOPMENT
-
 TODO: Only implementing support for digesting Trial-mode data files. Cannot be used to process files recorded in
-Continuous mode. Need to comment code throughout
-
-TODO: NEXT -- TrialProtocol class representing a Maestro trial that is repeated many times and contains zero or more
-RandomVariables....Discuss with David -- how to identify trial reps when digesting an experiment session.
+ Continuous mode. Need to comment code throughout
 
 @author: sruffner
 @created: 08dec2020

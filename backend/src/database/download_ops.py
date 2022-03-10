@@ -40,7 +40,6 @@ protected by a mechanism that verifies the specified user is logged in with the 
 @author: sruffner
 @created: 17feb2022
 """
-import logging
 import pickle
 import time
 import uuid
@@ -52,14 +51,11 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import scipy.io
 from rq import Queue
-from config.config import get_config
-from config.logging import setup_logging
+from config.config import get_config, get_application_logger
 from database.repo import upload_file_to_bucket, presigned_url_for_file
 from database.table_info import AttributeValue, DBTable, primary_key_of
 from database.table_ops import row_exists, fetch_attribute_values, fetch_one_row, insert_into_table
 from database.trial_data_ops import TrialData, retrieve_trial_block
-
-logger = logging.getLogger(__name__)
 
 
 job_queue = Queue(connection=get_config().redis_conn)
@@ -184,7 +180,7 @@ def request_data_download(
                 raise ValueError(f"No recorded neural unit with ID={i}")
     except Exception as e:
         emsg = f"Download request submission failed: {str(e)}"
-        logger.error(emsg, exc_info=True)
+        get_application_logger().error(emsg, exc_info=True)
         return False, emsg
 
     req_id = uuid.uuid4().hex
@@ -210,7 +206,7 @@ def request_data_download(
 
         return True, req_id
     except Exception as e:
-        logger.error(f"Error while submitting a new download request: {str(e)}", exc_info=True)
+        get_application_logger().error(f"Error while submitting a new download request: {str(e)}", exc_info=True)
         return False, "An internal error occurred on server while submitting the download request"
 
 
@@ -228,12 +224,12 @@ def pending_download_request_status(req_id: str) -> Optional[DownloadRequestStat
         conn = get_config().redis_conn
         status_blob = conn.get(status_key)
         if status_blob is None:
-            logger.debug(f"Pending download request ID={req_id} not found on Redis server")
+            get_application_logger().debug(f"Pending download request ID={req_id} not found on Redis server")
             return None
         req_status: DownloadRequestStatus = pickle.loads(status_blob)
         return req_status
     except Exception as e:
-        logger.error(f"Error retrieve pending download request status: {str(e)}", exc_info=True)
+        get_application_logger().error(f"Error retrieve pending download request status: {str(e)}", exc_info=True)
         return None
 
 
@@ -257,7 +253,8 @@ def cancel_pending_download_request(requester: str, req_id: str) -> bool:
             pipe.execute()
         return True
     except Exception as e:
-        logger.error(f"Error cancelling a pending download request {requester}-{req_id}: {str(e)}", exc_info=True)
+        get_application_logger().error(f"Error cancelling a pending download request {requester}-{req_id}: {str(e)}",
+                                       exc_info=True)
         return False
 
 
@@ -285,10 +282,8 @@ def fulfill_pending_download_request(req_id: str) -> bool:
     Returns:
         True if the download request is successfully fulfilled; False otherwise.
     """
-    # since this method is called in an RQ work horse process, logging has not been configured. So we do it here.
-    setup_logging(cfg_file='../config/logging.yaml')
 
-    logger.debug(f"Generating data file for pending download request {req_id}")
+    get_application_logger().debug(f"Generating data file for pending download request {req_id}")
     try:
         conn = get_config().redis_conn
         info_key = f"{_DOWNLOAD_INFO_NS}{req_id}"
@@ -320,7 +315,7 @@ def fulfill_pending_download_request(req_id: str) -> bool:
         # make sure the downloads/ folder exists in the repository root
         downloads_dir = get_data_downloads_directory()
         if not downloads_dir.is_dir():
-            logger.debug("Creating downloads/ folder in backend repository")
+            get_application_logger().debug("Creating downloads/ folder in backend repository")
             downloads_dir.mkdir(parents=True, exist_ok=False)
 
         # write data file
@@ -342,11 +337,11 @@ def fulfill_pending_download_request(req_id: str) -> bool:
 
         if _request_status_update(req_id, f"DONE!", 100, DOWNLOAD_READY):
             return False
-        logger.debug(f"Successfully generated data file for download request {req_id}")
+        get_application_logger().debug(f"Successfully generated data file for download request {req_id}")
         return True
     except Exception as err:
         error_msg = f"ERROR while preparing download archive for request {req_id}: {str(err)}"
-        logger.error(error_msg, exc_info=True)
+        get_application_logger().error(error_msg, exc_info=True)
         _request_status_update(req_id, error_msg, 100, DOWNLOAD_FAIL)
         return False
 
@@ -511,12 +506,12 @@ def get_data_download_url(requester: str, req_id: str) -> Tuple[bool, str]:
         )
         err_msg = insert_into_table(DBTable.DATA_DOWNLOAD, download_entry)
         if err_msg is not None:
-            logger.error(f"Failed to record completed data download in database: {err_msg}")
+            get_application_logger().error(f"Failed to record completed data download in database: {err_msg}")
 
         clear = True
         return True, url
     except Exception as e:
-        logger.error(f"Failed to get download URL for request {req_id}: {str(e)}", exc_info=True)
+        get_application_logger().error(f"Failed to get download URL for request {req_id}: {str(e)}", exc_info=True)
         return False, f"Internal error while trying to generate URL for data file download."
     finally:
         if clear:

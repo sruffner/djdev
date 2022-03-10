@@ -20,7 +20,6 @@ a threading lock....
 @author: sruffner
 @created: 11oct2021
 """
-import logging
 import re
 from typing import Optional, List, Union, Dict, Set, Tuple
 from datetime import date, datetime
@@ -28,13 +27,13 @@ import datajoint as dj
 import numpy as np
 from datajoint.expression import QueryExpression
 
+from config.config import get_application_logger
 from database.log_ops import log_add_table_row, log_update_table_row, log_delete_from_table, log_mapping_table_update
 from database.table_info import DBTable, AttributeValue, attributes_of, primary_key_of, has_auto_primary_key, \
     attribute_info, AttrTypeEnum, validate_numeric_attribute_value
 from utils.common import check_date
 import database.sgl_schema as sgl
 
-logger = logging.getLogger(__name__)
 
 _table_map: Dict[DBTable, dj.Table] = {
     DBTable.USER: sgl.User(),
@@ -94,7 +93,7 @@ def num_table_rows(table_id: DBTable,
         n = len(query)
     except Exception as e:
         n = 0
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
     return n
 
 
@@ -138,7 +137,7 @@ def fetch_attribute_values(table_id: DBTable, attr_id: str,
         attr_values = list(query.fetch(attr_id))
     except Exception as e:
         attr_values = []
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
     return attr_values
 
 
@@ -203,7 +202,7 @@ def fetch_rows(table_id: DBTable, restriction: Optional[Dict[str, AttributeValue
         rows = query.fetch(as_dict=True)
     except Exception as e:
         rows = None
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
     return rows
 
 
@@ -228,7 +227,7 @@ def fetch_one_row(table_id: DBTable, pk: Dict[str, AttributeValue]) -> Optional[
         row = (_table_map[table_id] & restriction).fetch1()
     except Exception as e:
         row = None
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
     return row
 
 
@@ -261,7 +260,7 @@ def fetch_any_proj(table_id: DBTable, conditions: Optional[List[str]] = None, at
         rows = final_query.fetch(as_dict=True)
     except Exception as e:
         rows = None
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
     return rows
 
 
@@ -330,7 +329,7 @@ def fetch_restrict_proj(
         rows = final_query.fetch(as_dict=True)
     except Exception as e:
         rows = None
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
     return rows
 
 
@@ -351,12 +350,12 @@ def insert_into_table(table_id: DBTable, row: Dict[str, AttributeValue], log: bo
     """
     if not (table_id in _table_map):
         error_msg = f"Unrecognized database table ID: {str(table_id)}"
-        logger.error(error_msg)
+        get_application_logger().error(error_msg)
         return error_msg
 
     err_msg = check_row(table_id, row)
     if err_msg is not None:
-        logger.error(err_msg)
+        get_application_logger().error(err_msg)
         return err_msg
     try:
         table: dj.Table = _table_map[table_id]
@@ -368,7 +367,7 @@ def insert_into_table(table_id: DBTable, row: Dict[str, AttributeValue], log: bo
                     raise Exception(err_msg)
     except Exception as e:
         err_msg = f"Insert failed: table={str(table_id)}, value={row} ===> {str(e)}"
-        logger.error(err_msg, exc_info=True)
+        get_application_logger().error(err_msg, exc_info=True)
     return err_msg
 
 
@@ -389,7 +388,7 @@ def update_table_row(table_id: DBTable, row: Dict[str, AttributeValue], log: boo
     """
     if not (table_id in _table_map):
         err_msg = f"Unrecognized database table ID: {str(table_id)}"
-        logger.error(err_msg)
+        get_application_logger().error(err_msg)
         return err_msg
 
     err_msg = None
@@ -404,7 +403,7 @@ def update_table_row(table_id: DBTable, row: Dict[str, AttributeValue], log: boo
                     raise Exception(err_msg)
     except (Exception, ValueError) as e:
         err_msg = f"Row update failed: table={str(table_id)} ===> {str(e)}"
-        logger.error(err_msg, exc_info=True)
+        get_application_logger().error(err_msg, exc_info=True)
     return err_msg
 
 
@@ -435,7 +434,7 @@ def delete_from_table(table_id: DBTable, row_pk: Dict[str, AttributeValue], log:
     elif not table_id.allow_delete():
         err_msg = f"User-initiated deletions from this table are not permitted: {str(table_id)}"
     if err_msg is not None:
-        logger.error(err_msg)
+        get_application_logger().error(err_msg)
         return err_msg
 
     try:
@@ -452,10 +451,10 @@ def delete_from_table(table_id: DBTable, row_pk: Dict[str, AttributeValue], log:
                     raise Exception(err_msg)
     except KeyError:
         err_msg = f"Delete failed: table={str(table_id)} ===> Incomplete primary key"
-        logger.error(err_msg, exc_info=True)
+        get_application_logger().error(err_msg, exc_info=True)
     except Exception as e:
         err_msg = f"Delete failed: table={str(table_id)} ===> {str(e)}"
-        logger.error(err_msg, exc_info=True)
+        get_application_logger().error(err_msg, exc_info=True)
     return err_msg
 
 
@@ -498,7 +497,7 @@ def _check_row_deletion(table_id: DBTable, row_pk: Dict[str, AttributeValue]) ->
             if len(_table_map[DBTable.SESSION_NEURON] & {'unit_type': row_pk['nt_id']}) > 0:
                 return False
     except Exception as e:
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
         return False
     return True
 
@@ -523,7 +522,7 @@ def row_exists(table_id: DBTable, row_pk: Dict[str, AttributeValue]) -> bool:
         restriction = {key: row_pk[key] for key in table_pk}
         exists = (num_table_rows(table_id, [restriction]) == 1)
     except KeyError as e:
-        logger.error(str(e), exc_info=True)
+        get_application_logger().error(str(e), exc_info=True)
         raise ValueError("Incomplete primary key")
     return exists
 
@@ -732,7 +731,7 @@ def update_mapping_table(map_table_id: DBTable, src_pk_val: int, map_set: Set[in
                     raise Exception(err_msg)
     except Exception as err:
         error_msg = f"Failed to update cross-reference table {str(map_table_id)}: {str(err)}"
-        logger.error(error_msg, exc_info=True)
+        get_application_logger().error(error_msg, exc_info=True)
     return error_msg
 
 
@@ -845,10 +844,12 @@ class SessionCommitter(sgl.TrialProducer):
                     restriction = [f"proto_hash = '{p['proto_hash']}'" for p in self.trial_protocols()]
                     (sgl.TrialProtocol() & restriction).delete()
             except Exception as e2:
-                logger.error(f"Exception ({str(e2)}) occurred while rolling back after an"
-                             f"aborted session commit. Database may be left in an inconsistent state!")
+                get_application_logger().error(
+                    f"Exception ({str(e2)}) occurred while rolling back after an"
+                    f"aborted session commit. Database may be left in an inconsistent state!"
+                )
                 pass
-            logger.error(f"Session commit to database failed: {str(e)}", exc_info=True)
+            get_application_logger().error(f"Session commit to database failed: {str(e)}", exc_info=True)
             return f"Error during session commit: {str(e)}"
 
         return None
@@ -919,6 +920,6 @@ def rollback_session_commit(session_pk: Dict[str, AttributeValue], proto_hashes:
                 (proto_table & proto_restriction).delete()
     except Exception as e:
         err_msg = f"Session rollback failed for session PK {session_pk} ===> {str(e)}"
-        logger.error(err_msg, exc_info=True)
+        get_application_logger().error(err_msg, exc_info=True)
         return f"Rollback failed: {str(e)} - database may be left in an inconsistent state!"
     return None

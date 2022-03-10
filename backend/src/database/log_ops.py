@@ -18,7 +18,6 @@ access to the operations log file must go through this module.
 @author: sruffner
 @created: 11oct2021
 """
-import logging
 import os
 import pickle
 import sys
@@ -27,10 +26,9 @@ from typing import Dict, Optional, Set, TextIO
 from contextlib import contextmanager
 from fasteners import InterProcessLock
 
+from config.config import get_application_logger
 from database.table_info import DBTable, AttributeValue
 
-
-logger = logging.getLogger(__name__)
 
 _LOG_FILE_DIR: Path = Path(os.environ['DJDEV_ROOT_REPO'], 'logs')
 """ Directory containing the database operations log file. """
@@ -92,7 +90,7 @@ def log_add_table_row(table_id: DBTable, row: Dict[str, AttributeValue]) -> Opti
                 pickle.dump({'op': 'add', 'table': table_id, 'row': row}, file)
     except Exception as err:
         error_msg = f"Failed to post 'add' entry to database update log: {str(err)}"
-        logger.error(error_msg, exc_info=True)
+        get_application_logger().error(error_msg, exc_info=True)
     return error_msg
 
 
@@ -114,7 +112,7 @@ def log_delete_from_table(table_id: DBTable, restriction: Optional[Dict[str, Att
                 pickle.dump({'op': 'delete', 'table': table_id, 'restriction': restriction}, file)
     except Exception as err:
         error_msg = f"Failed to post 'delete' entry to database update log: {str(err)}"
-        logger.error(error_msg, exc_info=True)
+        get_application_logger().error(error_msg, exc_info=True)
     return error_msg
 
 
@@ -141,7 +139,7 @@ def log_update_table_row(table_id: DBTable, row: Dict[str, AttributeValue]) -> O
                 pickle.dump({'op': 'update', 'table': table_id, 'row': row}, file)
     except Exception as err:
         error_msg = f"Failed to post 'update' entry to database update log: {str(err)}"
-        logger.error(error_msg, exc_info=True)
+        get_application_logger().error(error_msg, exc_info=True)
     return error_msg
 
 
@@ -165,7 +163,7 @@ def log_mapping_table_update(table_id: DBTable, src_pk_val: int, map_set: Set[in
                 pickle.dump({'op': 'mapping', 'table': table_id, 'src_pk': src_pk_val, 'dst_pks': map_set}, file)
     except Exception as err:
         error_msg = f"Failed to post 'mapping' entry to database update log: {str(err)}"
-        logger.error(error_msg, exc_info=True)
+        get_application_logger().error(error_msg, exc_info=True)
     return error_msg
 
 
@@ -192,7 +190,7 @@ def log_session_commit(user: str, subject: str, session_date: str, suffix: int) 
                              'suffix': suffix}, file)
     except Exception as err:
         error_msg = f"Failed to post 'session' entry to database update log: {str(err)}"
-        logger.error(error_msg, exc_info=True)
+        get_application_logger().error(error_msg, exc_info=True)
     return error_msg
 
 
@@ -224,6 +222,6 @@ def dump_log(out: Optional[TextIO] = sys.stdout) -> None:
                     break
     except Exception as e:
         err_msg = f"Error occurred while dumping database operations log: {str(e)}"
-        logger.error(err_msg, exc_info=True)
+        get_application_logger().error(err_msg, exc_info=True)
         print(f"=====> {err_msg}", file=sys.stdout, flush=True)
     print("\n****** END Database operations log history ******\n")

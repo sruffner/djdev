@@ -4,39 +4,35 @@ app.py: Create and configure the Dash application instance for the Lisberger lab
 @created: oct2020
 @author: sruffner
 """
-import logging
 from typing import Dict, Optional
+
+# set up the application logging as early as possible
+from config.config import get_config, AppConfig, get_application_logger
+
+get_application_logger()
 
 from dash import Dash
 import dash_bootstrap_components as dbc
 import dash_uploader as du
 import flask_login
-from config.config import get_config, AppConfig
-from config.logging import setup_logging
 from database.upload_handler import UploadHandler
 from database.user_ops import get_portal_user_record, ADMIN_ACCESS, COMMIT_ACCESS
 
-setup_logging(cfg_file='config/logging.yaml')
 
-cfg: AppConfig = get_config()
+_cfg: AppConfig = get_config()
 app = Dash(__name__, external_stylesheets=[dbc.themes.SPACELAB, dbc.icons.BOOTSTRAP])
-server = app.server
 
-# Dash adds a stream handler to the 'app' logger. We don't want this.
-logger = logging.getLogger(__name__)
-logger.handlers.clear()
-
-app.config.suppress_callback_exceptions = cfg.dash_suppress_callback_exceptions
+app.config.suppress_callback_exceptions = _cfg.dash_suppress_callback_exceptions
 
 # configure Dash uploader to upload to staging directory in backend container and to use a custom upload handler
 # that serves our purpose
-du.configure_upload(app, cfg.dash_upload_dir, http_request_handler=UploadHandler)
+du.configure_upload(app, _cfg.dash_upload_dir, http_request_handler=UploadHandler)
 
 # Setup for Flask-Login
-server.permanent_session_lifetime = cfg.flask_permanent_session_lifetime
-server.config.update(SECRET_KEY=cfg.flask_secret_key)
+app.server.permanent_session_lifetime = _cfg.flask_permanent_session_lifetime
+app.server.config.update(SECRET_KEY=_cfg.flask_secret_key)
 login_manager = flask_login.LoginManager()
-login_manager.init_app(server)
+login_manager.init_app(app.server)
 login_manager.login_view = '/explore'
 login_manager.refresh_view = '/explore'
 login_manager.needs_refresh_message = "Session timed out, please login again."
@@ -84,6 +80,6 @@ def load_authorized_user(username: str) -> Optional[PortalUser]:
     """
     user_record = get_portal_user_record(username)
     if isinstance(user_record, str):
-        logger.warning(f"Authentication error: {user_record}")
+        get_application_logger().warning(f"Authentication error: {user_record}")
         return None
     return PortalUser(user_record)

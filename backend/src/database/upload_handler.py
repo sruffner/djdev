@@ -5,14 +5,13 @@ upload_handler.py: Alternate implementation of the server-side handler that rece
 @author: sruffner
 @created: 07dec2021
 """
-import logging
 import os
 import traceback
 
 from flask import request, abort
 from dash_uploader.httprequesthandler import BaseHttpRequestHandler, get_chunk_name
 
-logger = logging.getLogger(__name__)
+from config.config import get_application_logger
 
 
 class UploadHandler(BaseHttpRequestHandler):
@@ -53,5 +52,5 @@ class UploadHandler(BaseHttpRequestHandler):
             chunk_data.save(chunk_file)
             return file_name
         except Exception:
-            logger.error(traceback.format_exc())
+            get_application_logger().error(traceback.format_exc())
             abort(500, "Error on server")

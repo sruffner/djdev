@@ -9,7 +9,6 @@ we want to be able to reuse these functions on different pages within the portal
 @author: sruffner
 @created: 20jan2022
 """
-import logging
 from typing import Dict, Any, Optional, Union, List
 
 import numpy as np
@@ -22,7 +21,6 @@ from database import stats
 from database.maestro import Protocol, SegParamType
 from database.trial_data_ops import data_for_trial, retrieve_trial_reps_for_session, retrieve_trial_reps_for_neuron
 
-logger = logging.getLogger(__name__)
 
 _BEHAVIOR_TRACE_STYLE_MAP = {
     'HEPOS': dict(color='royalblue'),
