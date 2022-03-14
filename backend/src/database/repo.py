@@ -58,14 +58,30 @@ def existing_buckets() -> None:
         print('Sorry, an error occurred.\n\n', flush=True)
 
 
-def upload_file_to_bucket(file_path: Path, bucket_name: str, key: str) -> bool:
+def upload_file_to_bucket(file_path: Path, bucket_name: str, key: str, log: bool = True) -> bool:
+    """
+    Upload a file to the specified key in the specified bucket in AWS S3 account.
+
+    Args:
+        file_path: Path to file. Must exist.
+        bucket_name: The name of the target S3 bucket.
+        key: The key under which the file object should be stored.
+        log: If True, progress updates are posted to the portal application log once the upload begins and after 50%
+            completion. Else a progress message is updated in-place on STDOUT (only for testing). Default = True.
+    Returns:
+        True if successful; False otherwise. Error message is written to the portal application log.
+    """
     xfer_cfg = TransferConfig(multipart_threshold=50*MB, multipart_chunksize=50*MB)
     try:
         session = aws_session()
         s3_resource = session.resource('s3')
         bucket = s3_resource.Bucket(bucket_name)
+        if log:
+            get_application_logger().info(f"Starting upload: {file_path.name} to S3 bucket {bucket_name} at {key}")
         bucket.upload_file(Filename=str(file_path), Key=key,
-                           Callback=ProgressToConsole(file_path), Config=xfer_cfg)
+                           Callback=_TransferProgressCallback(file_path, log=log), Config=xfer_cfg)
+        if log:
+            get_application_logger().info(f"Successfully uploaded {file_path.name} to S3.")
         return True
     except Exception:
         get_application_logger().error(f"Failed to upload file {file_path} to S3 bucket {bucket_name}", exc_info=True)
@@ -88,6 +104,8 @@ def presigned_url_for_file(bucket_name: str, key: str, expires: int = 3600) -> T
         s3_client = session.client('s3')
         url = s3_client.generate_presigned_url(ClientMethod='get_object', Params={'Bucket': bucket_name, 'Key': key},
                                                ExpiresIn=expires)
+        get_application_logger().info(
+            f"Generated presigned URL for {key} in S3 bucket {bucket_name}. Expiring in {expires} seconds.")
         return True, url
     except Exception:
         get_application_logger().error(f"Failed to generate presigned URL for {key} in S3 bucket {bucket_name}",
@@ -95,21 +113,40 @@ def presigned_url_for_file(bucket_name: str, key: str, expires: int = 3600) -> T
         return False, "Unable to generate download URL - file does not exist or internal error"
 
 
-def download_file_from_bucket(bucket_name: str, key: str, dst: Path) -> bool:
+def download_file_from_bucket(bucket_name: str, key: str, dst: Path, log: bool = True) -> bool:
+    """
+    Download a file from the specified key in the specified bucket in AWS S3.
+
+    Args:
+        bucket_name: The name of the source S3 bucket.
+        key: The key under which the file object is stored within that bucket.
+        dst: The file system destination path for the file object.
+        log: If True, progress updates are posted to the portal application log once the download begins and after 50%
+            completion. Else a progress message is updated in-place on STDOUT (only for testing). Default = True.
+    Returns:
+        True if successful; False otherwise. Error message is written to the portal application log.
+    """
     xfer_cfg = TransferConfig(multipart_threshold=50*MB, multipart_chunksize=50*MB)
     try:
         session = aws_session()
         s3_resource = session.resource('s3')
         obj = s3_resource.Object(bucket_name, key)
         obj.load()
+
+        if log:
+            get_application_logger().info(f"Starting download from S3 bucket {bucket_name} at {key} to {dst.name}")
         s3_resource.Object(bucket_name, key).download_file(
-            Filename=str(dst), Callback=ProgressToConsole(dst, download_size=obj.content_length), Config=xfer_cfg
+            Filename=str(dst),
+            Callback=_TransferProgressCallback(dst, log=log, download_size=obj.content_length),
+            Config=xfer_cfg
         )
+        if log:
+            get_application_logger().info(f"Successfully downloaded S3 object at {key}.")
         if dst.is_file():
             return True
         else:
             get_application_logger().error(
-                f"File downloaded from S3 successfully not found at specified destination {str(dst)}")
+                f"File downloaded from S3 successfully, but NOT found at specified destination {str(dst)}")
             return False
     except Exception:
         get_application_logger().error(f"Failed to download object {key} from S3 bucket {bucket_name}", exc_info=True)
@@ -117,10 +154,20 @@ def download_file_from_bucket(bucket_name: str, key: str, dst: Path) -> bool:
 
 
 def delete_file_in_bucket(bucket_name: str, key: str) -> bool:
+    """
+    Permanently delete an object stored in an AWS S3 bucket.
+
+    Args:
+        bucket_name: The name of the S3 bucket containing the object.
+        key: The object's key.
+    Returns:
+        True if successful; False otherwise. Error message is written to the portal application log.
+    """
     try:
         session = aws_session()
         s3_resource = session.resource('s3')
         s3_resource.Object(bucket_name, key).delete()
+        get_application_logger().info(f"Successfully deleted object {key} from S3 bucket {bucket_name}.")
         return True
     except Exception:
         get_application_logger().error(f"Failed to delete object {key} from S3 bucket {bucket_name}", exc_info=True)
@@ -128,6 +175,16 @@ def delete_file_in_bucket(bucket_name: str, key: str) -> bool:
 
 
 def bucket_contents(bucket_name: str) -> Optional[List]:
+    """
+    Retrieve the object listing for the specified bucket in AWS S3.
+
+    Args:
+        bucket_name: The name of the S3 bucket.
+
+    Returns:
+        A list of objects containing metadata on each object in the S3 bucket, or None if operation failed. In the
+            latter case, an error message is written to the portal application log.
+    """
     try:
         session = aws_session()
         s3_resource = session.resource('s3')
@@ -139,10 +196,30 @@ def bucket_contents(bucket_name: str) -> Optional[List]:
         return None
 
 
-class ProgressToConsole(object):
-    def __init__(self, file_path: Path, download_size: Optional[float] = None):
+class _TransferProgressCallback(object):
+    """
+    Callback object reports progress for an S3 object tranfer -- either upload or download. The callback may be
+    configured to overwrite a progress message to STDOUT (which is appropriate only in the __main__ test script, when no
+    other threads/processes are writing to the console), or to write to the portal application log once after the
+    transfer has started and once after the transfer surpasses 50% completion.
+    """
+    def __init__(self, file_path: Path,  log: bool = True, download_size: Optional[float] = None):
+        """
+        Initialize the S3 object transfer callback.
+
+        Args:
+            file_path: The path of file being uploaded (must exist), or the location to which file is downloaded.
+            log: If True, a progress message is written to the portal application log shortly after the transfer has
+                started, and again once it surpasses 50% completion. If False, progress is reported by overwriting a
+                line on STDOUT each time the callback is invoked. Default = True.
+            download_size: If specified, the transfer is a download and this specifies the download file size. Else,
+                the transfer is an upload and file_path must exist. Default = None.
+        """
         self._path: Path = file_path
-        self._size = download_size if download_size else file_path.stat().st_size
+        self._to_log: bool = log
+        self._num_updates = 0
+        self._msg_prefix = "Downloading" if isinstance(download_size, float) else "Uploading"
+        self._size = download_size if isinstance(download_size, float) else file_path.stat().st_size
         self._size_so_far = 0
         self._lock = threading.Lock()
 
@@ -150,8 +227,15 @@ class ProgressToConsole(object):
         with self._lock:
             self._size_so_far += num_bytes
             percentage = (self._size_so_far / float(self._size)) * 100
-            sys.stdout.write(f"\r{self._path.name}  {self._size_so_far}/{self._size} ({percentage:.2f}%)")
-            sys.stdout.flush()
+            if self._to_log:
+                if (self._num_updates == 0) or ((self._num_updates == 1) and (percentage >= 50)):
+                    get_application_logger().info(
+                        f"{self._msg_prefix} {self._path.name}  {self._size_so_far}/{self._size} ({percentage:.2f}%)")
+                    self._num_updates += 1
+            else:
+                sys.stdout.write(
+                    f"\r{self._msg_prefix} {self._path.name}  {self._size_so_far}/{self._size} ({percentage:.2f}%)")
+                sys.stdout.flush()
 
 
 def _print_usage() -> None:
@@ -191,7 +275,7 @@ def _process_command() -> bool:
             error_msg = 'Sorry, file size must be less than 3GB'
         else:
             t_start = time.time()
-            ok = upload_file_to_bucket(file_path, bucket_name, f"{prefix}{file_path.name}")
+            ok = upload_file_to_bucket(file_path, bucket_name, f"{prefix}{file_path.name}", log=False)
             t = time.time() - t_start
             if ok:
                 print(f"\nDone. {file_path.stat().st_size/MB:.1f}MB uploaded in {t:.3f} seconds.")
@@ -204,7 +288,7 @@ def _process_command() -> bool:
             error_msg = 'Cannot overwrite existing file, or parent directory does not exist'
         else:
             t_start = time.time()
-            ok = download_file_from_bucket(bucket_name, obj_key, dst_file)
+            ok = download_file_from_bucket(bucket_name, obj_key, dst_file, log=False)
             t = time.time = t_start
             if ok:
                 print(f"\nDone. {dst_file.stat().st_size/MB:.1f}MB downloaded in {t:.3f} seconds.")
