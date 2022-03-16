@@ -265,7 +265,7 @@ def _get_lifecycle_configuration_rules_for_bucket(bucket_name: str) -> Union[Lis
         session = aws_session()
         s3_resource = session.resource('s3')
         bucket = s3_resource.Bucket(bucket_name)
-        lifecycle_cfg = bucket.LifecycleConfig()
+        lifecycle_cfg = bucket.LifecycleConfiguration()
         lifecycle_cfg.load()
         return lifecycle_cfg.rules
     except Exception as e:
