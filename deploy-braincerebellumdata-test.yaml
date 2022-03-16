@@ -25,7 +25,11 @@
 #     version of the commit SHA for that image. This is important. Previously, there was just the 'devel' tag, which
 #     was overwritten each time a commit to the devel branch was pushed. If a pod failed or was kicked out on the
 #     cluster, OpenShift pulled from Gitlab when recreating the pod. This meant loss of control of what is running on
-#     the cluster.
+#     the cluster. THIS MEANS THAT EVERY TIME WE WANT TO DEPLOY A NEW VERSION, WE MUST UPDATE THE <sha> TAG EVERYHWERE
+#     IN THIS FILE.
+#  4) Secrets. Several environment variables are defined in an opaque Kubernetes Secret, sgl-secret, which must be
+#     deployed prior to deploying the application. The YAML that defines the secret is excluded from the Git repo to
+#     protect those secrets.
 #
 ---
 apiVersion: route.openshift.io/v1
@@ -199,6 +203,10 @@ spec:
             value: data-store.braincerebellumdata-test.svc.cluster.local
           - name: DJDEV_ROOT_REPO
             value: /repository
+          - name: AWS_REGION_NAME
+            value: us-east-1
+          - name: REPO_S3_BUCKET_NAME
+            value: dh-braincerebellumdata-test
           - name: MARIADB_ROOT_PASSWORD
             valueFrom:
               secretKeyRef:
@@ -209,6 +217,16 @@ spec:
               secretKeyRef:
                 name: sgl-secret
                 key: flask_secret_key
+          - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: sgl-secret
+                  key: aws_access_key_id
+          - name: AWS_ACCESS_KEY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sgl-secret
+                  key: aws_access_key_secret
         livenessProbe:
           exec:
             command: [ "sh", "-c", 'H=$(hostname); rq info -W | grep -c $H' ]
@@ -276,6 +294,10 @@ spec:
             value: data-store.braincerebellumdata-test.svc.cluster.local
           - name: DJDEV_ROOT_REPO
             value: /repository
+          - name: AWS_REGION_NAME
+            value: us-east-1
+          - name: REPO_S3_BUCKET_NAME
+            value: dh-braincerebellumdata-test
           - name: MARIADB_ROOT_PASSWORD
             valueFrom:
               secretKeyRef:
@@ -286,6 +308,16 @@ spec:
               secretKeyRef:
                 name: sgl-secret
                 key: flask_secret_key
+          - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: sgl-secret
+                  key: aws_access_key_id
+          - name: AWS_ACCESS_KEY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: sgl-secret
+                  key: aws_access_key_secret
         livenessProbe:
           exec:
             command: [ "sh", "-c", 'pidof -x gunicorn' ]
