@@ -1,10 +1,21 @@
 """
 repo.py: Implementation of the portal backing repository in a single bucket in AWS Single Storage Service (S3).
 
-TODO: UNDER DEVELOPMENT - Testing access to an S3 bucket I created using my own AWS Free Tier account.
-  Update 2/16/22 -- Got basic functionality working: list, download, upload, delete. Once Duke S3 bucket is made
-  available, need to replace relevant environment variables with the appropriate values for accessing that bucket.
-  See environment/.env-compose
+For cost-efficiency's sake, the portal backing repository is implemented using Amazon Web Services' S3. Duke IT has
+provisioned an S3 bucket (actually two, one for production and one for development) for the Lisberger lab. Versioning
+is disabled on the bucket (we don't need it), and access is granted for the operations we'll need: "s3:GetObject" for
+downloading and querying file objects, "s3:PutObject" for uploading file objects, "s3:DeleteObject" to delete any
+object in the bucket, and "s3:ListBucket" to traverse all objects in the bucket.
+
+The portal server must supply the AWS Access Key ID and Secret in order to use the Boto3 S3 SDK to perform any actions
+on the S3 bucket. These secrets are part of application configuration -- see config.AppConfig.
+
+The S3 bucket can contain any number of file objects and is non-hiearchical storage. Each object is stored under a
+string key. However, by design, we use path-like keys for all objects uploaded to the bucket, resulting in a file
+system-like folder hierarchy.  TODO - Have methods in this module enforce object key structure?
+
+TODO: Make methods more portal-specific? EG: move_session_archive_to_repo(path), push_data_download_file_to_repo(path)
+    [returns presigned URL], etc.???
 
 @author: sruffner
 @created: 15feb2022
@@ -20,42 +31,45 @@ from boto3.s3.transfer import TransferConfig
 
 from config.config import get_config, get_application_logger
 
+
 MB = 1024 ** 2
 """ Number of bytes in a megabyte. """
 GB = 1024 ** 3
 """ Number of bytes in a gigabyte. """
 
 
-def aws_session(region_name: str = 'us-west-1') -> Optional[Session]:
+def aws_session() -> Optional[Session]:
     """
     Generate an authenticated AWS session object for accessing AWS services like S3.
 
-    Args:
-        region_name: AWS region name. Default: 'us-west-1'.
     Returns:
         The session object, or None if no authentication credentials found.
     """
     cfg = get_config()
-    if (not cfg.aws_access_key_id) or (not cfg.aws_access_key_secret):
+    if (not cfg.aws_access_key_id) or (not cfg.aws_access_key_secret) or (not cfg.aws_region_name):
         get_application_logger().error("Cannot open AWS session - Missing access credentials.")
         return None
-    return Session(cfg.aws_access_key_id, cfg.aws_access_key_secret, region_name=region_name)
+    return Session(cfg.aws_access_key_id, cfg.aws_access_key_secret, region_name=cfg.aws_region_name)
 
 
-def existing_buckets() -> None:
+def bucket_exists(bucket_name: str) -> bool:
     """
-    Print the names of all available buckets in S3 to STDOUT.
+    Test that the specified bucket exists in the app's AWS S3 account.
+
+    Args:
+        bucket_name: The name of the bucket.
+    Returns:
+        True if bucket exists, else False.
     """
     try:
         session = aws_session()
-        s3_resource = session.resource('s3')
-        print('Existing buckets: ')
-        for bucket in s3_resource.buckets.all():
-            print(f"  {bucket.name}")
-        print('\n\n', flush=True)
-    except Exception:
-        get_application_logger().error("ERROR: Failed to list existing buckets in S3 account", exc_info=True)
-        print('Sorry, an error occurred.\n\n', flush=True)
+        s3_client = session.client('s3')
+        response = s3_client.head_bucket(Bucket=bucket_name)
+        get_application_logger().debug(f"response to head_bucket: {response}")
+        return True
+    except Exception as e:
+        get_application_logger().warning(f"S3 bucket {bucket_name} not found: {str(e)}")
+        return False
 
 
 def upload_file_to_bucket(file_path: Path, bucket_name: str, key: str, log: bool = True) -> bool:
@@ -132,7 +146,6 @@ def download_file_from_bucket(bucket_name: str, key: str, dst: Path, log: bool =
         s3_resource = session.resource('s3')
         obj = s3_resource.Object(bucket_name, key)
         obj.load()
-
         if log:
             get_application_logger().info(f"Starting download from S3 bucket {bucket_name} at {key} to {dst.name}")
         s3_resource.Object(bucket_name, key).download_file(
@@ -203,7 +216,7 @@ class _TransferProgressCallback(object):
     other threads/processes are writing to the console), or to write to the portal application log once after the
     transfer has started and once after the transfer surpasses 50% completion.
     """
-    def __init__(self, file_path: Path,  log: bool = True, download_size: Optional[float] = None):
+    def __init__(self, file_path: Path,  log: bool = True, download_size: Optional[int] = None):
         """
         Initialize the S3 object transfer callback.
 
@@ -218,8 +231,8 @@ class _TransferProgressCallback(object):
         self._path: Path = file_path
         self._to_log: bool = log
         self._num_updates = 0
-        self._msg_prefix = "Downloading" if isinstance(download_size, float) else "Uploading"
-        self._size = download_size if isinstance(download_size, float) else file_path.stat().st_size
+        self._msg_prefix = "Downloading" if isinstance(download_size, int) else "Uploading"
+        self._size = download_size if isinstance(download_size, int) else file_path.stat().st_size
         self._size_so_far = 0
         self._lock = threading.Lock()
 
@@ -243,19 +256,22 @@ def _print_usage() -> None:
           "   l = List all file objects in bucket.\n"
           "   u = Upload a file object to bucket.\n"
           "   d = Download a file object from bucket.\n"
-          "   x = Delete o file object in bucket.\n"
+          "   g = Generate a presigned URL to download a file object from bucket.\n"
+          "   x = Delete a file object in bucket.\n"
           "   h = Print this usage message.\n"
           "   q = Quit.\n\n", file=sys.stdout, flush=True)
 
 
 def _process_command() -> bool:
-    command = input('Enter command (l, u, d, x, h, q) > ')
+    command = input('Enter command (l, u, d, g, x, h, q) > ')
     error_msg = None
     bucket_name = get_config().repo_bucket
     if command == 'l':
         contents = bucket_contents(bucket_name)
-        if not contents:
+        if contents is None:
             error_msg = "Unable to list bucket contents"
+        elif len(contents) == 0:
+            print("*** The bucket is empty! ***")
         else:
             print(f"{'KEY':50} {'STORAGE CLASS':30} {'SIZE (MiB)':15} {'LAST_MODIFIED':30}")
             print(f"{'---':50} {'-------------':30} {'----------':15} {'-------------':30}")
@@ -289,11 +305,18 @@ def _process_command() -> bool:
         else:
             t_start = time.time()
             ok = download_file_from_bucket(bucket_name, obj_key, dst_file, log=False)
-            t = time.time = t_start
+            t = time.time() - t_start
             if ok:
                 print(f"\nDone. {dst_file.stat().st_size/MB:.1f}MB downloaded in {t:.3f} seconds.")
             else:
                 error_msg = "Download failed."
+    elif command == 'g':
+        obj_key = input('Enter object key in full > ')
+        ok, url = presigned_url_for_file(bucket_name, obj_key)
+        if ok:
+            print(f"\nDownload URL is: {url}")
+        else:
+            error_msg = url
     elif command == 'x':
         obj_key = input('Enter object key in full > ')
         if not delete_file_in_bucket(bucket_name, obj_key):
@@ -311,8 +334,13 @@ def _process_command() -> bool:
 
 # To run this module on the backend container: 'docker-compose run backend python -m database.repo
 if __name__ == '__main__':
-    print("Testing programmatic access to S3...\n")
-    existing_buckets()
+    print(f"Verifying S3 bucket '{get_config().repo_bucket}' that holds portal backing repository...")
+    if bucket_exists(get_config().repo_bucket):
+        print(" OK.\n\n", file=sys.stdout, flush=True)
+    else:
+        print(" Bucket not found! ... Exiting.\n", file=sys.stdout, flush=True)
+        exit(-1)
+
     _print_usage()
 
     done = False
