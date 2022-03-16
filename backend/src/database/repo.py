@@ -20,11 +20,12 @@ TODO: Make methods more portal-specific? EG: move_session_archive_to_repo(path),
 @author: sruffner
 @created: 15feb2022
 """
+import json
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Union
 
 from boto3 import Session
 from boto3.s3.transfer import TransferConfig
@@ -251,9 +252,30 @@ class _TransferProgressCallback(object):
                 sys.stdout.flush()
 
 
+def _get_lifecycle_configuration_rules_for_bucket(bucket_name: str) -> Union[List, str]:
+    """
+    Get the current lifecycle configuration rules for the named bucket. For administrative purposes only.
+
+    Args:
+        bucket_name: The name of the S3 bucket.
+    Returns:
+        List of lifecycle configuration rules (each of which is a dictionary), or an error message on failure.
+    """
+    try:
+        session = aws_session()
+        s3_resource = session.resource('s3')
+        bucket = s3_resource.Bucket(bucket_name)
+        lifecycle_cfg = bucket.LifecycleConfig()
+        lifecycle_cfg.load()
+        return lifecycle_cfg.rules
+    except Exception as e:
+        return str(e)
+
+
 def _print_usage() -> None:
     print("\nAvailable commands:\n"
           "   l = List all file objects in bucket.\n"
+          "   c = Display current lifecycle configuration for bucket.\n"
           "   u = Upload a file object to bucket.\n"
           "   d = Download a file object from bucket.\n"
           "   g = Generate a presigned URL to download a file object from bucket.\n"
@@ -262,10 +284,9 @@ def _print_usage() -> None:
           "   q = Quit.\n\n", file=sys.stdout, flush=True)
 
 
-def _process_command() -> bool:
-    command = input('Enter command (l, u, d, g, x, h, q) > ')
+def _process_command(bucket_name: str) -> bool:
+    command = input(f"[{bucket_name}] Enter command (l, c, u, d, g, x, h, q) > ")
     error_msg = None
-    bucket_name = get_config().repo_bucket
     if command == 'l':
         contents = bucket_contents(bucket_name)
         if contents is None:
@@ -278,6 +299,13 @@ def _process_command() -> bool:
             for o in contents:
                 print(f"{o.key:50} {o.storage_class:30} {float(o.size)/MB:<15.1f} "
                       f"{o.last_modified.strftime('%m-%d-%Y %H:%M:%S %Z'):30}")
+    elif command == 'c':
+        rules = _get_lifecycle_configuration_rules_for_bucket(bucket_name)
+        if isinstance(rules, str):
+            error_msg = rules
+        else:
+            print(f"Bucket Lifecycle Configuration for {bucket_name}:")
+            print(json.dumps(rules, indent=3), file=sys.stdout, flush=True)
     elif command == 'u':
         file_path = Path(input('Enter full path to file to be uploaded > '))
         prefix = input('Enter path-like prefix, eg "/repo/folder1" (can be empty string) > ')
@@ -334,10 +362,8 @@ def _process_command() -> bool:
 
 # To run this module on the backend container: 'docker-compose run backend python -m database.repo
 if __name__ == '__main__':
-    print(f"Verifying S3 bucket '{get_config().repo_bucket}' that holds portal backing repository...")
-    if bucket_exists(get_config().repo_bucket):
-        print(" OK.\n\n", file=sys.stdout, flush=True)
-    else:
+    _bucket_name = input('Enter name of S3 bucket > ')
+    if not bucket_exists(_bucket_name):
         print(" Bucket not found! ... Exiting.\n", file=sys.stdout, flush=True)
         exit(-1)
 
@@ -345,6 +371,6 @@ if __name__ == '__main__':
 
     done = False
     while not done:
-        done = _process_command()
+        done = _process_command(_bucket_name)
 
     print("\n\nBYE!", file=sys.stdout, flush=True)
