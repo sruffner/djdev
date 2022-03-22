@@ -1,6 +1,9 @@
 """
 log_ops.py: Access to the database operations log in the file repository for the Lisberger lab portal.
 
+TODO: REDESIGN -- AppConfig.WORKSPACE_DIR -- don't use environment var directly! Rename update_log as database_ops.log.
+ The log file is maintaind in WORKSPACE_DIR but also should be backed up in the portal's backing repository in S3
+
 The database operations log is essentially a record of all operations performed on the database (via user interaction
 through the web portal) since the last database "reset". It is a backup to the DB's own backup faciliities. In case of
 catastrophic failure, the goal is to be able to repopulate the database from scratch by "playing back" all of the
@@ -18,7 +21,6 @@ access to the operations log file must go through this module.
 @author: sruffner
 @created: 11oct2021
 """
-import os
 import pickle
 import sys
 from pathlib import Path
@@ -26,15 +28,15 @@ from typing import Dict, Optional, Set, TextIO
 from contextlib import contextmanager
 from fasteners import InterProcessLock
 
-from config.config import get_application_logger
+from config.config import get_application_logger, get_config
 from database.table_info import DBTable, AttributeValue
 
 
-_LOG_FILE_DIR: Path = Path(os.environ['DJDEV_ROOT_REPO'], 'logs')
+_LOG_FILE_DIR: Path = Path(get_config().workspace_dir, 'logs')
 """ Directory containing the database operations log file. """
-_LOG_FILE_PATH: Path = Path(os.environ['DJDEV_ROOT_REPO'], 'logs', 'update_log')
+_LOG_FILE_PATH: Path = Path(get_config().workspace_dir, 'logs', 'database_ops.log')
 """ The location of the database operations log file in the portal's file system-based backing repository. """
-_LOG_LOCK_PATH: Path = Path(os.environ['DJDEV_ROOT_REPO'], 'logs', '.lock')
+_LOG_LOCK_PATH: Path = Path(get_config().workspace_dir, 'logs', '.lock')
 """ Lock file for advisory interprocess lock to mediate exclusive access to the database operations log. """
 
 

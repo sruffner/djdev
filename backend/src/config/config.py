@@ -65,10 +65,10 @@ def get_config() -> AppConfig:
     """
     logger = get_application_logger()
     if not hasattr(get_config, 'config'):
-        if 'DJDEV_ROOT_REPO' not in os.environ:
-            raise RuntimeError('The environment variable DJDEV_ROOT_REPO is required.')
-        repo_root = Path(os.environ['DJDEV_ROOT_REPO'])
-        upload_dir = Path(os.environ['DJDEV_ROOT_REPO'], 'staging')
+        if 'WORKSPACE_DIR' not in os.environ:
+            raise RuntimeError('The environment variable WORKSPACE_DIR is required.')
+        ws_dir = Path(os.environ['WORKSPACE_DIR'])
+        upload_dir = Path(os.environ['WORKSPACE_DIR'], 'staging')
         if 'MARIADB_ROOT_PASSWORD' not in os.environ:
             raise RuntimeError('The environment variable MARIADB_ROOT_PASSWORD is required.')
         db_password = os.environ['MARIADB_ROOT_PASSWORD']
@@ -86,7 +86,7 @@ def get_config() -> AppConfig:
         except RedisError as e:
             logger.debug(str(e), exc_info=True)
 
-        get_config.config = AppConfig(repo_root=repo_root, dash_upload_dir=upload_dir, dj_database_host=db_host,
+        get_config.config = AppConfig(workspace_dir=ws_dir, dash_upload_dir=upload_dir, dj_database_host=db_host,
                                       dj_database_password=db_password, flask_secret_key=secret_key, redis_conn=conn)
         if ('AWS_ACCESS_KEY_ID' in os.environ) and ('AWS_ACCESS_KEY_SECRET' in os.environ) and \
            ('AWS_REGION_NAME' in os.environ) and ('REPO_S3_BUCKET_NAME' in os.environ):
@@ -105,10 +105,14 @@ class AppConfig:
     """
     Application configuration.
     """
-    repo_root: str
-    """ Relative or absolute path string identifying the root directory for lab portal's backing repository. """
+    workspace_dir: str
+    """ 
+    Relative or absolute path string identifying the portal's workspace directory on a filesystem volume accessible by 
+    the portal server application. It provides temporary disk space for use by the server (for processing session
+    archives prior to commit, preparing data download files, and logging all database operations.
+    """
     dash_upload_dir: str
-    """ Relative or absolute path string identifying folder where application uploads are stored. """
+    """ Relative or absolute path string identifying folder where application uploads are stored temporarily. """
     dj_database_host: str
     """ The database host name. """
     dj_database_password: str

@@ -127,13 +127,13 @@ class DownloadRequestStatus:
 
 
 def get_data_downloads_directory() -> Path:
-    """ Construct file system path where data download files are temporarily stored in the backend repository. """
-    return Path(get_config().repo_root, _DOWNLOAD_SUBFOLDER)
+    """ Construct file system path where data download files are temporarily stored in the portal's workspace. """
+    return Path(get_config().workspace_dir, _DOWNLOAD_SUBFOLDER)
 
 
 def get_data_download_file_path(req_info: DownloadRequest) -> Path:
-    """ Construct file system path where the data file for a download request is stored in the backend repository. """
-    return Path(get_config().repo_root, _DOWNLOAD_SUBFOLDER,
+    """ Construct path where the data file for a download request is temporarily stored in portal's workspace. """
+    return Path(get_config().workspace_dir, _DOWNLOAD_SUBFOLDER,
                 f"{req_info.requester}-{req_info.id}.{req_info.output_fmt}")
 
 

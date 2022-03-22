@@ -56,6 +56,13 @@ stored in a pickle file in this directory.
 Session commits are restricted to registered users with the appropriate access level. Calls to this module should be
 protected by a mechanism that verifies the specified user is logged in with the access level required.
 
+Storing session archives in S3. Once the data from an experiment session has been committed to the portal database, the
+uploaded session archive and the preprocessing results are NOT discarded. Rather, the preprocessing results (a pickle
+file) are added to the archive ZIP, and then this ZIP file is uploaded to the portal backing repository, which is
+maintained in a Amazon Web Services S3 "bucket". The archive's object key is like a file system path:
+/repo/<experimenter>/<subj_id>_<session_date>_<session_sfx>.zip, where <experimenter>, <subj_id>, <session_date> and
+<session_sfx> form the primary key for the experiment session.
+
 @author: sruffner
 @created: 14oct2021
 """
@@ -83,6 +90,7 @@ from werkzeug.security import generate_password_hash
 from config.config import get_config, get_application_logger
 from database import maestro, PL2
 from database.log_ops import log_session_commit, log_file_path
+from database.repo import upload_file_to_bucket, delete_file_in_bucket, download_file_from_bucket
 from database.table_info import DBTable, AttributeValue, primary_key_of
 from database.table_ops import fetch_attribute_values, fetch_one_row, fetch_rows, check_row, fetch_restrict_proj, \
     SessionCommitter, rollback_session_commit, database_empty, insert_into_table, delete_from_table, update_table_row, \
@@ -169,9 +177,10 @@ class CommitJobStatus:
     """ The job's current state/phase. """
     zip: str
     """ 
-    When the commit job is started, this is the name of the subfolder (within $REPO_HOME/staging) to which the session
-    data archive file will be uploaded. The folder name is a UUID assigned when the uploader UI is realized on the
-    client. After upload has finished and is verified on the server side, this will be aarchive filename. 
+    When the commit job is started, this is the name of the subfolder (within the portal's commit staging directory) to 
+    which the session data archive file will be uploaded. The folder name is a UUID assigned when the uploader UI is 
+    realized on the client. After upload has finished and is verified on the server side, this will be the archive
+    filename. 
     """
     units: Optional[int] = None
     """ Number of neural units recorded in the session. Set during preprocessing; 0 for behavioral sessions. """
@@ -323,24 +332,16 @@ class SessionMetaData:
                     probe_depth=self.probe_depth, ba_id=self.ba_id)
 
 
-def get_subfolder_in_staging_directory(subfolder: str) -> Path:
+def _get_subfolder_in_staging_directory(subfolder: str) -> Path:
     """
-    The file system path of a subfolder with the portal repository's temporary staging directory. Session ZIP archives
-    are uploaded to a subfolder in the staging directory. After upload, each session commit job has its own subfolder
+    The file system path of a subfolder within the portal's temporary staging directory. Session ZIP archives are
+    uploaded to a subfolder in the staging directory. After upload, each session commit job has its own subfolder
     containing the uploaded ZIP archive, preprocessing results, and possibly other temporary files.
     """
     return Path(get_config().dash_upload_dir, subfolder)
 
 
-def get_repo_directory_for(username: str) -> Path:
-    """
-    Construct the file system path of the directory in the lab repository in which session data committed by the
-    specified user are stored.
-    """
-    return Path(get_config().repo_root, username)
-
-
-def remove_staging_dir(staging_dir: Path) -> None:
+def _remove_staging_dir(staging_dir: Path) -> None:
     """ Remove a commit task staging directory in its entirety."""
     try:
         if staging_dir.exists():
@@ -352,8 +353,8 @@ def remove_staging_dir(staging_dir: Path) -> None:
 def initiate_session_commit(username: str, upload_id: str) -> Union[str, CommitJobStatus]:
     """
     Initiate a session commit job on the lab database server. The method generates a unique ID for the job, creates a
-    folder in the portal repository's staging directory where the ZIP archive is uploaded, and persists status
-    information about the job. The client must supply the job ID in all future requests involving the commit job.
+    folder in the portal's staging directory where the ZIP archive is uploaded, and persists status information about
+    the job. The client must supply the job ID in all future requests involving the commit job.
 
     Args:
         username: The username of the registered portal user requesting the session commit. The username is only
@@ -367,7 +368,7 @@ def initiate_session_commit(username: str, upload_id: str) -> Union[str, CommitJ
         raise ValueError('Invalid username')
 
     job_id = f"{_STAGING_DIR_PREFIX}{str(uuid.uuid4())}"
-    upload_dir = get_subfolder_in_staging_directory(upload_id)
+    upload_dir = _get_subfolder_in_staging_directory(upload_id)
     try:
         upload_dir.mkdir(parents=True, exist_ok=False)
     except Exception as err:
@@ -391,7 +392,7 @@ def initiate_session_commit(username: str, upload_id: str) -> Union[str, CommitJ
             pipe.execute()
     except Exception as e:
         _logger.error(f"Failed to persist commit job info: {str(e)}", exc_info=True)
-        remove_staging_dir(upload_dir)
+        _remove_staging_dir(upload_dir)
         return f"Failed to persist commit job information on server. Job dropped."
     return job_status
 
@@ -482,8 +483,8 @@ def commit_job_progress(job_id: str) -> Union[str, List[str]]:
 def update_commit_job_on_archive_upload(job_id: str, filename: str) -> Union[str, CommitJobStatus]:
     """
     Update the status of a pending session commit job after the session archive has been fully uploaded to the staging
-    directory in the portal repository. When the ZIP file has been uploaded, the server will queue a background worker
-    to begin preprocessing the data in the archive.
+    directory for the commit. When the ZIP file has been uploaded, the server will queue a background worker to begin
+    preprocessing the data in the archive.
 
     NOTE: The archive is uploaded in file "chunks" of 100MB each. These chunks are reassembled as the first step of
     preprocessing.
@@ -510,8 +511,8 @@ def update_commit_job_on_archive_upload(job_id: str, filename: str) -> Union[str
 
         # the upload folder name is initially stored in the job status object in the 'zip' field. Rename that folder
         # with the job ID. This frees the original upload folder name for the next upload from the same client session.
-        upload_dir = get_subfolder_in_staging_directory(job_status.zip)
-        staging_dir = get_subfolder_in_staging_directory(job_id)
+        upload_dir = _get_subfolder_in_staging_directory(job_status.zip)
+        staging_dir = _get_subfolder_in_staging_directory(job_id)
         upload_dir.rename(staging_dir)
 
         now = time.time()
@@ -565,9 +566,9 @@ def cancel_or_remove_commit_job(job_id: str) -> Tuple[bool, str, Optional[Commit
         if job_status.state.can_delete_job_in_this_state():
             # Job can be deleted immediately -- remove from Redis cache and delete relevant directory in repo
             # If cancelled during upload, remove the upload folder; else remove the staging folder for the commit
-            target_dir = get_subfolder_in_staging_directory(
+            target_dir = _get_subfolder_in_staging_directory(
                 job_status.zip if job_status.state == CommitStateEnum.UPLOADING else job_id)
-            remove_staging_dir(target_dir)
+            _remove_staging_dir(target_dir)
             # all the job-specific keys that may need to be deleted. After preprocessing, there are keys holding info
             # used during subsequent phases. But if a session is behavioral only, the two neural unit keys won't exist.
             delete_keys = [progress_key]
@@ -604,7 +605,7 @@ def preprocess_commit_job(job_id: str) -> bool:
     pre-processes the uploaded session data ZIP archive for an in-progress commit job.
 
     A session archive ZIP file is uploaded from client to the server in 100MB chunks, and those chunks are stored in a
-    unique subfolder under the staging folder for the commit job. The first step in preprocessing is to reassemble the
+    unique subfolder in the portal's commit staging directory. The first step in preprocessing is to reassemble the
     archive file from the individual chunks. It then scans the archive contents and extracts information that will be
     needed when the session is actually committed to the lab database: (1) the unique trial protocols presented during
     the session; (2) timing information for all trial reps, in particular, the start and stop timestamps for the trial
@@ -660,7 +661,7 @@ def preprocess_commit_job(job_id: str) -> bool:
         elif not _reassemble_archive_from_chunked_upload(job_id, job_status.zip):
             return False
         else:
-            zip_path = Path(get_subfolder_in_staging_directory(job_id), job_status.zip)
+            zip_path = Path(_get_subfolder_in_staging_directory(job_id), job_status.zip)
         if not zip_path.is_file():
             msg_pfx = f"Cannot find archive file for commit job {job_id}: "
             _logger.debug(f"{msg_pfx}: {str(zip_path)}")
@@ -764,7 +765,7 @@ def preprocess_commit_job(job_id: str) -> bool:
                 return False
             results = {'protocols': proto_candidates, 'trials': trial_info, 'units': units,
                        'session': session_info}
-            with open(Path(get_subfolder_in_staging_directory(job_id), PREPROC_FNAME), 'wb') as file:
+            with open(Path(_get_subfolder_in_staging_directory(job_id), PREPROC_FNAME), 'wb') as file:
                 pickle.dump(results, file)
 
             # store in Redis all information that will be needed to interact with user during the review phase: session
@@ -828,7 +829,7 @@ def _reassemble_archive_from_chunked_upload(job_id: str, zip_file_name: str) -> 
         Exception: If a chunk file is missing, an IO or other error occurs.
     """
     # expect to find a SINGLE folder under the staging folder that contains the file chunks
-    commit_job_dir = get_subfolder_in_staging_directory(job_id)
+    commit_job_dir = _get_subfolder_in_staging_directory(job_id)
     temp_dir: Optional[Path] = None
     for child in commit_job_dir.iterdir():
         if child.is_dir():
@@ -1786,16 +1787,22 @@ def finish_commit_job(job_id: str) -> bool:
         2) The Trial table and its part tables are populated with data from all the trials presented during the
         session. We post a progress message and check for user cancel periodically during this process.
 
-        3) The ZIP archive is moved to a permanent folder in the lab data repository, and the results from
-        preprocessing the session archive, along with session and electrophysiology metadata entered manually by
-        the user during the review stage, are saved in a pickle file in the same folder. That folder is
-        %REPO_HOME/<username>, where <username> is the experimenter's username in the database. The base filename
-        for the .zip and .pickle files is "<subj_id>_<session_date>_<session_sfx>", where <session_date> is in
-        ISO format 'YYYY-MM-DD'.
+        3) A pickle file, "preproc.pickle", is generated that contains the preprocessing results, along with session and
+        electrophysiology metadata entered manually by the user during the review stage. The pickle file is appended to
+        the original session archive ZIP. As a result, the ZIP file contains everything needed to recommit the
+        experiment session -- without user intervention -- in the event the portal database was corrupted and had to be
+        reconstructed from scratch.
 
-        4) Lastly, the completed session commit is recorded in the database update log. This single log entry (along
-        with the archive and pickle file just stored in the data repository) accounts for all of the database
-        insertions required to commit the data from the experiment session.
+        4) The altered ZIP file is uploaded to the portal's backing repository, which is maintained in an AWS S3 bucket
+        provisioned by the lab expressly for this purpose. The object key under which the ZIP file is stored uniquely
+        identifies the experiment session: "/repo/<experimenter>/<subj_id>_<session_date>_<session_sfx>.zip", where
+        <experimenter> is the portal username of the experimenter, <subj_id> is the experiment subject's ID,
+        <session_date> is the experiment date as an ISO-formatted string 'YYYY-MM-DD', and <session_sfx> is the integer
+        session suffix.
+
+        4) Lastly, the completed session commit is recorded in the database operations log. This single log entry (along
+        with the ZIP file just stored in the backing repository) accounts for all of the database insertions required to
+        commit the data from the experiment session.
 
     We rely on the database server's transaction mechanisms to ensure data consistency; all insertions into the database
     are encapsulated in a transaction. If an error occurs at any point during the commit, any changes to the database
@@ -1849,8 +1856,8 @@ def finish_commit_job(job_id: str) -> bool:
             _logger.error(f"Commit job is not in the final commit phase: {job_status.state}")
             return False
         else:
-            zip_path = Path(get_subfolder_in_staging_directory(job_id), job_status.zip)
-            preproc_path = Path(get_subfolder_in_staging_directory(job_id), PREPROC_FNAME)
+            zip_path = Path(_get_subfolder_in_staging_directory(job_id), job_status.zip)
+            preproc_path = Path(_get_subfolder_in_staging_directory(job_id), PREPROC_FNAME)
         if not zip_path.is_file():
             msg_pfx = f"Cannot find archive file for commit job {job_id}: "
             _logger.debug(f"{msg_pfx}: {str(zip_path)}")
@@ -1942,27 +1949,32 @@ def finish_commit_job(job_id: str) -> bool:
         return False
     added_proto_hashes = [p['proto_hash'] for p in commit_mgr.trial_protocols()]
 
-    # at this point, the session has been committed to the database, but we need to save a pickle file containing the
-    # session metadata, the trial protocols and other trial info, and the recorded neural units. Then move the pickle
-    # file and session data archive to a permanent location in the portal repository. If any of those operations fail,
-    # we have to remove the session from the database!
-    session_repo_path = get_repo_directory_for(session_info.experimenter)
-    base_filename = f"{session_info.subj_id}_{str(session_info.session_date)}_{session_info.session_suffix}"
-    zip_path_in_repo = Path(session_repo_path, f"{base_filename}.zip")
-    pickle_path_in_repo = Path(session_repo_path, f"{base_filename}.pickle")
-    commit_logged = False
+    # at this point, the session has been committed to the database. Now we need rewrite the preprocessing pickle file
+    # to include the information supplied during the review stage, and append it to the ZIP archive. Then we upload the
+    # amended ZIP archive to the portal backing repository maintained in a provisioned bucket in AWS S3. The S3 object
+    # key under which it is stored reflects all the attributes of the session's primary key:
+    #    /repo/<experimenter>/<subj_id>_<session_date>_<session_sfx>.zip.
+    # If any of those operations fail, we have to remove the session from the database!
+    s3_key = f"/repo/{session_info.experimenter}/" \
+             f"{session_info.subj_id}_{str(session_info.session_date)}_{session_info.session_suffix}.zip"
+    archive_uploaded, commit_logged = False, False
     try:
-        if _background_job_update(job_id, "Saving session archive and pre-processing results to data repository..."):
+        if _background_job_update(job_id, "Adding pre-processing results to session archive..."):
             raise Exception("Operation cancelled")
 
-        if not session_repo_path.is_dir():
-            session_repo_path.mkdir(parents=True)
-        zip_path.replace(zip_path_in_repo)
         results = {'protocols': protocols, 'trials': trial_info, 'units': units,
                    'session': session_info.session_table_entry(),
                    'ephys': None if len(units) <= 0 else session_info.ephys_table_entry()}
-        with open(pickle_path_in_repo, 'wb') as file:
+        with open(preproc_path, 'wb') as file:
             pickle.dump(results, file)
+        with zipfile.ZipFile(zip_path, 'a') as f:
+            f.write(preproc_path, PREPROC_FNAME)
+
+        if _background_job_update(job_id, "Uploading session archive to portal's backing repository.."):
+            raise Exception("Operation cancelled")
+        if not upload_file_to_bucket(zip_path, get_config().repo_bucket, s3_key):
+            raise Exception(f"Unable to push committed session archive [{s3_key}] to portal backing repo in S3")
+        archive_uploaded = True
 
         # finally, log the session commit
         res = log_session_commit(session_info.experimenter, session_info.subj_id, str(session_info.session_date),
@@ -1980,12 +1992,16 @@ def finish_commit_job(job_id: str) -> bool:
             return True
         _logger.error(f"Session commit {job_id} failed in final phase, after database insertions: {str(e)}")
         # rollback the session commit, including any added trial protocols.
+        ok = True
         err_msg = rollback_session_commit(session_info.session_table_entry(), added_proto_hashes)
         if err_msg:
             _logger.critical(f"Session commit rollback failed: {str(e)}")
-        zip_path_in_repo.unlink(missing_ok=True)
-        pickle_path_in_repo.unlink(missing_ok=True)
-        err_msg = f"Commit failed after database insertions; rollback {'FAILED!' if err_msg else 'successful'}"
+            ok = False
+        if archive_uploaded:
+            if not delete_file_in_bucket(get_config().repo_bucket, s3_key):
+                _logger.critical(f"Failed to remove session archive from S3 repo key {s3_key} during commit rollback")
+                ok = False
+        err_msg = f"Commit failed after database insertions; rollback {'successful' if ok else 'FAILED!'}"
         try:
             _background_job_update(job_id, err_msg, CommitStateEnum.FAIL)
         except Exception:
@@ -1999,8 +2015,8 @@ class _SessionCommitMgr(SessionCommitter):
     """
     Helper class that performs the actual database table insertions that commit an experiment session to the portal
     database. It is used in two contexts: (1) during a new commit managed by a background worker process initiated
-    through the Dash backend server; or (2)  during reconstruction of the database contents from the database update log
-    and the archive files stored in the backing repository.
+    through the Dash backend server; or (2) during reconstruction of the database contents from the database update log
+    and the archive files stored in the portal's backing repository on AWS S3.
 
     NOTE: Inserting data associated with a single trial can involve many individual database inserts: one for the entry
     into the Trial table itself, one for EACH recorded behavioral response trace inserted into the BehavioralResponse
@@ -2267,20 +2283,29 @@ def reconstruct_database() -> None:
     """
     Reconstruct the contents of the portal database by processing all entries in the database operations log.
 
-    The database operations log, located at $REPO_HOME/logs/update_log, contains the entire history of operations on the
-    database. The database contents can be reconstructed from scratch by executing the operations stored in the log
-    file. Of course, to execute a session commit job, the requisite files must also be located in the data repository.
+    The database operations log is a single file containing the entire history of operations on the portal database. The
+    database contents can be reconstructed from scratch by executing the operations stored in the log file in order. Of
+    course, to execute a session commit job, the requisite session archive must also be available. These archives, one
+    per committed session, are persisted in the portal's backing repository, which is maintained in a lab-provisioned
+    AWS S3 bucket. (The database operations log is also backed up in S3, but only occasionally. The most up-to-date
+    operations log will be found in the portal's workspace directory at ./logs/database_ops.log.)
 
     It is ESSENTIAL that the database be empty when the script is called -- that is it's assumed state just before the
     first operation recorded in the log file. The operations are logged in chronological order, and this method simply
     performs each operation in the log in the same order, thereby reconstructing the database content.
 
+    Obviously, re-committing an experiment session to the database is the single most time-consuming task. The relevant
+    session archive must be downloaded from the portal repository on S3 to a staging location in the portal workspace
+    dirctory, and that archive is then "digested" to re-commit the experiment's data. The archive includes a pickle file
+    with the original results of pre-processing, so the re-commit is much faster than the original commit. The slowest
+    part is likely to be downloading the archive from S3.
+
     NOTE: THIS IS AN ADMINISTRATIVE FUNCTION FOR USE ONLY WHEN THE PORTAL APPLICATION IS DOWN. It must be run in a
     python console script. During reconstruction, progress messages are written to STDOUT. Very little user intervention
-    is required, as the operations log and the raw data repository store everything that is needed to repopulate the
-    database. There is one exception, however: User passwords are, for security reasons, NEVER included in update log
-    entries. Therefore, in order to process a log entry that registers a new user on the portal, the function will
-    prompt for an initial password for that user's account.
+    is required, as the operations log and the portal backing repository store everything that is needed to repopulate
+    the database. There is one exception, however: User passwords are, for security reasons, NEVER included in the
+    database operations log entries. Therefore, in order to process a log entry that registers a new user on the portal,
+    the function will prompt for an initial password for that user's account.
     """
     # ensure database update log exists and verify that database is empty
     log_path: Path = log_file_path()
@@ -2345,16 +2370,19 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
     Commit an experiment session during scripted reconstruction of the portal database content from entries in the
     database operations log file and experiment data archives stored in the backing repository.
 
-    For each experiment session, the original session archive and the pickle file containing the results of
-    pre-processing are stored in the folder $REPO/$USER, where $REPO is the data repository root and $USER is the
-    experimenter's username in the lab database. The archive file is $SUBJ_$DATE_$SFX.zip and the pickle file is
-    $SUBJ_$DATE_$SFX.pickle, where $SUBJ is the experiment subject's ID, $DATE is the session date in the format
-    'YYY-MM-DD', and $SFX is the session suffix.
+    For each experiment session, the session archive is stored in the portal's backing repository in AWS S3 under the
+    object key "/repo/<experimenter>/<subj_id>_<session_date>_<session_sfx>.zip, where <experimenter> is the registered
+    username of the experimenter, <subj_id> is the experiment subject's ID, <session_date> is the date of the experiment
+    in the format 'YYYY-MM-DD', and <session_sfx> is the integer session suffix.
 
-    Since all pre-processing results -- as well as any information entered manually when the session was originally
-    committed to the database -- are stored in the pickle file, the commit process requires no user intervention
-    and is significantly faster because it does not require processing of a large PL2 file. Still, it could take
-    many seconds or even minutes if the session recorded thousands of trials. Progress messages are written to STDOUT.
+    During the original commit, all pre-processing results -- as well as any information entered manually via user
+    interaction -- are stored in the pickle file "preproc.pickle", which in turn is appended to the session archive ZIP.
+    As a result, re-committing the session requires no user intervention and is significantly faster because it does not
+    require processing of a large PL2 file (which also would have to be extracted from the ZIP file). However, the
+    archive ZIP must be downloaded from S3 to a staging directory in the portal workspace before it is processed. This
+    is probably the slowest step in the process.
+
+    Progress messages are written to STDOUT.
 
     Args:
         log_entry: A database log entry for a session commit. This dictionary must have the form {'op': 'session',
@@ -2362,16 +2390,26 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
     Returns:
         An error description if session commit fails; else None
     """
-    session_repo_path = get_repo_directory_for(log_entry['username'])
-    base_filename = f"{log_entry['subj_id']}_{str(log_entry['date'])}_{log_entry['suffix']}"
-    zip_path_in_repo = Path(session_repo_path, f"{base_filename}.zip")
-    pickle_path_in_repo = Path(session_repo_path, f"{base_filename}.pickle")
+    # TODO: REDESIGN -- Session archives will now be kept in an S3 bucket, not on a volume mount
+    s3_key = f"/repo/{log_entry['username']}/" \
+             f"{log_entry['subj_id']}_{str(log_entry['date'])}_{log_entry['suffix']}.zip"
     try:
-        # load pre-processing results from pickle file
-        print(f"   > Checking session data archive...", file=sys.stdout, flush=True)
-        if not (zip_path_in_repo.is_file() and pickle_path_in_repo.is_file()):
-            raise Exception("Missing session ZIP archive and/or pre-processing results file!")
-        with open(pickle_path_in_repo, 'rb') as file:
+        # create a subfolder in the staging directory on the portal server
+        recon_dir = _get_subfolder_in_staging_directory("reconstruct")
+        recon_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = Path(recon_dir, f"{log_entry['subj_id']}_{str(log_entry['date'])}_{log_entry['suffix']}.zip")
+        print(f"  > Downloading session archive from S3 repo at {s3_key}...", file=sys.stdout, flush=True)
+        if not download_file_from_bucket(get_config().repo_bucket, s3_key, zip_path, log=False):
+            raise Exception("Failed while downloading session archive from S3")
+
+        # load pre-processing results from pickle file in session archive
+        print(f"  > Loading preprocessed results stored in session archive...")
+        preproc_path = Path(recon_dir, PREPROC_FNAME)
+        with zipfile.ZipFile(zip_path, 'r') as archive:
+            archive.extract(PREPROC_FNAME, path=str(recon_dir.absolute()))
+        if not preproc_path.is_file():
+            raise Exception("Failed to extract pre-processing results file from session archive")
+        with open(preproc_path, 'rb') as file:
             results = pickle.load(file)
         if not (isinstance(results, dict) or
                 all([(k in results) for k in ['protocols', 'trials', 'units', 'session', 'ephys']])):
@@ -2401,7 +2439,7 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
         session_label = f"{metadata.experimenter}-{metadata.subj_id}-{str(metadata.session_date)}-" \
                         f"{metadata.session_suffix}"
         print(f"   > Reconstructing session [{session_label}] in database...", file=sys.stdout)
-        commit_mgr = _SessionCommitMgr(None, zip_path_in_repo, metadata, trial_info, protocols, units)
+        commit_mgr = _SessionCommitMgr(None, zip_path, metadata, trial_info, protocols, units)
         error_msg = commit_mgr.commit()
         if error_msg:
             return error_msg

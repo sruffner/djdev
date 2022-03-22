@@ -23,7 +23,7 @@ services:
     # The second exposes the root repository directory in the file system of the Docker host
     volumes:
       - ./backend/src:/code
-      - ./repo_mount:/repository
+      - ./backend_mount:/portal_ws
     depends_on:
       - db
       - redis
@@ -35,7 +35,7 @@ services:
     image: djdev_backend
     command: rq worker --url redis://redis:6379 --name worker1
     volumes:
-      - ./repo_mount:/repository   # background commit jobs need access to the repository file system!
+      - ./backend_mount:/portal_ws   # background commit jobs need access to the portal's workspace directory
     depends_on:
        - redis
     networks:
@@ -46,7 +46,7 @@ services:
     image: djdev_backend
     command: rq worker --url redis://redis:6379 --name worker2
     volumes:
-      - ./repo_mount:/repository   # background commit jobs need access to the repository file system!
+      - ./backend_mount:/portal_ws   # background commit jobs need access to the portal's workspace directory
     depends_on:
        - redis
     networks:

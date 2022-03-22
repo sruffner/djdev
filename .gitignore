@@ -1,5 +1,4 @@
 db_mount/**
-repo_mount/**
 testsession/**
 venv/**
 .idea/**
@@ -7,4 +6,5 @@ venv/**
 **/__pycache/**
 *.pyc
 environment/**
-/discarded/**
+discarded/**
+backend_mount/**

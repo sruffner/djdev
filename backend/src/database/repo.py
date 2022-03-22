@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, List, Tuple, Union
+from typing import Optional, List, Tuple, Union, Dict, Any
 
 from boto3 import Session
 from boto3.s3.transfer import TransferConfig
@@ -33,10 +33,31 @@ from boto3.s3.transfer import TransferConfig
 from config.config import get_config, get_application_logger
 
 
+KB = 1024
+""" Number of bytes in a kilobyte. """
 MB = 1024 ** 2
 """ Number of bytes in a megabyte. """
 GB = 1024 ** 3
 """ Number of bytes in a gigabyte. """
+
+
+def file_size_with_units(size: float) -> str:
+    """
+    Convert file in bytes to a numeric string with units of GB, MB or KB. For display purposes only.
+
+    Args:
+        size - The file size in bytes.
+    Returns:
+        A string displaying the size in gigabytes if size exceeds 1 GB, else in megabytes if size exceeds 1 MB, else
+            in kilobytes. The chosen unit is included: "GB", "MB" or "KB"
+    """
+    size = abs(size)
+    if size > GB:
+        return f"{size/GB:.1f} GB"
+    elif size > MB:
+        return f"{size/MB:.1f} MB"
+    else:
+        return f"{size/KB:.1f} KB"
 
 
 def aws_session() -> Optional[Session]:
@@ -167,6 +188,26 @@ def download_file_from_bucket(bucket_name: str, key: str, dst: Path, log: bool =
         return False
 
 
+def file_exists(bucket_name: str, key: str) -> bool:
+    """
+    Does a file exist at the specified key in the specified AWS S3 bucket?
+
+    Args:
+        bucket_name: THe name of the bucket.
+        key: The object's key.
+
+    Returns: True if object exists; False otherwise.
+    """
+    try:
+        session = aws_session()
+        s3_resource = session.resource('s3')
+        obj_summary = s3_resource.ObjectSummary(bucket_name, key)
+        obj_summary.load()
+        return True
+    except Exception:
+        return False
+
+
 def delete_file_in_bucket(bucket_name: str, key: str) -> bool:
     """
     Permanently delete an object stored in an AWS S3 bucket.
@@ -175,8 +216,11 @@ def delete_file_in_bucket(bucket_name: str, key: str) -> bool:
         bucket_name: The name of the S3 bucket containing the object.
         key: The object's key.
     Returns:
-        True if successful; False otherwise. Error message is written to the portal application log.
+        True if successful or object not found; False otherwise. Error message is written to the portal application log.
     """
+    if not file_exists(bucket_name, key):
+        get_application_logger().info(f"Attempt to delete non-existent object {key} from S3 bucket {bucket_name}")
+        return True
     try:
         session = aws_session()
         s3_resource = session.resource('s3')
@@ -197,7 +241,7 @@ def bucket_contents(bucket_name: str) -> Optional[List]:
 
     Returns:
         A list of objects containing metadata on each object in the S3 bucket, or None if operation failed. In the
-            latter case, an error message is written to the portal application log.
+            latter case, an error message is written to the portal application log. Each element is an S3 ObjectSummary.
     """
     try:
         session = aws_session()
@@ -208,6 +252,43 @@ def bucket_contents(bucket_name: str) -> Optional[List]:
     except Exception:
         get_application_logger().error(f"Failed to get object listing for S3 bucket {bucket_name}", exc_info=True)
         return None
+
+
+def bucket_folders(bucket_name: str) -> Optional[Dict[str, List[Dict[str, Any]]]]:
+    """
+    Retrieve a semi-structured listing of the file objects contained in the specified S3 bucket.
+
+    This method ASSUMES that object keys take the form of a Linux system-like path: /folder1/folder2/file.ext.
+
+    Args:
+        bucket_name: The name of the bucket.
+    Returns:
+        A dictionary of pseudo folder paths in the bucket that contain one or more files. Key is the folder path,
+            value is a list of file information objects, one per file in the path. Each file information object is a
+            dictionary with the following keys: 'name' is the file name, 'last_modified' is a datetime object indicating
+            the object's creation time in S3, 'storage_class' is the object's S3 storage class, and 'size' is its total
+            size in bytes. Each folder's file list is sorted in reverse chronological order by creation time. If the
+            bucket is empty, returns an empty dictionary.
+    """
+    contents = bucket_contents(bucket_name)
+    if contents is None:
+        return None
+    folders: Dict[str, List[Dict[str, str]]] = dict()
+    for o in contents:
+        pos = o.key.rfind('/')
+        if pos <= 0:
+            folder_key = '/'
+            file_name = o.key if pos == -1 else o.key[1:]
+        else:
+            folder_key = o.key[0:pos]
+            file_name = o.key[pos+1:]
+        if not (folder_key in folders):
+            folders[folder_key] = list()
+        folders[folder_key].append(
+            dict(name=file_name, last_modified=o.last_modified, storage_class=o.storage_class, size=o.size))
+    for folder_key in folders:
+        folders[folder_key].sort(key=lambda x: x['last_modified'], reverse=True)
+    return folders
 
 
 class _TransferProgressCallback(object):
@@ -288,17 +369,20 @@ def _process_command(bucket_name: str) -> bool:
     command = input(f"[{bucket_name}] Enter command (l, c, u, d, g, x, h, q) > ")
     error_msg = None
     if command == 'l':
-        contents = bucket_contents(bucket_name)
-        if contents is None:
+        folders = bucket_folders(bucket_name)
+        if folders is None:
             error_msg = "Unable to list bucket contents"
-        elif len(contents) == 0:
+        elif len(folders) == 0:
             print("*** The bucket is empty! ***")
         else:
             print(f"{'KEY':50} {'STORAGE CLASS':30} {'SIZE (MiB)':15} {'LAST_MODIFIED':30}")
             print(f"{'---':50} {'-------------':30} {'----------':15} {'-------------':30}")
-            for o in contents:
-                print(f"{o.key:50} {o.storage_class:30} {float(o.size)/MB:<15.1f} "
-                      f"{o.last_modified.strftime('%m-%d-%Y %H:%M:%S %Z'):30}")
+            for folder_key in sorted(folders.keys()):
+                print(f"{folder_key + ':':50} {'':30} {'':15} {'':30}")
+                for file_info in folders[folder_key]:
+                    print(f"   {file_info['name']:47} {file_info['storage_class']:30} "
+                          f"{float(file_info['size'])/MB:<15.1f} "
+                          f"{file_info['last_modified'].strftime('%m-%d-%Y %H:%M:%S %Z'):30}")
     elif command == 'c':
         rules = _get_lifecycle_configuration_rules_for_bucket(bucket_name)
         if isinstance(rules, str):

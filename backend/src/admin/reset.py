@@ -23,10 +23,7 @@ before the schema was dropped, and so the schema would not get declared on the d
 @created: 04mar2021
 """
 import importlib
-import os
-import shutil
 import sys
-from pathlib import Path
 
 import datajoint as dj
 
@@ -49,23 +46,15 @@ if __name__ == '__main__':
             print(f"====> ERROR: Failed to drop the database - {str(err)}.", file=sys.stdout, flush=True)
             exit(1)
 
-    repo_path = Path(os.environ['DJDEV_ROOT_REPO'])
-    if repo_path.is_dir():
-        delete_repo = input("==> Found backing repository. Delete ONLY if you will NOT reconstruct database "
-                            "from existing repository. Delete it? (y/n) >> ")
-        if delete_repo == 'y':
-            try:
-                shutil.rmtree(repo_path)
-                print("==> Backing repository successfully removed.", file=sys.stdout, flush=True)
-            except Exception as e:
-                print(f"====> ERROR: Operation failed. You must remove backing repository manually ({str(e)}",
-                      file=sys.stdout, flush=True)
-
     print("==> Creating empty 'sgl' database...", file=sys.stdout, flush=True)
     try:
         sgl_module = importlib.import_module('.sgl_schema', package='database')
+        print("\nAt this point you can rebuild the database content manually from scratch. Alternatively, if the \n"
+              "database operations log and all previous experiment session archives are available in the portal's \n"
+              "backup repository in S3, an administrative script is available to reconstruct the database with \n"
+              "minimal user intervention.", file=sys.stdout, flush=True)
     except Exception as err:
-        print(f"====> ERROR: Failed to import sgl_schema.py - {str(err)}.", flush=True)
+        print(f"====> ERROR: Failed to import sgl_schema.py - {str(err)}.", file=sys.stdout, flush=True)
 
-    print("BYE!", flush=True)
+    print("BYE!", file=sys.stdout, flush=True)
     exit(0)
