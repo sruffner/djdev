@@ -1,16 +1,20 @@
 """
 log_ops.py: Access to the database operations log in the file repository for the Lisberger lab portal.
 
-TODO: REDESIGN -- AppConfig.WORKSPACE_DIR -- don't use environment var directly! Rename update_log as database_ops.log.
- The log file is maintaind in WORKSPACE_DIR but also should be backed up in the portal's backing repository in S3
-
 The database operations log is essentially a record of all operations performed on the database (via user interaction
 through the web portal) since the last database "reset". It is a backup to the DB's own backup faciliities. In case of
 catastrophic failure, the goal is to be able to repopulate the database from scratch by "playing back" all of the
 operations recorded in this log file -- in concert with the session archives that are stored in the backing repository.
 
-The operations log file is located at $REPO_HOME/logs/update_log, where $REPO_HOME is the root directory for the file
-repository that backs the portal.
+The operations log file is located at $WS/logs/database_ops.log, where $WS is the portal workspace directory on a file
+system mount accessible to the backend server. For safety's sake, the log file is periodically backed up to the portal
+backing repository maintained in an Amazon S3 bucket. The backup occurs in the background and is scheduled to happen
+roughly once every 24 hours. Of course, if there are no database changes, the log file is unchanged and a backup is
+unnecessary.
+
+The operations log is currently implemented as a single log file that continues to grow over time. In the future, it
+may be necessary to divide it into a sequence of log files: database_ops.log.N, where the integer extension indicates
+the order in which the files were written.
 
 The database operations log, like the database itself, is a global resource. Since replicas of the portal backend may
 be running simultaneously in the cloud-deployed portal application, it is possible that more than one replica (process)
@@ -23,20 +27,26 @@ access to the operations log file must go through this module.
 """
 import pickle
 import sys
+import uuid
+from datetime import timedelta
 from pathlib import Path
 from typing import Dict, Optional, Set, TextIO
 from contextlib import contextmanager
 from fasteners import InterProcessLock
+from rq import Queue
 
 from config.config import get_application_logger, get_config
+from database.repo import file_size_in_bucket, KB, upload_file_to_bucket
 from database.table_info import DBTable, AttributeValue
 
+_LOG_DIR_NAME: str = 'logs'
+_LOG_FILE_NAME: str = 'database_ops.log'
 
-_LOG_FILE_DIR: Path = Path(get_config().workspace_dir, 'logs')
+_LOG_FILE_DIR: Path = Path(get_config().workspace_dir, _LOG_DIR_NAME)
 """ Directory containing the database operations log file. """
-_LOG_FILE_PATH: Path = Path(get_config().workspace_dir, 'logs', 'database_ops.log')
+_LOG_FILE_PATH: Path = Path(get_config().workspace_dir, _LOG_DIR_NAME, _LOG_FILE_NAME)
 """ The location of the database operations log file in the portal's file system-based backing repository. """
-_LOG_LOCK_PATH: Path = Path(get_config().workspace_dir, 'logs', '.lock')
+_LOG_LOCK_PATH: Path = Path(get_config().workspace_dir, _LOG_DIR_NAME, '.lock')
 """ Lock file for advisory interprocess lock to mediate exclusive access to the database operations log. """
 
 
@@ -90,6 +100,7 @@ def log_add_table_row(table_id: DBTable, row: Dict[str, AttributeValue]) -> Opti
         with WithTimeout(_LOG_LOCK_PATH, 1):
             with open(_LOG_FILE_PATH, 'ab') as file:
                 pickle.dump({'op': 'add', 'table': table_id, 'row': row}, file)
+        schedule_log_backup_if_necessary()
     except Exception as err:
         error_msg = f"Failed to post 'add' entry to database update log: {str(err)}"
         get_application_logger().error(error_msg, exc_info=True)
@@ -112,6 +123,7 @@ def log_delete_from_table(table_id: DBTable, restriction: Optional[Dict[str, Att
         with WithTimeout(_LOG_LOCK_PATH, 1):
             with open(_LOG_FILE_PATH, 'ab') as file:
                 pickle.dump({'op': 'delete', 'table': table_id, 'restriction': restriction}, file)
+        schedule_log_backup_if_necessary()
     except Exception as err:
         error_msg = f"Failed to post 'delete' entry to database update log: {str(err)}"
         get_application_logger().error(error_msg, exc_info=True)
@@ -139,6 +151,7 @@ def log_update_table_row(table_id: DBTable, row: Dict[str, AttributeValue]) -> O
         with WithTimeout(_LOG_LOCK_PATH, 1):
             with open(_LOG_FILE_PATH, 'ab') as file:
                 pickle.dump({'op': 'update', 'table': table_id, 'row': row}, file)
+        schedule_log_backup_if_necessary(soon=True)   # TODO: For testing purposes
     except Exception as err:
         error_msg = f"Failed to post 'update' entry to database update log: {str(err)}"
         get_application_logger().error(error_msg, exc_info=True)
@@ -163,6 +176,7 @@ def log_mapping_table_update(table_id: DBTable, src_pk_val: int, map_set: Set[in
         with WithTimeout(_LOG_LOCK_PATH, 1):
             with open(_LOG_FILE_PATH, 'ab') as file:
                 pickle.dump({'op': 'mapping', 'table': table_id, 'src_pk': src_pk_val, 'dst_pks': map_set}, file)
+        schedule_log_backup_if_necessary()
     except Exception as err:
         error_msg = f"Failed to post 'mapping' entry to database update log: {str(err)}"
         get_application_logger().error(error_msg, exc_info=True)
@@ -190,10 +204,79 @@ def log_session_commit(user: str, subject: str, session_date: str, suffix: int) 
             with open(_LOG_FILE_PATH, 'ab') as file:
                 pickle.dump({'op': 'session', 'username': user, 'subj_id': subject, 'date': session_date,
                              'suffix': suffix}, file)
+        schedule_log_backup_if_necessary()
     except Exception as err:
         error_msg = f"Failed to post 'session' entry to database update log: {str(err)}"
         get_application_logger().error(error_msg, exc_info=True)
     return error_msg
+
+
+def schedule_log_backup_if_necessary(soon: bool = False) -> None:
+    """
+    Schedule a background job to push a copy of the database operations log from the portal workspace to the backing
+    repository.
+
+    The database operations log is located in the portal workspace directory, on a file system mount accessible to the
+    backend server process. The file contains the entire history of operations on the portal database and is essential
+    if we ever need to reconstruct the database. The file is backed up regularly to the portal's backing repository,
+    which also stores the ZIP archives for experiment sessions that have been committed to the database. That repository
+    is maintained in an Amazon S3 bucket provisioned by the Lisberger lab.
+
+    Call this method to schedule a database log backup job. If a job is already scheduled, no action is taken.
+
+    Args:
+        soon: If True, the backup is scheduled to take place one minute from "now". Otherwise, it is scheduled to
+            happen in 24 hours. Default = False.
+    """
+    job_queue = Queue(connection=get_config().redis_conn)
+    if len(job_queue.scheduled_job_registry) == 0:
+        delta = timedelta(minutes=1) if soon else timedelta(hours=24)
+        job_queue.enqueue_in(time_delta=delta, func=backup_log_to_repo)
+        get_application_logger().info(f"Scheduled database ops log backup {'1 min' if soon else '24 hr'} from now.")
+
+
+def backup_log_to_repo() -> None:
+    """
+    Push a copy of the current database operations log in the portal workspace to the backing repository on S3.
+
+    This method is intended to be called on a background process independent from the Dash/Flask backend server.
+    If the current size of the operations log in the portal workspace exceeds the size of its backup copy in the S3
+    repository, the method copies the log to a temporary file (in case other processes are updating the log file
+    at the same time, then uploads that temporary file to S3, replacing the old backup copy of the log.
+    """
+    # we need to get the current size N of the log file while holding the interprocess lock. After releasing the lock,
+    # another server replica could append entries to the log file, but that's OK. We only copy the first N bytes.
+    _ensure_logs_directory_exists()
+    log_path = log_file_path()
+    curr_size = 0
+    try:
+        with WithTimeout(_LOG_LOCK_PATH, 1):
+            curr_size = log_path.stat().st_size
+    except Exception:
+        pass
+
+    s3_key = f"/{_LOG_DIR_NAME}/{_LOG_FILE_NAME}"
+    if curr_size <= file_size_in_bucket(get_config().repo_bucket, s3_key):
+        get_application_logger().info(f"No need to backup {_LOG_FILE_NAME}.")
+        return
+
+    tmp_file_path = Path(_LOG_FILE_DIR, f"tmp_{str(uuid.uuid4())}.log")
+    try:
+        with open(log_path, 'rb') as src, open(tmp_file_path, 'wb') as dst:
+            data = src.read(curr_size)
+            dst.write(data)
+        if not upload_file_to_bucket(tmp_file_path, get_config().repo_bucket, s3_key):
+            get_application_logger().error("Failed to upload current database ops log to S3; check system logs.")
+        else:
+            get_application_logger().info(f"Backed up current database operations log "
+                                          f"({float(curr_size) / KB:.1f} KB) to repo at {s3_key}.")
+    except Exception:
+        get_application_logger().error(f"Database operations log backup failed.", exc_info=True)
+    finally:
+        try:
+            tmp_file_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def dump_log(out: Optional[TextIO] = sys.stdout) -> None:

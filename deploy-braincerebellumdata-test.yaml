@@ -190,7 +190,7 @@ spec:
         image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-51301422
         imagePullPolicy: Always
         command: ["rq"]
-        args: ["worker", "--url", "redis://$(REDIS_HOST):$(REDIS_PORT)"]
+        args: ["worker", "--with-scheduler", "--url", "redis://$(REDIS_HOST):$(REDIS_PORT)"]
         volumeMounts:
           - name: backend-workspace
             mountPath: /portal_ws

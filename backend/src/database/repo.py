@@ -188,15 +188,15 @@ def download_file_from_bucket(bucket_name: str, key: str, dst: Path, log: bool =
         return False
 
 
-def file_exists(bucket_name: str, key: str) -> bool:
+def file_exists_in_bucket(bucket_name: str, key: str) -> bool:
     """
     Does a file exist at the specified key in the specified AWS S3 bucket?
 
     Args:
-        bucket_name: THe name of the bucket.
-        key: The object's key.
+        bucket_name: The name of the bucket.
+        key: The file object's key.
 
-    Returns: True if object exists; False otherwise.
+    Returns: True if file exists; False otherwise.
     """
     try:
         session = aws_session()
@@ -206,6 +206,27 @@ def file_exists(bucket_name: str, key: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def file_size_in_bucket(bucket_name: str, key: str) -> int:
+    """
+    Return the size of the file at the specified key in the specified AWS S3 bucket.
+
+    Args:
+        bucket_name:  The name of the bucket.
+        key: The file object's key.
+
+    Returns: The file's size in bytes. Returns 0 if file not found.
+
+    """
+    try:
+        session = aws_session()
+        s3_resource = session.resource('s3')
+        obj_summary = s3_resource.ObjectSummary(bucket_name, key)
+        obj_summary.load()
+        return obj_summary.size
+    except Exception:
+        return 0
 
 
 def delete_file_in_bucket(bucket_name: str, key: str) -> bool:
@@ -218,7 +239,7 @@ def delete_file_in_bucket(bucket_name: str, key: str) -> bool:
     Returns:
         True if successful or object not found; False otherwise. Error message is written to the portal application log.
     """
-    if not file_exists(bucket_name, key):
+    if not file_exists_in_bucket(bucket_name, key):
         get_application_logger().info(f"Attempt to delete non-existent object {key} from S3 bucket {bucket_name}")
         return True
     try:
