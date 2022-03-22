@@ -2306,6 +2306,10 @@ def reconstruct_database() -> None:
     the database. There is one exception, however: User passwords are, for security reasons, NEVER included in the
     database operations log entries. Therefore, in order to process a log entry that registers a new user on the portal,
     the function will prompt for an initial password for that user's account.
+
+    NOTE2: When a registered user changes their password, the User table in the database is updated accordingly, but
+    the operation is NOT logged. So the database operations history does not preserve user password changes. See also
+    change_portal_user_password() in user_ops.py.
     """
     # ensure database update log exists and verify that database is empty
     log_path: Path = log_file_path()
@@ -2390,13 +2394,13 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
     Returns:
         An error description if session commit fails; else None
     """
-    # TODO: REDESIGN -- Session archives will now be kept in an S3 bucket, not on a volume mount
     s3_key = f"/repo/{log_entry['username']}/" \
              f"{log_entry['subj_id']}_{str(log_entry['date'])}_{log_entry['suffix']}.zip"
+    recon_dir = _get_subfolder_in_staging_directory("reconstruct")
+    error_msg = None
     try:
-        # create a subfolder in the staging directory on the portal server
-        recon_dir = _get_subfolder_in_staging_directory("reconstruct")
-        recon_dir.mkdir(parents=True, exist_ok=True)
+        # create a temporary folder in the staging directory on the portal server
+        recon_dir.mkdir(parents=True, exist_ok=False)
         zip_path = Path(recon_dir, f"{log_entry['subj_id']}_{str(log_entry['date'])}_{log_entry['suffix']}.zip")
         print(f"  > Downloading session archive from S3 repo at {s3_key}...", file=sys.stdout, flush=True)
         if not download_file_from_bucket(get_config().repo_bucket, s3_key, zip_path, log=False):
@@ -2446,5 +2450,11 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
         print("   > Session was successfully committed to database.", file=sys.stdout, flush=True)
     except Exception as err:
         error_msg = f"Exception while reconstructing experiment session:\n  {str(err)}"
-
+    finally:
+        # dispose of the temporary directory in which the archive and pickle files were stored during reconstruction
+        try:
+            shutil.rmtree(recon_dir)
+        except Exception as e:
+            print(f"   > Warning - An exception occured while removing temporary directory:\n   {str(e)}",
+                  file=sys.stdout, flush=True)
     return error_msg

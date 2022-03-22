@@ -151,7 +151,7 @@ def log_update_table_row(table_id: DBTable, row: Dict[str, AttributeValue]) -> O
         with WithTimeout(_LOG_LOCK_PATH, 1):
             with open(_LOG_FILE_PATH, 'ab') as file:
                 pickle.dump({'op': 'update', 'table': table_id, 'row': row}, file)
-        schedule_log_backup_if_necessary(soon=True)   # TODO: For testing purposes
+        schedule_log_backup_if_necessary()
     except Exception as err:
         error_msg = f"Failed to post 'update' entry to database update log: {str(err)}"
         get_application_logger().error(error_msg, exc_info=True)
