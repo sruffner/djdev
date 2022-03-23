@@ -36,8 +36,9 @@ from fasteners import InterProcessLock
 from rq import Queue
 
 from config.config import get_application_logger, get_config
-from database.repo import file_size_in_bucket, KB, upload_file_to_bucket
+from database import repo
 from database.table_info import DBTable, AttributeValue
+from utils.common import size_with_units
 
 _LOG_DIR_NAME: str = 'logs'
 _LOG_FILE_NAME: str = 'database_ops.log'
@@ -240,9 +241,9 @@ def backup_log_to_repo() -> None:
     Push a copy of the current database operations log in the portal workspace to the backing repository on S3.
 
     This method is intended to be called on a background process independent from the Dash/Flask backend server.
-    If the current size of the operations log in the portal workspace exceeds the size of its backup copy in the S3
+    If the current size of the operations log in the portal workspace exceeds the size of its backup copy in the portal
     repository, the method copies the log to a temporary file (in case other processes are updating the log file
-    at the same time, then uploads that temporary file to S3, replacing the old backup copy of the log.
+    at the same time), then uploads that temporary file to the repository, replacing the old backup copy of the log.
     """
     # we need to get the current size N of the log file while holding the interprocess lock. After releasing the lock,
     # another server replica could append entries to the log file, but that's OK. We only copy the first N bytes.
@@ -255,8 +256,8 @@ def backup_log_to_repo() -> None:
     except Exception:
         pass
 
-    s3_key = f"/{_LOG_DIR_NAME}/{_LOG_FILE_NAME}"
-    if curr_size <= file_size_in_bucket(get_config().repo_bucket, s3_key):
+    key = f"/{_LOG_DIR_NAME}/{_LOG_FILE_NAME}"
+    if curr_size <= repo.file_size(key):
         get_application_logger().info(f"No need to backup {_LOG_FILE_NAME}.")
         return
 
@@ -265,11 +266,12 @@ def backup_log_to_repo() -> None:
         with open(log_path, 'rb') as src, open(tmp_file_path, 'wb') as dst:
             data = src.read(curr_size)
             dst.write(data)
-        if not upload_file_to_bucket(tmp_file_path, get_config().repo_bucket, s3_key):
-            get_application_logger().error("Failed to upload current database ops log to S3; check system logs.")
+        if not repo.upload_file(tmp_file_path, key):
+            get_application_logger().error(
+                "Failed to upload current database ops log to portal repository; check system logs.")
         else:
             get_application_logger().info(f"Backed up current database operations log "
-                                          f"({float(curr_size) / KB:.1f} KB) to repo at {s3_key}.")
+                                          f"({size_with_units(curr_size)}) to portal repository.")
     except Exception:
         get_application_logger().error(f"Database operations log backup failed.", exc_info=True)
     finally:

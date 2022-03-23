@@ -10,6 +10,38 @@ from functools import partial
 from json import JSONDecoder
 from typing import Optional, Any, Union
 
+KB = 1024
+""" Number of bytes in a kilobyte. """
+MB = 1024 ** 2
+""" Number of bytes in a megabyte. """
+GB = 1024 ** 3
+""" Number of bytes in a gigabyte. """
+TB = 1024 ** 4
+""" Number of bytes in a terabyte. """
+
+
+def size_with_units(size: float) -> str:
+    """
+    Convert size in bytes to a numeric string with units of KB, MB, GB, or TB. For display purposes only.
+
+    Args:
+        size - The size in bytes.
+    Returns:
+        A string displaying the size in terabytes if size exceeds 1 TB, else in gigabytes if size exceeds 1 GB, else in
+            megabytes if size exceeds 1 MB, else in kilobytes. The chosen unit is included: "TB", "GB", "MB" or "KB".
+            Here the convention is: 1KB = 1024 bytes, 1MB = 1024KB, 1GB = 1024MB, and 1TB = 1024GB. So, strictly
+            speaking IAW official standards, KB = kibibyte, MB = mebibyte, GB = gibibyte, and TB = tebibyte.
+    """
+    f_size = abs(float(size))
+    if f_size > TB:
+        return f"{f_size/TB:.1f} TB"
+    elif f_size > GB:
+        return f"{f_size/GB:.1f} GB"
+    elif size > MB:
+        return f"{f_size/MB:.1f} MB"
+    else:
+        return f"{f_size/KB:.1f} KB"
+
 
 def check_date(date_obj: Union[str, date]) -> bool:
     """

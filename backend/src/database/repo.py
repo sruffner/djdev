@@ -11,11 +11,26 @@ The portal server must supply the AWS Access Key ID and Secret in order to use t
 on the S3 bucket. These secrets are part of application configuration -- see config.AppConfig.
 
 The S3 bucket can contain any number of file objects and is non-hiearchical storage. Each object is stored under a
-string key. However, by design, we use path-like keys for all objects uploaded to the bucket, resulting in a file
-system-like folder hierarchy.  TODO - Have methods in this module enforce object key structure?
+string key. To create a file system-like folder hierarchy for the portal repository, we use path-like keys for all files
+stored in it. All keys start with a forward slash, and addtional forward slashes separate the folders in the path-like
+key. The portal repository contains 3 folders under the root: The /logs folder contains the backup of the database
+operations log (and could be the location for error logs or similar files in the future). The /downloads folder is a
+temporary location for data files prepared in response to download requests. After preparing a data file in reponse to
+a download request, the file is uploaded to /downloads and a presigned URL generated so that the user can download the
+file directly from the S3 bucket (without needing the requisite access credentials). The presigned URL expires after an
+hour, and any file in the /downloads folder expires after 1 day (IAW a lifecycle configuration rule defined on the S3
+bucket).
 
-TODO: Make methods more portal-specific? EG: move_session_archive_to_repo(path), push_data_download_file_to_repo(path)
-    [returns presigned URL], etc.???
+Finally, the /repo folder holds the ZIP archives for all experiment sessions that have been committed to the portal's
+database. The key format for any particular session archive illustrates how the archives are organized under this
+folder: /repo/<exp>/<subj>_<date>_<sfx>.zip, where: <exp> is the username of the experimenter, <subj> is the ID of the
+experiment subject, <date> is the experiment date in the format 'YYYY-MM-DD', and <sfx> is the integer session suffix
+(1-9). These four attributes form the primary key that uniquely identifies an experiment session in the database.
+
+This module includes public methods to list repository contents, upload a file to or download a file from the
+repository, delete a file in the repository, or obtain a presigned URL to a data file in the '/downloads' folder so
+an external user can download that file directly from S3. It also includes the private methods that implement the
+repository's storage in the provisioned S3 bucket. A __main__ entrypoint is available for test and diagnostic purposes.
 
 @author: sruffner
 @created: 15feb2022
@@ -25,56 +40,170 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, List, Tuple, Union, Dict, Any
+from typing import Optional, List, Union, Dict, Any
 
 from boto3 import Session
 from boto3.s3.transfer import TransferConfig
 
 from config.config import get_config, get_application_logger
+from utils.common import MB, GB, size_with_units
 
 
-KB = 1024
-""" Number of bytes in a kilobyte. """
-MB = 1024 ** 2
-""" Number of bytes in a megabyte. """
-GB = 1024 ** 3
-""" Number of bytes in a gigabyte. """
-
-
-def file_size_with_units(size: float) -> str:
+def listing() -> Optional[Dict[str, List[Dict[str, Any]]]]:
     """
-    Convert file in bytes to a numeric string with units of GB, MB or KB. For display purposes only.
+    Retrieve a semi-structured listing of the contents of the portal repository.
+
+    Returns:
+        A dictionary of pseudo folder paths (eg, '/repo/username') in the repository that contain one or more files.
+            Each key is a folder path, and the corresponding value is a list of file information objects, one per file
+            in the path. Each file information object is a dictionary with the following keys: 'name' is the file name,
+            'last_modified' is a datetime object indicating the object's creation time in S3, 'storage_class' is the
+            object's S3 storage class, and 'size' is its total size in bytes. Each folder's file list is sorted in
+            reverse chronological order by creation time. If the repository is empty, returns an empty dictionary. If
+            an error occurs, returns None. Consult the application log for the error description.
+    """
+    contents = _bucket_contents(get_config().repo_bucket)
+    if contents is None:
+        return None
+    folders: Dict[str, List[Dict[str, str]]] = dict()
+    for o in contents:
+        pos = o.key.rfind('/')
+        if pos <= 0:
+            folder_key = '/'
+            file_name = o.key if pos == -1 else o.key[1:]
+        else:
+            folder_key = o.key[0:pos]
+            file_name = o.key[pos+1:]
+        if not (folder_key in folders):
+            folders[folder_key] = list()
+        folders[folder_key].append(
+            dict(name=file_name, last_modified=o.last_modified, storage_class=o.storage_class, size=o.size))
+    for folder_key in folders:
+        folders[folder_key].sort(key=lambda x: x['last_modified'], reverse=True)
+    return folders
+
+
+def upload_file(file_path: Path, key: str, log: bool = True) -> bool:
+    """
+    Upload the specified file to the portal's backing repository.
+
+    All files are stored in the repository under file path-like keys and must match one of these formats: '/logs/*' for
+    log files, '/downloads/*' for experiment data files prepared in response to download requests, and '/repo/*/*' for
+    session archive ZIP files.
 
     Args:
-        size - The file size in bytes.
+        file_path: File system path for the target file. Must exist.
+        key: The S3 object key under which the file should be stored. Must satisfy portal constraints on key format.
+        log: If True, progress updates are posted to the portal application log once the upload begins and after 50%
+            completion. Else a progress message is updated in-place on STDOUT. Default = True.
     Returns:
-        A string displaying the size in gigabytes if size exceeds 1 GB, else in megabytes if size exceeds 1 MB, else
-            in kilobytes. The chosen unit is included: "GB", "MB" or "KB"
+        True if successful, False otherwise. Check application log for error desciription.
+    Raises:
+        ValueError: If object key violates expected format, or target file does not exist.
     """
-    size = abs(size)
-    if size > GB:
-        return f"{size/GB:.1f} GB"
-    elif size > MB:
-        return f"{size/MB:.1f} MB"
-    else:
-        return f"{size/KB:.1f} KB"
+    if not (_validate_key_format(key) and file_path.is_file()):
+        raise ValueError("Bad repository file object key, or target file not found")
+    return _upload_file_to_bucket(file_path, get_config().repo_bucket, key, log)
 
 
-def aws_session() -> Optional[Session]:
+def _validate_key_format(key: str) -> bool:
     """
-    Generate an authenticated AWS session object for accessing AWS services like S3.
+    Check that specified S3 object key conforms to the format expected for any file stored in the portal repository. By
+    convention, the key must always start with a '/logs', '/downloads', or '/repo'. Keys under 'repo' will have 3 path
+    parts (/repo/username/file.zip), while keys under the other 2 folders have 2 path parts.
+
+    Args:
+        key: The object key.
+    Returns:
+        True if key conforms to the format expected of a file in the portal repository, else False.
+    """
+    ok = False
+    try:
+        parts = key.split('/')
+        n, p1 = len(parts), parts[1]
+        ok = (parts[0] == '') and (((n == 3) and (p1 in ['logs', 'downloads'])) or ((n == 4) and (p1 == 'repo')))
+    except Exception:
+        pass
+    return ok
+
+
+def download_file(key: str, dst: Path, log: bool = True) -> bool:
+    """
+    Download a file stored in the portal repository.
+
+    Args:
+        key: The file object key.
+        dst: The file system destination path for the file object.
+        log: If True, progress updates are posted to the portal application log once the download begins and after 50%
+            completion. Else a progress message is updated in-place on STDOUT. Default = True.
+    Returns:
+        True if successful; False otherwise. Error message is written to the portal application log.
+    """
+    return _download_file_from_bucket(get_config().repo_bucket, key, dst, log)
+
+
+def download_url_for(key: str) -> Optional[str]:
+    """
+    Generate a URL by which a data file previously prepared in response to an experiment data download request may be
+    downloaded from the portal repository.
+
+    Data files prepared in response to a download request are stored for 1 day in the '/downloads' node in the
+    repository. Since the repository is maintained in a private Amazon S3 bucket, a presigned URL must be supplied so
+    that the external user that made the request can download the file directly to their machine.
+
+    This method may not be used to generate a download URL for files elsewhere in the portal repository
+
+    Args:
+        key: The file object key.
+    Returns:
+        The URL string. The URL will expire in 1 hour. Returns None if an error occurs (consult application logs).
+    Raises:
+        ValueError: If key does not start with '/downloads'.
+    """
+    if not key.startswith('/downloads'):
+        raise ValueError("Download URL only available for files in the /downloads folder!")
+    return _presigned_url_for_file(get_config().repo_bucket, key)
+
+
+def file_size(key: str) -> int:
+    """
+    Return the size of a file stored in the portal repository.
+
+    Args:
+        key: The file object's key.
+    Returns: The file's size in bytes. Returns 0 if file not found or an internal error occurred.
+    """
+    return _file_size_in_bucket(get_config().repo_bucket, key)
+
+
+def delete_file(key: str) -> bool:
+    """
+    Permanently delete a file stored in the portal repository
+
+    Args:
+        key: The file object's key.
+    Returns:
+        True if successful or object not found; False otherwise. Error message is written to the portal application log.
+    """
+    return _delete_file_in_bucket(get_config().repo_bucket, key)
+
+
+def _aws_session() -> Optional[Session]:
+    """
+    Generate an authenticated AWS session object using the authentication credentials from application configuration.
 
     Returns:
-        The session object, or None if no authentication credentials found.
+        The session object.
+    Raises:
+        Exception: If access credentials are missing from application configuration
     """
     cfg = get_config()
     if (not cfg.aws_access_key_id) or (not cfg.aws_access_key_secret) or (not cfg.aws_region_name):
-        get_application_logger().error("Cannot open AWS session - Missing access credentials.")
-        return None
+        raise Exception("Cannot open AWS session - Missing access credentials.")
     return Session(cfg.aws_access_key_id, cfg.aws_access_key_secret, region_name=cfg.aws_region_name)
 
 
-def bucket_exists(bucket_name: str) -> bool:
+def _bucket_exists(bucket_name: str) -> bool:
     """
     Test that the specified bucket exists in the app's AWS S3 account.
 
@@ -84,7 +213,7 @@ def bucket_exists(bucket_name: str) -> bool:
         True if bucket exists, else False.
     """
     try:
-        session = aws_session()
+        session = _aws_session()
         s3_client = session.client('s3')
         response = s3_client.head_bucket(Bucket=bucket_name)
         get_application_logger().debug(f"response to head_bucket: {response}")
@@ -94,9 +223,9 @@ def bucket_exists(bucket_name: str) -> bool:
         return False
 
 
-def upload_file_to_bucket(file_path: Path, bucket_name: str, key: str, log: bool = True) -> bool:
+def _upload_file_to_bucket(file_path: Path, bucket_name: str, key: str, log: bool = True) -> bool:
     """
-    Upload a file to the specified key in the specified bucket in AWS S3 account.
+    Upload a file to the specified key in the specified bucket in AWS S3.
 
     Args:
         file_path: Path to file. Must exist.
@@ -109,7 +238,7 @@ def upload_file_to_bucket(file_path: Path, bucket_name: str, key: str, log: bool
     """
     xfer_cfg = TransferConfig(multipart_threshold=50*MB, multipart_chunksize=50*MB)
     try:
-        session = aws_session()
+        session = _aws_session()
         s3_resource = session.resource('s3')
         bucket = s3_resource.Bucket(bucket_name)
         if log:
@@ -124,7 +253,7 @@ def upload_file_to_bucket(file_path: Path, bucket_name: str, key: str, log: bool
         return False
 
 
-def presigned_url_for_file(bucket_name: str, key: str, expires: int = 3600) -> Tuple[bool, str]:
+def _presigned_url_for_file(bucket_name: str, key: str, expires: int = 3600) -> Optional[str]:
     """
     Generate a presigned URL by which the specified file may be downloaded from the specified S3 bucket.
 
@@ -133,23 +262,23 @@ def presigned_url_for_file(bucket_name: str, key: str, expires: int = 3600) -> T
         key: The file object key.
         expires: Expiration time for the URL, in seconds. Range 1-86400 (24 hours). Default = 3600 (1 hour).
     Returns:
-        A 2-tuple: (False, error message) if operation fails; (True, URL string) otherwise.
+        The URL string, or None if an error occurred.
     """
     try:
-        session = aws_session()
+        session = _aws_session()
         s3_client = session.client('s3')
         url = s3_client.generate_presigned_url(ClientMethod='get_object', Params={'Bucket': bucket_name, 'Key': key},
                                                ExpiresIn=expires)
         get_application_logger().info(
             f"Generated presigned URL for {key} in S3 bucket {bucket_name}. Expiring in {expires} seconds.")
-        return True, url
+        return url
     except Exception:
         get_application_logger().error(f"Failed to generate presigned URL for {key} in S3 bucket {bucket_name}",
                                        exc_info=True)
-        return False, "Unable to generate download URL - file does not exist or internal error"
+        return None
 
 
-def download_file_from_bucket(bucket_name: str, key: str, dst: Path, log: bool = True) -> bool:
+def _download_file_from_bucket(bucket_name: str, key: str, dst: Path, log: bool = True) -> bool:
     """
     Download a file from the specified key in the specified bucket in AWS S3.
 
@@ -164,7 +293,7 @@ def download_file_from_bucket(bucket_name: str, key: str, dst: Path, log: bool =
     """
     xfer_cfg = TransferConfig(multipart_threshold=50*MB, multipart_chunksize=50*MB)
     try:
-        session = aws_session()
+        session = _aws_session()
         s3_resource = session.resource('s3')
         obj = s3_resource.Object(bucket_name, key)
         obj.load()
@@ -188,7 +317,27 @@ def download_file_from_bucket(bucket_name: str, key: str, dst: Path, log: bool =
         return False
 
 
-def file_exists_in_bucket(bucket_name: str, key: str) -> bool:
+def _file_size_in_bucket(bucket_name: str, key: str) -> int:
+    """
+    Return the size of the file at the specified key in the specified AWS S3 bucket.
+
+    Args:
+        bucket_name:  The name of the bucket.
+        key: The file object's key.
+
+    Returns: The file's size in bytes. Returns 0 if file not found or an internal error occurred.
+    """
+    try:
+        session = _aws_session()
+        s3_resource = session.resource('s3')
+        obj_summary = s3_resource.ObjectSummary(bucket_name, key)
+        obj_summary.load()
+        return obj_summary.size
+    except Exception:
+        return 0
+
+
+def _file_exists_in_bucket(bucket_name: str, key: str) -> bool:
     """
     Does a file exist at the specified key in the specified AWS S3 bucket?
 
@@ -199,7 +348,7 @@ def file_exists_in_bucket(bucket_name: str, key: str) -> bool:
     Returns: True if file exists; False otherwise.
     """
     try:
-        session = aws_session()
+        session = _aws_session()
         s3_resource = session.resource('s3')
         obj_summary = s3_resource.ObjectSummary(bucket_name, key)
         obj_summary.load()
@@ -208,28 +357,7 @@ def file_exists_in_bucket(bucket_name: str, key: str) -> bool:
         return False
 
 
-def file_size_in_bucket(bucket_name: str, key: str) -> int:
-    """
-    Return the size of the file at the specified key in the specified AWS S3 bucket.
-
-    Args:
-        bucket_name:  The name of the bucket.
-        key: The file object's key.
-
-    Returns: The file's size in bytes. Returns 0 if file not found.
-
-    """
-    try:
-        session = aws_session()
-        s3_resource = session.resource('s3')
-        obj_summary = s3_resource.ObjectSummary(bucket_name, key)
-        obj_summary.load()
-        return obj_summary.size
-    except Exception:
-        return 0
-
-
-def delete_file_in_bucket(bucket_name: str, key: str) -> bool:
+def _delete_file_in_bucket(bucket_name: str, key: str) -> bool:
     """
     Permanently delete an object stored in an AWS S3 bucket.
 
@@ -239,11 +367,11 @@ def delete_file_in_bucket(bucket_name: str, key: str) -> bool:
     Returns:
         True if successful or object not found; False otherwise. Error message is written to the portal application log.
     """
-    if not file_exists_in_bucket(bucket_name, key):
+    if not _file_exists_in_bucket(bucket_name, key):
         get_application_logger().info(f"Attempt to delete non-existent object {key} from S3 bucket {bucket_name}")
         return True
     try:
-        session = aws_session()
+        session = _aws_session()
         s3_resource = session.resource('s3')
         s3_resource.Object(bucket_name, key).delete()
         get_application_logger().info(f"Successfully deleted object {key} from S3 bucket {bucket_name}.")
@@ -253,7 +381,7 @@ def delete_file_in_bucket(bucket_name: str, key: str) -> bool:
         return False
 
 
-def bucket_contents(bucket_name: str) -> Optional[List]:
+def _bucket_contents(bucket_name: str) -> Optional[List]:
     """
     Retrieve the object listing for the specified bucket in AWS S3.
 
@@ -265,7 +393,7 @@ def bucket_contents(bucket_name: str) -> Optional[List]:
             latter case, an error message is written to the portal application log. Each element is an S3 ObjectSummary.
     """
     try:
-        session = aws_session()
+        session = _aws_session()
         s3_resource = session.resource('s3')
         bucket = s3_resource.Bucket(bucket_name)
         obj_list = [obj for obj in bucket.objects.all()]
@@ -273,43 +401,6 @@ def bucket_contents(bucket_name: str) -> Optional[List]:
     except Exception:
         get_application_logger().error(f"Failed to get object listing for S3 bucket {bucket_name}", exc_info=True)
         return None
-
-
-def bucket_folders(bucket_name: str) -> Optional[Dict[str, List[Dict[str, Any]]]]:
-    """
-    Retrieve a semi-structured listing of the file objects contained in the specified S3 bucket.
-
-    This method ASSUMES that object keys take the form of a Linux system-like path: /folder1/folder2/file.ext.
-
-    Args:
-        bucket_name: The name of the bucket.
-    Returns:
-        A dictionary of pseudo folder paths in the bucket that contain one or more files. Key is the folder path,
-            value is a list of file information objects, one per file in the path. Each file information object is a
-            dictionary with the following keys: 'name' is the file name, 'last_modified' is a datetime object indicating
-            the object's creation time in S3, 'storage_class' is the object's S3 storage class, and 'size' is its total
-            size in bytes. Each folder's file list is sorted in reverse chronological order by creation time. If the
-            bucket is empty, returns an empty dictionary.
-    """
-    contents = bucket_contents(bucket_name)
-    if contents is None:
-        return None
-    folders: Dict[str, List[Dict[str, str]]] = dict()
-    for o in contents:
-        pos = o.key.rfind('/')
-        if pos <= 0:
-            folder_key = '/'
-            file_name = o.key if pos == -1 else o.key[1:]
-        else:
-            folder_key = o.key[0:pos]
-            file_name = o.key[pos+1:]
-        if not (folder_key in folders):
-            folders[folder_key] = list()
-        folders[folder_key].append(
-            dict(name=file_name, last_modified=o.last_modified, storage_class=o.storage_class, size=o.size))
-    for folder_key in folders:
-        folders[folder_key].sort(key=lambda x: x['last_modified'], reverse=True)
-    return folders
 
 
 class _TransferProgressCallback(object):
@@ -364,7 +455,7 @@ def _get_lifecycle_configuration_rules_for_bucket(bucket_name: str) -> Union[Lis
         List of lifecycle configuration rules (each of which is a dictionary), or an error message on failure.
     """
     try:
-        session = aws_session()
+        session = _aws_session()
         s3_resource = session.resource('s3')
         bucket = s3_resource.Bucket(bucket_name)
         lifecycle_cfg = bucket.LifecycleConfiguration()
@@ -390,20 +481,17 @@ def _process_command(bucket_name: str) -> bool:
     command = input(f"[{bucket_name}] Enter command (l, c, u, d, g, x, h, q) > ")
     error_msg = None
     if command == 'l':
-        folders = bucket_folders(bucket_name)
-        if folders is None:
+        contents = _bucket_contents(bucket_name)
+        if contents is None:
             error_msg = "Unable to list bucket contents"
-        elif len(folders) == 0:
+        elif len(contents) == 0:
             print("*** The bucket is empty! ***")
         else:
-            print(f"{'KEY':50} {'STORAGE CLASS':30} {'SIZE (MiB)':15} {'LAST_MODIFIED':30}")
-            print(f"{'---':50} {'-------------':30} {'----------':15} {'-------------':30}")
-            for folder_key in sorted(folders.keys()):
-                print(f"{folder_key + ':':50} {'':30} {'':15} {'':30}")
-                for file_info in folders[folder_key]:
-                    print(f"   {file_info['name']:47} {file_info['storage_class']:30} "
-                          f"{float(file_info['size'])/MB:<15.1f} "
-                          f"{file_info['last_modified'].strftime('%m-%d-%Y %H:%M:%S %Z'):30}")
+            print(f"{'KEY':50} {'STORAGE CLASS':30} {'SIZE':15} {'LAST_MODIFIED':30}")
+            print(f"{'---':50} {'-------------':30} {'----':15} {'-------------':30}")
+            for o in contents:
+                print(f"{o.key:50} {o.storage_class:30} "
+                      f"{size_with_units(o.size):15} {o.last_modified.strftime('%m-%d-%Y %H:%M:%s %Z'):30}")
     elif command == 'c':
         rules = _get_lifecycle_configuration_rules_for_bucket(bucket_name)
         if isinstance(rules, str):
@@ -424,7 +512,7 @@ def _process_command(bucket_name: str) -> bool:
             error_msg = 'Sorry, file size must be less than 3GB'
         else:
             t_start = time.time()
-            ok = upload_file_to_bucket(file_path, bucket_name, f"{prefix}{file_path.name}", log=False)
+            ok = _upload_file_to_bucket(file_path, bucket_name, f"{prefix}{file_path.name}", log=False)
             t = time.time() - t_start
             if ok:
                 print(f"\nDone. {file_path.stat().st_size/MB:.1f}MB uploaded in {t:.3f} seconds.")
@@ -437,7 +525,7 @@ def _process_command(bucket_name: str) -> bool:
             error_msg = 'Cannot overwrite existing file, or parent directory does not exist'
         else:
             t_start = time.time()
-            ok = download_file_from_bucket(bucket_name, obj_key, dst_file, log=False)
+            ok = _download_file_from_bucket(bucket_name, obj_key, dst_file, log=False)
             t = time.time() - t_start
             if ok:
                 print(f"\nDone. {dst_file.stat().st_size/MB:.1f}MB downloaded in {t:.3f} seconds.")
@@ -445,14 +533,14 @@ def _process_command(bucket_name: str) -> bool:
                 error_msg = "Download failed."
     elif command == 'g':
         obj_key = input('Enter object key in full > ')
-        ok, url = presigned_url_for_file(bucket_name, obj_key)
+        ok, url = _presigned_url_for_file(bucket_name, obj_key)
         if ok:
             print(f"\nDownload URL is: {url}")
         else:
             error_msg = url
     elif command == 'x':
         obj_key = input('Enter object key in full > ')
-        if not delete_file_in_bucket(bucket_name, obj_key):
+        if not _delete_file_in_bucket(bucket_name, obj_key):
             error_msg = "Delete operation failed."
     elif command == 'h':
         _print_usage()
@@ -468,7 +556,7 @@ def _process_command(bucket_name: str) -> bool:
 # To run this module on the backend container: 'docker-compose run backend python -m database.repo
 if __name__ == '__main__':
     _bucket_name = input('Enter name of S3 bucket > ')
-    if not bucket_exists(_bucket_name):
+    if not _bucket_exists(_bucket_name):
         print(" Bucket not found! ... Exiting.\n", file=sys.stdout, flush=True)
         exit(-1)
 

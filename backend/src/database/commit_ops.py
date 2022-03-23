@@ -88,9 +88,8 @@ from rq import Queue
 from werkzeug.security import generate_password_hash
 
 from config.config import get_config, get_application_logger
-from database import maestro, PL2
+from database import maestro, PL2, repo
 from database.log_ops import log_session_commit, log_file_path
-from database.repo import upload_file_to_bucket, delete_file_in_bucket, download_file_from_bucket
 from database.table_info import DBTable, AttributeValue, primary_key_of
 from database.table_ops import fetch_attribute_values, fetch_one_row, fetch_rows, check_row, fetch_restrict_proj, \
     SessionCommitter, rollback_session_commit, database_empty, insert_into_table, delete_from_table, update_table_row, \
@@ -1951,12 +1950,10 @@ def finish_commit_job(job_id: str) -> bool:
 
     # at this point, the session has been committed to the database. Now we need rewrite the preprocessing pickle file
     # to include the information supplied during the review stage, and append it to the ZIP archive. Then we upload the
-    # amended ZIP archive to the portal backing repository maintained in a provisioned bucket in AWS S3. The S3 object
-    # key under which it is stored reflects all the attributes of the session's primary key:
-    #    /repo/<experimenter>/<subj_id>_<session_date>_<session_sfx>.zip.
-    # If any of those operations fail, we have to remove the session from the database!
-    s3_key = f"/repo/{session_info.experimenter}/" \
-             f"{session_info.subj_id}_{str(session_info.session_date)}_{session_info.session_suffix}.zip"
+    # amended ZIP archive to the portal backing repository. If any of those operations fail, we have to remove the
+    # session from the database!
+    key = f"/repo/{session_info.experimenter}/" \
+          f"{session_info.subj_id}_{str(session_info.session_date)}_{session_info.session_suffix}.zip"
     archive_uploaded, commit_logged = False, False
     try:
         if _background_job_update(job_id, "Adding pre-processing results to session archive..."):
@@ -1970,10 +1967,10 @@ def finish_commit_job(job_id: str) -> bool:
         with zipfile.ZipFile(zip_path, 'a') as f:
             f.write(preproc_path, PREPROC_FNAME)
 
-        if _background_job_update(job_id, "Uploading session archive to portal's backing repository.."):
+        if _background_job_update(job_id, "Uploading session archive to portal repository..."):
             raise Exception("Operation cancelled")
-        if not upload_file_to_bucket(zip_path, get_config().repo_bucket, s3_key):
-            raise Exception(f"Unable to push committed session archive [{s3_key}] to portal backing repo in S3")
+        if not repo.upload_file(zip_path, key):
+            raise Exception(f"Unable to push committed session archive [{key}] to portal repository")
         archive_uploaded = True
 
         # finally, log the session commit
@@ -1998,8 +1995,8 @@ def finish_commit_job(job_id: str) -> bool:
             _logger.critical(f"Session commit rollback failed: {str(e)}")
             ok = False
         if archive_uploaded:
-            if not delete_file_in_bucket(get_config().repo_bucket, s3_key):
-                _logger.critical(f"Failed to remove session archive from S3 repo key {s3_key} during commit rollback")
+            if not repo.delete_file(key):
+                _logger.critical(f"Failed to remove session archive from repository {key} during commit rollback")
                 ok = False
         err_msg = f"Commit failed after database insertions; rollback {'successful' if ok else 'FAILED!'}"
         try:
@@ -2383,8 +2380,8 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
     interaction -- are stored in the pickle file "preproc.pickle", which in turn is appended to the session archive ZIP.
     As a result, re-committing the session requires no user intervention and is significantly faster because it does not
     require processing of a large PL2 file (which also would have to be extracted from the ZIP file). However, the
-    archive ZIP must be downloaded from S3 to a staging directory in the portal workspace before it is processed. This
-    is probably the slowest step in the process.
+    archive ZIP must be downloaded from the repository to a staging directory in the portal workspace before it is
+    processed, which could take a while.
 
     Progress messages are written to STDOUT.
 
@@ -2394,17 +2391,17 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
     Returns:
         An error description if session commit fails; else None
     """
-    s3_key = f"/repo/{log_entry['username']}/" \
-             f"{log_entry['subj_id']}_{str(log_entry['date'])}_{log_entry['suffix']}.zip"
+    key = f"/repo/{log_entry['username']}/" \
+          f"{log_entry['subj_id']}_{str(log_entry['date'])}_{log_entry['suffix']}.zip"
     recon_dir = _get_subfolder_in_staging_directory("reconstruct")
     error_msg = None
     try:
         # create a temporary folder in the staging directory on the portal server
         recon_dir.mkdir(parents=True, exist_ok=False)
         zip_path = Path(recon_dir, f"{log_entry['subj_id']}_{str(log_entry['date'])}_{log_entry['suffix']}.zip")
-        print(f"  > Downloading session archive from S3 repo at {s3_key}...", file=sys.stdout, flush=True)
-        if not download_file_from_bucket(get_config().repo_bucket, s3_key, zip_path, log=False):
-            raise Exception("Failed while downloading session archive from S3")
+        print(f"  > Downloading session archive from repository at {key}...", file=sys.stdout, flush=True)
+        if not repo.download_file(key, zip_path, log=False):
+            raise Exception("Failed while downloading session archive from repository.")
 
         # load pre-processing results from pickle file in session archive
         print(f"  > Loading preprocessed results stored in session archive...")
@@ -2455,6 +2452,6 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
         try:
             shutil.rmtree(recon_dir)
         except Exception as e:
-            print(f"   > Warning - An exception occured while removing temporary directory:\n   {str(e)}",
-                  file=sys.stdout, flush=True)
+            print(f"   > Warning - An exception occured while removing temporary "
+                  f"directory {str(recon_dir)}:\n   {str(e)}", file=sys.stdout, flush=True)
     return error_msg

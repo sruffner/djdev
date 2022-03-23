@@ -13,10 +13,9 @@ stateful workflow. The workflow has the following stages:
       response data, the format of the download file, and a few other specifics. See explore.py.
     - Generation of the download file. The per-trial response data, along with some descriptive metadata, are retrieved
       from the portal database and written to the data file IAW the download request. This happens in a background
-      process, not in the Dash/Flask backend. The file is stored in a temporary location in the portal's backup
-      repository.
+      process, not in the Dash/Flask backend. The file is stored in a temporary location in the portal repository.
     - Back on the frontend, the logged-in user can monitor the progress of the pending download. Once the data file is
-      ready, the user can initiate the actural download. Download requests may fail for whatever reason. They also
+      ready, the user can initiate the actual download. Download requests may fail for whatever reason. They also
       expire after a set period of time; upon expiration, the data file is removed permanently from the backup
       repository, and the request is marked as "expired".
 
@@ -52,7 +51,7 @@ import numpy as np
 import scipy.io
 from rq import Queue
 from config.config import get_config, get_application_logger
-from database.repo import upload_file_to_bucket, presigned_url_for_file
+from database import repo
 from database.table_info import AttributeValue, DBTable, primary_key_of
 from database.table_ops import row_exists, fetch_attribute_values, fetch_one_row, insert_into_table
 from database.trial_data_ops import TrialData, retrieve_trial_block
@@ -265,16 +264,15 @@ def fulfill_pending_download_request(req_id: str) -> bool:
 
     Fulfilling a typical download request involves retrieving trial-aligned behavioral and neuronal response data for
     all or a subset of the trials presented and recorded during an experiment session. The response data is then
-    packaged, along with some supporting metadata into a data file in one of 3 supported formats -- a Python pickle
-    file, a Numpy multi-array file, or a Matlab MAT file. That file is then compressed into a standard ZIP archive for
-    download and stored in the portal's respository at /downloads/<req_id>.zip, where <req_id> is the unique identifier
-    assigned to the original download request.
+    packaged, along with some supporting metadata into a data file in one of 2 supported formats -- a Numpy multi-array
+    file (.npz) or a Matlab file (.mat). That file is stored in the portal's respository at /downloads/<req_id>.<ext>,
+    where <req_id> is the unique identifier assigned to the original download request.
 
     Depending on the length and number of trials, it could take a minute or more to prepare the download ZIP, so
     progress is updated regularly in the _DOWNLOAD_STATUS_NS<req_id> key. The request status has 3 possible states -
     'in progress', 'ready for download', and 'failed'.
 
-    Oncd submitted, a download request cannot be cancelled, but it can be deleted. This method will abort if it
+    Once submitted, a download request cannot be cancelled, but it can be deleted. This method will abort if it
     detects that the request it's working on has been removed from Redis.
 
     Args:
@@ -312,10 +310,10 @@ def fulfill_pending_download_request(req_id: str) -> bool:
                                       int(50 * (idx_start - 1) / n_trials)):
                 return False
 
-        # make sure the downloads/ folder exists in the repository root
+        # make sure the downloads/ folder exists in the portal workspace
         downloads_dir = get_data_downloads_directory()
         if not downloads_dir.is_dir():
-            get_application_logger().debug("Creating downloads/ folder in backend repository")
+            get_application_logger().debug("Creating downloads/ folder in portal workspace")
             downloads_dir.mkdir(parents=True, exist_ok=False)
 
         # write data file
@@ -324,13 +322,13 @@ def fulfill_pending_download_request(req_id: str) -> bool:
             return False
         _save_trial_data_to_file(file_path, trial_data)
 
-        if _request_status_update(req_id, f"Pushing {file_path.name} to temporary storage", 90):
+        # ... then upload it to temporary storage in the portal repository (it will be auto-deleted after 1 day)
+        if _request_status_update(req_id, f"Pushing {file_path.name} to portal repository", 90):
             file_path.unlink(missing_ok=True)
             return False
 
-        # ... then upload it to temporary storage in S3 (it will be auto-deleted after 1 dqy)
-        if not upload_file_to_bucket(file_path, get_config().repo_bucket, f"/{_DOWNLOAD_SUBFOLDER}/{file_path.name}"):
-            raise Exception("An error occurred while uploading data file to S3 bucket")
+        if not repo.upload_file(file_path, f"/{_DOWNLOAD_SUBFOLDER}/{file_path.name}"):
+            raise Exception("An error occurred while uploading data file to portal repository")
 
         # remove the data file from local storage -- we're done with it.
         file_path.unlink(missing_ok=True)
@@ -448,12 +446,12 @@ def _request_status_update(req_id: str, msg: str, pct: int, next_state: Optional
 def get_data_download_url(requester: str, req_id: str) -> Tuple[bool, str]:
     """
     Get the presigned URL by which a data file -- previously prepared in response to a data download request -- can be
-    downloaded from the portal's backend repository.
+    downloaded from the portal repository.
 
-    Once a data download request is fulfilled, the prepared data file is available for download from the backend
-    repository, implemented in an AWS S3 bucket. By design, the data file will "expire" (ie, it is deleted permanently)
-    approximately 24 hours after it is uploaded to S3. Since all files in the S3 bucket are private, a presigned URL
-    must be supplied to download any given file.
+    Once a data download request is fulfilled, the prepared data file is available for download from the repository,
+    implemented in an AWS S3 bucket. By design, the data file will "expire" (ie, it is deleted permanently) about 24
+    hours after it is uploaded. Since all files in the S3 bucket are private, a presigned URL must be supplied to
+    download any given file.
 
     Only one presigned URL will be supplied per download request. The URL should be accessed immediately, as it is set
     to expire in one hour. After preparing the URL, this method removes the completed download request from the Redis
@@ -463,7 +461,7 @@ def get_data_download_url(requester: str, req_id: str) -> Tuple[bool, str]:
         requester: The username of the registered portal user that originally requested the download.
         req_id: The download request identifier.
     Returns:
-        A 3-tuple: (False, error message) if an error occurs; (True, url-string) otherwise.
+        A 2-tuple: (False, error message) if an error occurs; (True, url-string) otherwise.
     """
     clear = False  # if set, clear the download request from Redis cache
     info_key = f"{_DOWNLOAD_INFO_NS}{req_id}"
@@ -490,9 +488,9 @@ def get_data_download_url(requester: str, req_id: str) -> Tuple[bool, str]:
 
         # generate presigned URL
         file_key = f"/{_DOWNLOAD_SUBFOLDER}/{get_data_download_file_path(req_info).name}"
-        ok, url = presigned_url_for_file(get_config().repo_bucket, file_key)
-        if not ok:
-            return False, url
+        url = repo.download_url_for(file_key)
+        if url is None:
+            return False, "Unable to generate download URL for the data file."
 
         # push a record of the completed download into the portal database. If this fails, do not consider it
         # catastrophic, but log the issue

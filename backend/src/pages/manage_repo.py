@@ -40,9 +40,8 @@ import flask_login
 from app import PortalUser, load_authorized_user
 
 import database.table_info as ti
-from config.config import get_config
-from database.repo import bucket_folders, file_size_with_units
-
+from database import repo
+from utils.common import size_with_units
 
 _REPO_TABLE_ID: str = "repo-table"
 """ ID of Dash DataTable presenting a pseudo filelisting of the portal's backup repository contents. """
@@ -61,21 +60,21 @@ _OP_ALERT_ID: str = "op-alert"
 
 def _fetch_repo_contents() -> Union[str, List[Dict[str, str]]]:
     """
-    Helper method fetches the contents of the S3-provisioned bucket containing the portal's backup repository and
-    prepares the information for display in a Dash DataTable.
+    Helper method fetches the contents of the portal's backup repository and prepares the information for display in a
+    Dash DataTable.
     """
-    folders = bucket_folders(get_config().repo_bucket)
+    folders = repo.listing()
     if folders is None:
-        return "Unable to retrieve contents of portal's backup repository. Consult application logs."
+        return "Unable to retrieve contents of portal's repository. Consult application logs."
     rows = list()
     for folder_key in sorted(folders.keys()):
         folder_size = sum([float(file_info['size']) for file_info in folders[folder_key]])
         rows.append(dict(name=f"***{folder_key}***", last_modified="--", storage_class="--",
-                         size=f"***{file_size_with_units(folder_size)}***"))
+                         size=f"***{size_with_units(folder_size)}***"))
         for info in folders[folder_key]:
             rows.append(dict(name=f"\u21b3 {info['name']}",
                              last_modified=info['last_modified'].strftime('%m-%d-%Y %H:%M:%S %Z'),
-                             storage_class=info['storage_class'], size=file_size_with_units(info['size'])))
+                             storage_class=info['storage_class'], size=size_with_units(info['size'])))
     return rows
 
 
