@@ -227,10 +227,13 @@ def schedule_log_backup_if_necessary(soon: bool = False) -> None:
 
     Args:
         soon: If True, the backup is scheduled to take place one minute from "now". Otherwise, it is scheduled to
-            happen in 24 hours. Default = False.
+            happen in 24 hours. Default = False. If the log has never been backed up, this argument is ignored and a
+            backup is scheduled for 1 minute from now.
     """
     job_queue = Queue(connection=get_config().redis_conn)
     if len(job_queue.scheduled_job_registry) == 0:
+        if 0 == repo.file_size(f"/{_LOG_DIR_NAME}/{_LOG_FILE_NAME}"):
+            soon = True
         delta = timedelta(minutes=1) if soon else timedelta(hours=24)
         job_queue.enqueue_in(time_delta=delta, func=backup_log_to_repo)
         get_application_logger().info(f"Scheduled database ops log backup {'1 min' if soon else '24 hr'} from now.")

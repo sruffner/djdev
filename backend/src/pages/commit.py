@@ -204,11 +204,11 @@ def serve_layout() -> html.Div:
             * There is no support at this time for automatic spike sorting. For electrophysiological recordings, the
             experimenter must supply neural unit data (spike trains) in a pickle file (.pkl or .pickle). This must be
             the only pickle file in the archive.
-            * The pickle file must contain a single dictionary: {'filename': [...], 'channel': [...],
-            'spiketimes': [...]}, where each value is a list of length N = the number of neural units. These contain the
-             Omniplex PL2 filenames, the source channel IDs ('WBnn' or 'SPKCnn'), and the spike timestamps (in seconds
-             since the Omniplex recording started) for each neural unit. The 'filename' field may be omitted if all 
-             units were recorded in a single Omniplex file.
+            * The pickle file must contain a single dictionary with 3 keys: 'filename', 'channel', and 'spiketimes'.
+            Each key value is a list of length N = the number of neural units. These contain the Omniplex PL2
+            filenames, the source channel IDs ('WBnn' or 'SPKCnn'), and the spike timestamps (in seconds since the
+            Omniplex recording started) for each neural unit. The 'filename' field may be omitted if all units were
+            recorded in a single Omniplex file.
 
             *Drag and drop the ZIP file onto the upload component below, or click on the component to browse the file
             system for the file. The upload should start automatically. Large (>1GB) archives will take a significant
