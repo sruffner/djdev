@@ -40,7 +40,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, List, Union, Dict, Any
+from typing import Optional, List, Union, Dict, Any, Tuple
 
 from boto3 import Session
 from boto3.s3.transfer import TransferConfig
@@ -359,7 +359,7 @@ def _file_exists_in_bucket(bucket_name: str, key: str) -> bool:
 
 def _delete_file_in_bucket(bucket_name: str, key: str) -> bool:
     """
-    Permanently delete an object stored in an AWS S3 bucket.
+    Permanently delete a file object stored in an AWS S3 bucket.
 
     Args:
         bucket_name: The name of the S3 bucket containing the object.
@@ -378,6 +378,35 @@ def _delete_file_in_bucket(bucket_name: str, key: str) -> bool:
         return True
     except Exception:
         get_application_logger().error(f"Failed to delete object {key} from S3 bucket {bucket_name}", exc_info=True)
+        return False
+
+
+def _delete_all_files_in_bucket(bucket_name: str, print_progress: bool = False) -> bool:
+    """
+    Permanently delete ALL file objects currently stored in an AWS S3 bucket.  * USE WITH CAUTION! *
+
+    Args:
+        bucket_name: The name of the S3 bucket to be emptied
+        print_progress: If True, progress messages are printed to the console as each file object is removed; else,
+            an INFO-level log message is written after every 10 objects are deleted. Default = False.
+    Returns:
+        True if successful, False otherwise.
+    """
+    try:
+        session = _aws_session()
+        s3_resource = session.resource('s3')
+        bucket = s3_resource.Bucket(bucket_name)
+        obj_list = [obj for obj in bucket.objects.all()]
+        n = len(obj_list)
+        for i, obj in enumerate(obj_list):
+            s3_resource.Object(bucket_name, obj.key).delete()
+            if print_progress:
+                print(f"Successfully removed {obj.key} ({i} of {n} files).", file=sys.stdout, flush=True)
+            elif (i > 0) and (i % 10 == 0):
+                get_application_logger().info(f"Successfully removed {i} of {n} files from S3 bucket {bucket_name}")
+        return True
+    except Exception:
+        get_application_logger().error(f"Failed to get remove all object from S3 bucket {bucket_name}", exc_info=True)
         return False
 
 
@@ -467,19 +496,23 @@ def _get_lifecycle_configuration_rules_for_bucket(bucket_name: str) -> Union[Lis
 
 def _print_usage() -> None:
     print("\nAvailable commands:\n"
+          "   b = Switch buckets.\n"
           "   l = List all file objects in bucket.\n"
           "   c = Display current lifecycle configuration for bucket.\n"
           "   u = Upload a file object to bucket.\n"
           "   d = Download a file object from bucket.\n"
           "   g = Generate a presigned URL to download a file object from bucket.\n"
           "   x = Delete a file object in bucket.\n"
+          "   r = Remove ALL file objects in bucket.\n"
           "   h = Print this usage message.\n"
           "   q = Quit.\n\n", file=sys.stdout, flush=True)
 
 
-def _process_command(bucket_name: str) -> bool:
-    command = input(f"[{bucket_name}] Enter command (l, c, u, d, g, x, h, q) > ")
+def _process_command(bucket_name: str) -> Tuple[bool, Optional[str]]:
+    command = input(f"[{bucket_name}] Enter command (b, l, c, u, d, g, x, r, h, q) > ")
     error_msg = None
+    if command == 'b':
+        return False, None
     if command == 'l':
         contents = _bucket_contents(bucket_name)
         if contents is None:
@@ -542,28 +575,35 @@ def _process_command(bucket_name: str) -> bool:
         obj_key = input('Enter object key in full > ')
         if not _delete_file_in_bucket(bucket_name, obj_key):
             error_msg = "Delete operation failed."
+    elif command == 'r':
+        confirm = input('Are you sure you want to obliterate contents of the bucket? ("y" or "n") > ')
+        if confirm != 'y':
+            error_msg = "Operation cancelled."
+        elif not _delete_all_files_in_bucket(bucket_name, print_progress=True):
+            error_msg = "Delete-ALL operation failed"
     elif command == 'h':
         _print_usage()
     elif command == 'q':
-        return True
+        return True, None
     else:
         error_msg = f"Unrecognized command: {command}. Try again."
 
     print(f"ERROR: {error_msg}\n\n" if isinstance(error_msg, str) else "OK.\n\n", file=sys.stdout, flush=True)
-    return False
+    return False, bucket_name
 
 
 # To run this module on the backend container: 'docker-compose run backend python -m database.repo
 if __name__ == '__main__':
-    _bucket_name = input('Enter name of S3 bucket > ')
-    if not _bucket_exists(_bucket_name):
-        print(" Bucket not found! ... Exiting.\n", file=sys.stdout, flush=True)
-        exit(-1)
-
     _print_usage()
 
     done = False
+    _bucket_name = None
     while not done:
-        done = _process_command(_bucket_name)
+        if _bucket_name is None:
+            _bucket_name = input('Enter name of S3 bucket > ')
+            if not _bucket_exists(_bucket_name):
+                print(" Bucket not found! ... Exiting.\n", file=sys.stdout, flush=True)
+                exit(-1)
+        done, _bucket_name = _process_command(_bucket_name)
 
     print("\n\nBYE!", file=sys.stdout, flush=True)
