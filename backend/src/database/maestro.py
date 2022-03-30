@@ -1,8 +1,39 @@
 """
 maestro.py: Structures and functions for digesting Maestro trial data files.
 
-TODO: Only implementing support for digesting Trial-mode data files. Cannot be used to process files recorded in
- Continuous mode. Need to comment code throughout
+This module contains Maestro-specific constructs for reading and parsing Maestro trial data files. In particular, it
+defines Python classes encapsulating Maestro trial and target definitions, as well as trial segments, tagged sections,
+and perturbations.
+
+It also implements the important concept of a "trial protocol". The trial culled from a Maestro data file is really one
+particular presentation of a Maestro trial protocol, represented by the Protocol object. In general, a Maestro trial is
+presented many times over the course of many experiment sessions. Often, the trial includes at least one parameter --
+most typically, the duration of a so-called "fixation segment" -- that varies randomly from one trial presentation to
+the next. But there can be others. A Protocol consists of a nominal Trial definition and a list of segment table
+parameters that vary randomly across repeated presentations of that protocol. When processing Maestro data files from a
+given experiment session, it is imperative to identify "similar" trials that are repeated presentations of the same
+trial protocol, so that we can "average" behavioral and neuronal responses across those repetitions.
+
+Limitations:
+    * Only supports Trial-mode data files with file version >= 21. Cannot process Continuous-mode data files!
+    * Does not process JMWork/XWork action edit codes, but does parse out sorted spike train channel data.
+    * The Trial class does not extract all available information in the trial codes. Notable omissions include info on
+      special operations, a failsafe segment, staircase sequencer-related parameters (rarely if ever used), and any
+      mid-trial rewards.
+
+SAMPLE USAGE::
+
+    import maestro
+    from pathlib import Path
+
+    file_path = Path('/maestrodata/session/myfile.0001')
+    with open(file_path, 'rb') as f:
+        data_file = maestro_file.DataFile.load(f.read(), file_path.name)
+
+
+TODO: Parse per-segment fixation accuracy and grace period and include in Trial.Segment. But because Trial is preserved
+in pickled form in the portal database and in session preprocessing results, this should be done BEFORE the portal
+does into "production.
 
 @author: sruffner
 @created: 08dec2020
@@ -10,8 +41,6 @@ TODO: Only implementing support for digesting Trial-mode data files. Cannot be u
 
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
-import sys
-import traceback
 from typing import NamedTuple, List, Optional, Dict, Any, Tuple, Union, Set
 from datetime import date
 import struct
@@ -29,6 +58,7 @@ from utils.common import DocEnum
 
 
 class DataFileError(Exception):
+    """ An error that occurred while reading and parsing a Maestro data file. """
     def __init__(self, reason: Optional[str] = None):
         self.message = reason if reason else "Undefined error"
 
@@ -37,6 +67,7 @@ class DataFileError(Exception):
 
 
 # CONSTANTS
+MIN_SUPPORTED_VERSION = 21
 CURRENT_VERSION = 23  # data file version number as of Maestro 4.1.0
 MAX_NAME_SIZE = 40  # fixed size of ASCII character fields in data file header (num bytes)
 MAX_AI_CHANNELS = 16   # size of analog input channel list in data file header
@@ -106,24 +137,44 @@ BEHAVIOR_TO_CHANNEL = {'HEPOS': 0, 'VEPOS': 1, 'HEVEL': 2, 'VEVEL': 3, 'HDVEL': 
 
 
 class DataFile(NamedTuple):
+    """
+    Parsed content of a single Maestro data file.
+    """
     file_name: str
+    """ The Maestro data file name, eg 'basename.0001'. """
     header: DataFileHeader
+    """ Contents of the data file's header record. """
     ai_data: Dict[int, List[int]]
+    """ The recorded 1KHz analog data traces, keyed by AI channel index, decompressed in raw ADC units. """
     spike_wave: Optional[List[int]]
+    """ The decompressed high-resolution spike waveform. None if not saved in file. """
     trial: Trial
+    """ Definition of the Maestro trial presented. """
     events: Optional[Dict[int, List[float]]]
+    """ Marker pulse event times in ms since trial start, keyed by DI channel index. """
     blinks: Optional[List[int]]
+    """ EyeLink-recorded blink epochs in ms since trial start: [start1, end1, start2, end2, ....]. """
     sorted_spikes: Optional[Dict[int, List[float]]]
+    """ Spike occurrence times in ms since trial start, keyed by sorted spike train channel index. """
 
     @staticmethod
     def load(content: bytes, file_name: str) -> DataFile:
+        """
+        Read and parse the contents of a Maestro data file.
+
+        Args:
+            content: The file's binary contents as a sequence of bytes.
+            file_name: The data file name -- should be in the format 'basename.0001'.
+        Returns:
+            A DataFile encapsulating the content.
+        """
         data: Dict[str, Any] = dict()
         num_total_bytes = len(content)
         if (num_total_bytes % RECORD_SIZE) != 0:
-            raise DataFileError(f"Maestro data file size in bytes ({num_total_bytes}) is not a multiple of 1024!")
+            raise DataFileError(f"Data file size in bytes ({num_total_bytes}) is not a multiple of {RECORD_SIZE}")
         header = DataFileHeader.parse_header(content)
-        if (header.version < 21) or header.is_continuous_mode():
-            raise DataFileError("No support for version<21 Maestro data files or files recorded in Continuous mode!")
+        if (header.version < MIN_SUPPORTED_VERSION) or header.is_continuous_mode():
+            raise DataFileError(f"No support for Continuous mode or for data file version<{MIN_SUPPORTED_VERSION}")
         try:
             offset = RECORD_SIZE
             while offset < num_total_bytes:
@@ -153,7 +204,7 @@ class DataFile(NamedTuple):
             data['trial'] = Trial.prepare_trial(data['trial_codes'], header, data['targets'],
                                                 data['tagged_sections'] if ('tagged_sections' in data) else None)
 
-            # Process JMW/XWork actions, if any TODO
+            # Process JMW/XWork actions, if any -- currently not supported.
 
             # prepare and return the DataFile object -- but there must be some recorded analog data
             if 'ai_data' not in data:
@@ -175,6 +226,16 @@ class DataFile(NamedTuple):
 
     @staticmethod
     def load_trial(content: bytes, file_name: str) -> Trial:
+        """
+        Load the definition of the Maestro trial found in a Maestro data file.
+
+        Args:
+            content: The file's binary contents as a sequence of bytes.
+            file_name: The data file name -- should be in the format 'basename.0001'.
+        Returns:
+            A Trial object encapsulating the definition of the Maestro trial presented (including participating trial
+                targets) when the data file was recorded.
+        """
         data: Dict[str, Any] = dict()
         num_total_bytes = len(content)
         if (num_total_bytes % RECORD_SIZE) != 0:
@@ -196,8 +257,6 @@ class DataFile(NamedTuple):
             return Trial.prepare_trial(data['trial_codes'], header, data['targets'],
                                        data['tagged_sections'] if ('tagged_sections' in data) else None)
         except DataFileError as err:
-            # TODO: DEBUGGING
-            traceback.print_exc(file=sys.stdout)
             raise DataFileError(f"({file_name}) {str(err)}")
         except Exception as err:
             raise DataFileError(f"({file_name} Unexpected failure while loading trial from data file: str{err}")
@@ -325,45 +384,48 @@ class DataFile(NamedTuple):
 
 
 class DataFileHeader(NamedTuple):
-    trial_name: str
-    num_ai_channels: int
-    channel_list: List[int]
-    display_height_pix: int
-    display_width_pix: int
-    display_distance_mm: int
-    display_width_mm: int
-    display_height_mm: int
-    display_framerate_hz: float
-    pos_scale: float
-    pos_theta: float
-    vel_scale: float
-    vel_theta: float
-    reward_len1_ms: int
-    reward_len2_ms: int
-    date_recorded: date
-    version: int
-    flags: int
-    num_bytes_compressed: int
-    num_scans_saved: int
-    num_spike_bytes_compressed: int
-    spike_sample_intv_us: int
-    xy_random_seed: int
+    """
+    The contents of the header record of a Maestro data file.
+    """
+    trial_name: str  #: The trial name.
+    num_ai_channels: int  #: number of analog input channels recorded and saved
+    channel_list: List[int]  #: analog input channel scan list (AI channel indices in scanning order per 'tick')
+    display_height_pix: int  #: height of display in pixels
+    display_width_pix: int  #: width of display in pixels
+    display_distance_mm: int  #: distance from eye to screen in mm
+    display_width_mm: int  #: width of display in mm
+    display_height_mm: int  #: height of display in mm
+    display_framerate_hz: float  #: frame rate in Hz
+    pos_scale: float  #: target position scale factor
+    pos_theta: float  #: target position vector rotation angle in deg CCW
+    vel_scale: float  #: target velocity scale factor
+    vel_theta: float  #: target velocity vector rotation angle in deg CCW
+    reward_len1_ms: int  #: reward pulse length #1 in ms
+    reward_len2_ms: int  #: reward pulse length #2 in ms
+    date_recorded: date  #: recording date
+    version: int  #: data file version
+    flags: int  #: header flags -- see FLAG_* constants
+    num_bytes_compressed: int  #: total number of bytes of compressed analog data collected
+    num_scans_saved: int  #: total number of channel scans saved (essentially the recorded duration in ms for a trial)
+    num_spike_bytes_compressed: int  #: total number of bytes of compressed high-resolution spike waveform data
+    spike_sample_intv_us: int  #: sample interval for the spike waveform trace, in microsecs
+    xy_random_seed: int  #: number used to seed random# generation on XY scope controller
     rp_distro_start: int
     rp_distro_dur: int
     rp_distro_response: int
     rp_distro_windows: List[int]
     rp_distro_response_type: int
-    horizontal_start_pos: float
-    vertical_start_pos: float
-    trial_flags: int
-    search_target_selected: int
-    velocity_stab_window_len_ms: int
-    eyelink_info: List[int]
-    trial_set_name: str
-    trial_subset_name: str
-    rmvideo_sync_size_mm: int
-    rmvideo_sync_dur_frames: int
-    timestamp_ms: int
+    horizontal_start_pos: float  #: horizontal offset in starting target position (deg)
+    vertical_start_pos: float  #: vertical offset in starting target position (deg)
+    trial_flags: int  #: trial flag bits
+    search_target_selected: int  #: selected target index for 'searchTask'; -1 = not selected, 0 = N/A
+    velocity_stab_window_len_ms: int  #: sliding window length to average eye position noise for VStab
+    eyelink_info: List[int]  #: EyeLink info (all zeros if not applicable)
+    trial_set_name: str  #: trial set name (V>=21)
+    trial_subset_name: str  #: trial subset name (V>=21; "" if none)
+    rmvideo_sync_size_mm: int  #: spot size (mm) for RMVideo "vertical sync" flash; 0 = disabled
+    rmvideo_sync_dur_frames: int  #: duration (number of video frames) for RMVideo "vertical sync" flash
+    timestamp_ms: int  #: time at which trial or CM recording started, in milliseconds since Maestro started
     rmvideo_duplicate_events: List[int]
 
     @staticmethod
@@ -429,17 +491,24 @@ class DataFileHeader(NamedTuple):
             raise DataFileError(f"Unexpected failure while parsing data file header: {str(err)}")
 
     def is_continuous_mode(self):
+        """ Was the Maestro data file recorded in Continuous mode rather than Trial mode? """
         return (self.flags & FLAG_IS_CONTINUOUS) != 0
 
     def is_eyelink_used(self):
+        """ Was the EyeLink in use when this Maestro data file was recorded? """
         return (self.version >= 20) and ((self.flags & FLAG_EYELINK_USED) != 0)
 
     def global_transform(self) -> TargetTransform:
+        """ Get the global target transform in effect when this Maestro data file was recorded. """
         return TargetTransform._make([self.horizontal_start_pos, self.vertical_start_pos, self.pos_scale,
                                       self.pos_theta, self.vel_scale, self.vel_theta])
 
 
 class TargetTransform(NamedTuple):
+    """
+    A Maestro target vector transform, consisting of a scale and rotation in both position and velocity, plus a
+    starting target position offset (Ho, Vo) applied only at the start of a trial.
+    """
     pos_offsetH_deg: float
     pos_offsetV_deg: float
     pos_scale: float
@@ -554,9 +623,9 @@ class TaggedSection(NamedTuple):
     """
     Immutable representation of a tagged section in a Maestro trial, as culled from a Maestro trial data file.
     """
-    start_seg: int
-    end_seg: int
-    label: str
+    start_seg: int  #: index of first segment in tagged section
+    end_seg: int  #: index of last segment in tagged section
+    label: str  #: the tagged section's label
 
     def __eq__(self, other: TaggedSection) -> bool:
         return ((self.__class__ == other.__class__) and (self.start_seg == other.start_seg) and
@@ -594,6 +663,7 @@ class TaggedSection(NamedTuple):
                 if (start_seg < 0) or (start_seg > end_seg) or (end_seg >= MAX_SEGMENTS):
                     raise DataFileError("Invalid tagged section found")
                 sections.append(TaggedSection._make([start_seg, end_seg, label_str]))
+                idx += sect_size
             return sections
         except DataFileError:
             raise
@@ -635,7 +705,7 @@ CX_XY_TGT = 0x001C
 CX_RMV_TGT = 0x001D
 
 
-def validate_range(value: float, min_value: float, max_value: float, tol: float = 1e-6) -> bool:
+def _validate_range(value: float, min_value: float, max_value: float, tol: float = 1e-6) -> bool:
     """
     Verify that the specified floating-point value lies in the specified min-max range within the specified tolerance.
     Since floating-point values can rarely be represented EXACTLY in computer hardware (eg, 0.01 = 0.0099999...787),
@@ -897,31 +967,31 @@ class XYScopeTarget(NamedTuple):
     def _is_valid(self) -> bool:
         ok = (self.type >= XY_RECT_DOT) and (self.type < NUM_XY_TYPES) and (self.n_dots > 0)
         if ok and (self.type in [XY_FC_DOT_LIFE, XY_NOISY_DIR, XY_NOISY_SPEED]):
-            ok = validate_range(self.dot_life, 0, MAX_DOT_LIFE_MS if self.dot_life_in_ms else MAX_DOT_LIFE_DEG)
+            ok = _validate_range(self.dot_life, 0, MAX_DOT_LIFE_MS if self.dot_life_in_ms else MAX_DOT_LIFE_DEG)
         if ok and (self.type != XY_RECT_DOT):
             if self.type == XY_FLOW_FIELD:
-                ok = validate_range(self.width, MIN_FLOW_RADIUS_DEG, MAX_FLOW_RADIUS_DEG)
+                ok = _validate_range(self.width, MIN_FLOW_RADIUS_DEG, MAX_FLOW_RADIUS_DEG)
             else:
-                ok = validate_range(self.width, MIN_RECT_DIM_DEG, float('inf'))
+                ok = _validate_range(self.width, MIN_RECT_DIM_DEG, float('inf'))
         if ok and not (self.type in [XY_RECT_DOT, XY_FLOW_FIELD]):
-            ok = validate_range(self.height, MIN_RECT_DIM_DEG, float('inf'))
+            ok = _validate_range(self.height, MIN_RECT_DIM_DEG, float('inf'))
         if ok:
             if self.type == XY_RECTANNU:
-                ok = validate_range(self.inner_width, MIN_RECT_DIM_DEG, float('inf'))
+                ok = _validate_range(self.inner_width, MIN_RECT_DIM_DEG, float('inf'))
             elif self.type == XY_FLOW_FIELD:
-                ok = validate_range(self.inner_width, MIN_FLOW_RADIUS_DEG, MAX_FLOW_RADIUS_DEG)
-                ok = ok and validate_range(self.width - self.inner_width, MIN_FLOW_DIFF_DEG, float('inf'))
+                ok = _validate_range(self.inner_width, MIN_FLOW_RADIUS_DEG, MAX_FLOW_RADIUS_DEG)
+                ok = ok and _validate_range(self.width - self.inner_width, MIN_FLOW_DIFF_DEG, float('inf'))
             elif self.type == XY_ORIENTED_BAR:
-                ok = validate_range(self.inner_width, 0, MAX_BAR_DRIFT_AXIS_DEG)
+                ok = _validate_range(self.inner_width, 0, MAX_BAR_DRIFT_AXIS_DEG)
             elif self.type == XY_NOISY_DIR:
-                ok = validate_range(self.inner_width, 0, MAX_DIR_OFFSET)
+                ok = _validate_range(self.inner_width, 0, MAX_DIR_OFFSET)
             elif self.type == XY_NOISY_SPEED:
-                ok = validate_range(self.inner_width, 0, MAX_SPEED_OFFSET) if (int(self.inner_x) == 0) else \
+                ok = _validate_range(self.inner_width, 0, MAX_SPEED_OFFSET) if (int(self.inner_x) == 0) else \
                     (MIN_SPEED_LOG2 <= int(self.inner_width) <= MAX_SPEED_LOG2)
             elif self.type == XY_FC_COHERENT:
-                ok = validate_range(self.inner_width, 0, 100)
+                ok = _validate_range(self.inner_width, 0, 100)
             if self.type == XY_RECTANNU:
-                ok = validate_range(self.inner_height, MIN_RECT_DIM_DEG, float('inf'))
+                ok = _validate_range(self.inner_height, MIN_RECT_DIM_DEG, float('inf'))
             elif self.type in [XY_NOISY_DIR, XY_NOISY_SPEED]:
                 ok = (MIN_NOISE_UPDATE_MS <= int(self.inner_height) <= MAX_NOISE_UPDATE_MS)
         return ok
@@ -1316,15 +1386,15 @@ class RMVideoTarget(NamedTuple):
             ok = (self.aperture <= RMV_OVAL)
             con = self.rgb_contrast[0]
             ok = ok and ((con & 0x0FF) <= 100) and (((con >> 8) & 0x0FF) <= 100) and (((con >> 16) & 0x0FF) <= 100)
-            ok = ok and validate_range(self.spatial_frequency[0], 0.01, float('inf'))
+            ok = ok and _validate_range(self.spatial_frequency[0], 0.01, float('inf'))
             if ok and (self.type == RMV_PLAID):
                 con = self.rgb_contrast[1]
                 ok = ok and ((con & 0x0FF) <= 100) and (((con >> 8) & 0x0FF) <= 100) and (((con >> 16) & 0x0FF) <= 100)
-                ok = ok and validate_range(self.spatial_frequency[1], 0.01, float('inf'))
-        ok = ok and validate_range(self.outer_w, (0 if self.type == RMV_BAR else RMV_MIN_RECT_DIM), RMV_MAX_RECT_DIM)
-        ok = ok and validate_range(self.outer_h, RMV_MIN_RECT_DIM, RMV_MAX_RECT_DIM)
-        ok = ok and validate_range(self.inner_w, RMV_MIN_RECT_DIM, RMV_MAX_RECT_DIM)
-        ok = ok and validate_range(self.inner_h, RMV_MIN_RECT_DIM, RMV_MAX_RECT_DIM)
+                ok = ok and _validate_range(self.spatial_frequency[1], 0.01, float('inf'))
+        ok = ok and _validate_range(self.outer_w, (0 if self.type == RMV_BAR else RMV_MIN_RECT_DIM), RMV_MAX_RECT_DIM)
+        ok = ok and _validate_range(self.outer_h, RMV_MIN_RECT_DIM, RMV_MAX_RECT_DIM)
+        ok = ok and _validate_range(self.inner_w, RMV_MIN_RECT_DIM, RMV_MAX_RECT_DIM)
+        ok = ok and _validate_range(self.inner_h, RMV_MIN_RECT_DIM, RMV_MAX_RECT_DIM)
         if ok and (self.type in [RMV_FLOW_FIELD, RMV_RANDOM_DOTS, RMV_SPOT]):
             ok = (self.outer_w > self.inner_w)
         if ok and (self.type in [RMV_RANDOM_DOTS, RMV_SPOT]):
@@ -1335,7 +1405,7 @@ class RMVideoTarget(NamedTuple):
             ok = (RMV_MIN_DOT_SIZE <= self.dot_size <= RMV_MAX_DOT_SIZE)
         if ok and (self.type == RMV_RANDOM_DOTS):
             ok = (0 <= self.percent_coherent <= 100)
-            ok = ok and validate_range(self.dot_life, 0, float('inf'))
+            ok = ok and _validate_range(self.dot_life, 0, float('inf'))
             if ok and ((self.flags & RMV_F_DIR_NOISE) != 0):
                 ok = (0 <= self.noise_limit <= RMV_MAX_NOISE_DIR)
             if ok and ((self.flags & RMV_F_DIR_NOISE) == 0):
@@ -1343,7 +1413,7 @@ class RMVideoTarget(NamedTuple):
                 max_speed = RMV_MAX_SPEED_LOG2 if (self.flags & RMV_F_SPEED_LOG2) != 0 else RMV_MAX_NOISE_SPEED
                 ok = (min_speed <= self.noise_limit <= max_speed)
         if ok and (self.type in [RMV_SPOT, RMV_RANDOM_DOTS, RMV_GRATING, RMV_PLAID]):
-            ok = validate_range(self.sigma[0], 0, float('inf')) and validate_range(self.sigma[1], 0, float('inf'))
+            ok = _validate_range(self.sigma[0], 0, float('inf')) and _validate_range(self.sigma[1], 0, float('inf'))
         return ok
 
 
@@ -1511,18 +1581,21 @@ class Point2D:
 
 
 class Trial(NamedTuple):
-    name: str
-    set_name: Optional[str]     # trial set and subset names added to data file in V=21
-    subset_name: Optional[str]
-    segments: List[Trial.Segment]
-    targets: List[Target]
-    perts: List[Trial.Perturbation]
-    sections: List[TaggedSection]
-    record_seg: int
-    skip_seg: int
-    file_version: int
-    xy_seed: int
-    global_transform: TargetTransform
+    """
+    Definition of a single Maestro trial presentation as culled from a Maestro trial data file.
+    """
+    name: str  #: The trial name.
+    set_name: Optional[str]  #: Trial set name. None if not available (added in file V=21)
+    subset_name: Optional[str]  #: Trial subset name. "" if unspecified. None if not available (added in file V=21).
+    segments: List[Trial.Segment]  #: The trial's segments
+    targets: List[Target]  #: Definitions of the participating trial targets.
+    perts: List[Trial.Perturbation]  #: List of trial perturbations, if any.
+    sections: List[TaggedSection]  #: List of tagged sections defined on the trial.
+    record_seg: int  #: Index of segment when recording started.
+    skip_seg: int  #: Index of special "skip on saccade" segment; -1 if not applicable.
+    file_version: int  #: The data file version, for reference purposes.
+    xy_seed: int  #: The random seed for the XY Scope controller, copied from the data file header.
+    global_transform: TargetTransform  #: Global target transform, copied from the data file header.
 
     class Segment:
         """
@@ -1570,9 +1643,19 @@ class Trial(NamedTuple):
                     self.tgt_pat_acc[i].set_point(prev_seg.tgt_pat_acc[i])
 
         def num_targets(self) -> int:
+            """ The number of targets participating in the trial. """
             return len(self.tgt_on)
 
         def value_of(self, param_type: SegParamType, tgt: int) -> Union[int, float, bool, None]:
+            """
+            Get the value of a parameter in this trial segment.
+
+            Args:
+                param_type: The parameter type.
+                tgt: For a target trajectory parameter, this is the target index. Else ignored.
+            Returns:
+                The parameter value.
+            """
             # NOTE: Avoided dispatch table implementation here b/c I need to be able to pickle Trial object
             if param_type.is_target_trajectory_parameter() and not (0 <= tgt < self.num_targets()):
                 return None
@@ -1615,6 +1698,14 @@ class Trial(NamedTuple):
             return None
 
         def set_value_of(self, param_type: SegParamType, tgt: int, value: Union[int, float, bool]) -> None:
+            """
+            Set the value of a parameter in this trial segment.
+
+            Args:
+                param_type: The parameter type.
+                tgt: The target index for a target trajectory parameter; else ignored.
+                value: The value to set.
+            """
             # NOTE: Avoided dispatch table implementation here b/c I need to be able to pickle Trial object
             if param_type.is_target_trajectory_parameter() and not (0 <= tgt < self.num_targets()):
                 return
@@ -1692,6 +1783,7 @@ class Trial(NamedTuple):
             return out
 
     class Perturbation(NamedTuple):
+        """ Immutable representation of a trial perturbation. """
         tgt_pos: int
         component: int
         seg_start: int     # index of segment at which perturbation begins
