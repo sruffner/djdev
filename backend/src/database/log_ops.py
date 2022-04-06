@@ -35,7 +35,8 @@ from contextlib import contextmanager
 from fasteners import InterProcessLock
 from rq import Queue
 
-from config.config import get_application_logger, get_config
+from config.app_logging import get_application_logger
+from config.config import get_config
 from database import repo
 from database.table_info import DBTable, AttributeValue
 from utils.common import size_with_units

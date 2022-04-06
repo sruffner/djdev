@@ -20,7 +20,7 @@ from typing import List, Dict, Optional
 from dash import callback, callback_context, no_update, Input, Output, State, html, dcc, dash_table as dt
 import dash_bootstrap_components as dbc
 
-from config.config import get_application_logger
+from config.app_logging import get_application_logger
 from database.table_info import DBTable, Column, AttributeValue, attribute_info
 from database.table_ops import fetch_rows, delete_from_table, row_exists, update_table_row, insert_into_table, \
     update_mapping_table

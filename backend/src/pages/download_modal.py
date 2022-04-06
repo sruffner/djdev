@@ -18,7 +18,7 @@ import flask_login
 from dash import html, dcc, callback, Output, Input, callback_context, State, no_update
 import dash_bootstrap_components as dbc
 
-from config.config import get_application_logger
+from config.app_logging import get_application_logger
 from database.download_ops import MAX_UNITS_PER_DOWNLOAD, DOWNLOAD_FORMATS, request_data_download, \
     pending_download_request_status, DOWNLOAD_PREPPING, DOWNLOAD_READY, cancel_pending_download_request, \
     get_data_download_url

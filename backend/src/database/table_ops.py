@@ -27,7 +27,7 @@ import datajoint as dj
 import numpy as np
 from datajoint.expression import QueryExpression
 
-from config.config import get_application_logger
+from config.app_logging import get_application_logger
 from database.log_ops import log_add_table_row, log_update_table_row, log_delete_from_table, log_mapping_table_update
 from database.table_info import DBTable, AttributeValue, attributes_of, primary_key_of, has_auto_primary_key, \
     attribute_info, AttrTypeEnum, validate_numeric_attribute_value

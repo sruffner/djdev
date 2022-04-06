@@ -42,7 +42,7 @@ import flask_login
 import plotly.express as px
 
 from app import load_authorized_user
-from config.config import get_application_logger
+from config.app_logging import get_application_logger
 from database import maestro
 from database.commit_ops import CommitStateEnum, initiate_session_commit, get_pending_commit_jobs_for, \
     cancel_or_remove_commit_job, update_commit_job_on_archive_upload, commit_job_progress, CommitJobStatus, \

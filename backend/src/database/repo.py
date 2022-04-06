@@ -45,7 +45,8 @@ from typing import Optional, List, Union, Dict, Any, Tuple
 from boto3 import Session
 from boto3.s3.transfer import TransferConfig
 
-from config.config import get_config, get_application_logger
+import config.app_logging as app_log
+import config.config as app_cfg
 from utils.common import MB, GB, size_with_units
 
 
@@ -62,7 +63,7 @@ def listing() -> Optional[Dict[str, List[Dict[str, Any]]]]:
             reverse chronological order by creation time. If the repository is empty, returns an empty dictionary. If
             an error occurs, returns None. Consult the application log for the error description.
     """
-    contents = _bucket_contents(get_config().repo_bucket)
+    contents = _bucket_contents(app_cfg.get_config().repo_bucket)
     if contents is None:
         return None
     folders: Dict[str, List[Dict[str, str]]] = dict()
@@ -103,7 +104,7 @@ def upload_file(file_path: Path, key: str, log: bool = True) -> bool:
     """
     if not (_validate_key_format(key) and file_path.is_file()):
         raise ValueError("Bad repository file object key, or target file not found")
-    return _upload_file_to_bucket(file_path, get_config().repo_bucket, key, log)
+    return _upload_file_to_bucket(file_path, app_cfg.get_config().repo_bucket, key, log)
 
 
 def _validate_key_format(key: str) -> bool:
@@ -139,7 +140,7 @@ def download_file(key: str, dst: Path, log: bool = True) -> bool:
     Returns:
         True if successful; False otherwise. Error message is written to the portal application log.
     """
-    return _download_file_from_bucket(get_config().repo_bucket, key, dst, log)
+    return _download_file_from_bucket(app_cfg.get_config().repo_bucket, key, dst, log)
 
 
 def download_url_for(key: str) -> Optional[str]:
@@ -162,7 +163,7 @@ def download_url_for(key: str) -> Optional[str]:
     """
     if not key.startswith('/downloads'):
         raise ValueError("Download URL only available for files in the /downloads folder!")
-    return _presigned_url_for_file(get_config().repo_bucket, key)
+    return _presigned_url_for_file(app_cfg.get_config().repo_bucket, key)
 
 
 def file_size(key: str) -> int:
@@ -173,7 +174,7 @@ def file_size(key: str) -> int:
         key: The file object's key.
     Returns: The file's size in bytes. Returns 0 if file not found or an internal error occurred.
     """
-    return _file_size_in_bucket(get_config().repo_bucket, key)
+    return _file_size_in_bucket(app_cfg.get_config().repo_bucket, key)
 
 
 def delete_file(key: str) -> bool:
@@ -185,7 +186,7 @@ def delete_file(key: str) -> bool:
     Returns:
         True if successful or object not found; False otherwise. Error message is written to the portal application log.
     """
-    return _delete_file_in_bucket(get_config().repo_bucket, key)
+    return _delete_file_in_bucket(app_cfg.get_config().repo_bucket, key)
 
 
 def _aws_session() -> Optional[Session]:
@@ -197,7 +198,7 @@ def _aws_session() -> Optional[Session]:
     Raises:
         Exception: If access credentials are missing from application configuration
     """
-    cfg = get_config()
+    cfg = app_cfg.get_config()
     if (not cfg.aws_access_key_id) or (not cfg.aws_access_key_secret) or (not cfg.aws_region_name):
         raise Exception("Cannot open AWS session - Missing access credentials.")
     return Session(cfg.aws_access_key_id, cfg.aws_access_key_secret, region_name=cfg.aws_region_name)
@@ -216,10 +217,10 @@ def _bucket_exists(bucket_name: str) -> bool:
         session = _aws_session()
         s3_client = session.client('s3')
         response = s3_client.head_bucket(Bucket=bucket_name)
-        get_application_logger().debug(f"response to head_bucket: {response}")
+        app_log.get_application_logger().debug(f"response to head_bucket: {response}")
         return True
     except Exception as e:
-        get_application_logger().warning(f"S3 bucket {bucket_name} not found: {str(e)}")
+        app_log.get_application_logger().warning(f"S3 bucket {bucket_name} not found: {str(e)}")
         return False
 
 
@@ -237,19 +238,20 @@ def _upload_file_to_bucket(file_path: Path, bucket_name: str, key: str, log: boo
         True if successful; False otherwise. Error message is written to the portal application log.
     """
     xfer_cfg = TransferConfig(multipart_threshold=50*MB, multipart_chunksize=50*MB)
+    logger = app_log.get_application_logger()
     try:
         session = _aws_session()
         s3_resource = session.resource('s3')
         bucket = s3_resource.Bucket(bucket_name)
         if log:
-            get_application_logger().info(f"Starting upload: {file_path.name} to S3 bucket {bucket_name} at {key}")
+            logger.info(f"Starting upload: {file_path.name} to S3 bucket {bucket_name} at {key}")
         bucket.upload_file(Filename=str(file_path), Key=key,
                            Callback=_TransferProgressCallback(file_path, log=log), Config=xfer_cfg)
         if log:
-            get_application_logger().info(f"Successfully uploaded {file_path.name} to S3.")
+            logger.info(f"Successfully uploaded {file_path.name} to S3.")
         return True
     except Exception:
-        get_application_logger().error(f"Failed to upload file {file_path} to S3 bucket {bucket_name}", exc_info=True)
+        logger.error(f"Failed to upload file {file_path} to S3 bucket {bucket_name}", exc_info=True)
         return False
 
 
@@ -264,17 +266,16 @@ def _presigned_url_for_file(bucket_name: str, key: str, expires: int = 3600) -> 
     Returns:
         The URL string, or None if an error occurred.
     """
+    logger = app_log.get_application_logger()
     try:
         session = _aws_session()
         s3_client = session.client('s3')
         url = s3_client.generate_presigned_url(ClientMethod='get_object', Params={'Bucket': bucket_name, 'Key': key},
                                                ExpiresIn=expires)
-        get_application_logger().info(
-            f"Generated presigned URL for {key} in S3 bucket {bucket_name}. Expiring in {expires} seconds.")
+        logger.info(f"Generated presigned URL for {key} in S3 bucket {bucket_name}. Expiring in {expires} seconds.")
         return url
     except Exception:
-        get_application_logger().error(f"Failed to generate presigned URL for {key} in S3 bucket {bucket_name}",
-                                       exc_info=True)
+        logger.error(f"Failed to generate presigned URL for {key} in S3 bucket {bucket_name}", exc_info=True)
         return None
 
 
@@ -292,28 +293,28 @@ def _download_file_from_bucket(bucket_name: str, key: str, dst: Path, log: bool 
         True if successful; False otherwise. Error message is written to the portal application log.
     """
     xfer_cfg = TransferConfig(multipart_threshold=50*MB, multipart_chunksize=50*MB)
+    logger = app_log.get_application_logger()
     try:
         session = _aws_session()
         s3_resource = session.resource('s3')
         obj = s3_resource.Object(bucket_name, key)
         obj.load()
         if log:
-            get_application_logger().info(f"Starting download from S3 bucket {bucket_name} at {key} to {dst.name}")
+            logger.info(f"Starting download from S3 bucket {bucket_name} at {key} to {dst.name}")
         s3_resource.Object(bucket_name, key).download_file(
             Filename=str(dst),
             Callback=_TransferProgressCallback(dst, log=log, download_size=obj.content_length),
             Config=xfer_cfg
         )
         if log:
-            get_application_logger().info(f"Successfully downloaded S3 object at {key}.")
+            logger.info(f"Successfully downloaded S3 object at {key}.")
         if dst.is_file():
             return True
         else:
-            get_application_logger().error(
-                f"File downloaded from S3 successfully, but NOT found at specified destination {str(dst)}")
+            logger.error(f"File downloaded from S3 successfully, but NOT found at specified destination {str(dst)}")
             return False
     except Exception:
-        get_application_logger().error(f"Failed to download object {key} from S3 bucket {bucket_name}", exc_info=True)
+        logger.error(f"Failed to download object {key} from S3 bucket {bucket_name}", exc_info=True)
         return False
 
 
@@ -367,17 +368,18 @@ def _delete_file_in_bucket(bucket_name: str, key: str) -> bool:
     Returns:
         True if successful or object not found; False otherwise. Error message is written to the portal application log.
     """
+    logger = app_log.get_application_logger()
     if not _file_exists_in_bucket(bucket_name, key):
-        get_application_logger().info(f"Attempt to delete non-existent object {key} from S3 bucket {bucket_name}")
+        logger.info(f"Attempt to delete non-existent object {key} from S3 bucket {bucket_name}")
         return True
     try:
         session = _aws_session()
         s3_resource = session.resource('s3')
         s3_resource.Object(bucket_name, key).delete()
-        get_application_logger().info(f"Successfully deleted object {key} from S3 bucket {bucket_name}.")
+        logger.info(f"Successfully deleted object {key} from S3 bucket {bucket_name}.")
         return True
     except Exception:
-        get_application_logger().error(f"Failed to delete object {key} from S3 bucket {bucket_name}", exc_info=True)
+        logger.error(f"Failed to delete object {key} from S3 bucket {bucket_name}", exc_info=True)
         return False
 
 
@@ -392,6 +394,7 @@ def _delete_all_files_in_bucket(bucket_name: str, print_progress: bool = False) 
     Returns:
         True if successful, False otherwise.
     """
+    logger = app_log.get_application_logger()
     try:
         session = _aws_session()
         s3_resource = session.resource('s3')
@@ -403,10 +406,10 @@ def _delete_all_files_in_bucket(bucket_name: str, print_progress: bool = False) 
             if print_progress:
                 print(f"Successfully removed {obj.key} ({i} of {n} files).", file=sys.stdout, flush=True)
             elif (i > 0) and (i % 10 == 0):
-                get_application_logger().info(f"Successfully removed {i} of {n} files from S3 bucket {bucket_name}")
+                logger.info(f"Successfully removed {i} of {n} files from S3 bucket {bucket_name}")
         return True
     except Exception:
-        get_application_logger().error(f"Failed to get remove all object from S3 bucket {bucket_name}", exc_info=True)
+        logger.error(f"Failed to get remove all objects from S3 bucket {bucket_name}", exc_info=True)
         return False
 
 
@@ -428,7 +431,8 @@ def _bucket_contents(bucket_name: str) -> Optional[List]:
         obj_list = [obj for obj in bucket.objects.all()]
         return obj_list
     except Exception:
-        get_application_logger().error(f"Failed to get object listing for S3 bucket {bucket_name}", exc_info=True)
+        app_log.get_application_logger().error(
+            f"Failed to get object listing for S3 bucket {bucket_name}", exc_info=True)
         return None
 
 
@@ -465,7 +469,7 @@ class _TransferProgressCallback(object):
             percentage = (self._size_so_far / float(self._size)) * 100
             if self._to_log:
                 if (self._num_updates == 0) or ((self._num_updates == 1) and (percentage >= 50)):
-                    get_application_logger().info(
+                    app_log.get_application_logger().info(
                         f"{self._msg_prefix} {self._path.name}  {self._size_so_far}/{self._size} ({percentage:.2f}%)")
                     self._num_updates += 1
             else:

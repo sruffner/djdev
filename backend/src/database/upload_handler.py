@@ -11,7 +11,7 @@ import traceback
 from flask import request, abort
 from dash_uploader.httprequesthandler import BaseHttpRequestHandler, get_chunk_name
 
-from config.config import get_application_logger
+from config.app_logging import get_application_logger
 
 
 class UploadHandler(BaseHttpRequestHandler):

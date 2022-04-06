@@ -50,7 +50,9 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import scipy.io
 from rq import Queue
-from config.config import get_config, get_application_logger
+
+from config.app_logging import get_application_logger
+from config.config import get_config
 from database import repo
 from database.table_info import AttributeValue, DBTable, primary_key_of
 from database.table_ops import row_exists, fetch_attribute_values, fetch_one_row, insert_into_table

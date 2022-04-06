@@ -6,10 +6,13 @@ app.py: Create and configure the Dash application instance for the Lisberger lab
 """
 from typing import Dict, Optional
 
-# set up the application logging as early as possible
-from config.config import get_config, AppConfig, get_application_logger
+# set up the application configuration and logging as early as possible
+import config.config
+import config.app_logging
 
-get_application_logger()
+_cfg: config.config.AppConfig = config.config.get_config()
+config.app_logging.get_application_logger()
+
 
 from dash import Dash
 import dash_bootstrap_components as dbc
@@ -19,7 +22,6 @@ from database.upload_handler import UploadHandler
 from database.user_ops import get_portal_user_record, ADMIN_ACCESS, COMMIT_ACCESS
 
 
-_cfg: AppConfig = get_config()
 app = Dash(__name__, external_stylesheets=[dbc.themes.SPACELAB, dbc.icons.BOOTSTRAP])
 
 app.config.suppress_callback_exceptions = _cfg.dash_suppress_callback_exceptions
@@ -80,6 +82,6 @@ def load_authorized_user(username: str) -> Optional[PortalUser]:
     """
     user_record = get_portal_user_record(username)
     if isinstance(user_record, str):
-        get_application_logger().warning(f"Authentication error: {user_record}")
+        config.app_logging.get_application_logger().warning(f"Authentication error: {user_record}")
         return None
     return PortalUser(user_record)

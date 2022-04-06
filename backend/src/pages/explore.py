@@ -34,7 +34,7 @@ import numpy as np
 import plotly.express as px
 
 import database.table_info as ti
-from config.config import get_application_logger
+from config.app_logging import get_application_logger
 from database.data_plots import average_response_figure, single_trial_response_figure, trial_target_trajectory_figure, \
     discharge_statistics_figure
 from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_attribute_values, num_table_rows, fetch_one_row, \

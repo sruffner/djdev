@@ -35,7 +35,7 @@ from dash import callback, callback_context, no_update, Input, Output, State, dc
 import dash_bootstrap_components as dbc
 import flask_login
 
-from config.config import get_application_logger
+from config.app_logging import get_application_logger
 from database.user_ops import authenticate_portal_user, validate_username, validate_password
 from pages import curate, commit, explore, user_profile, manage_users, download_history, manage_repo
 

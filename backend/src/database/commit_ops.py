@@ -87,7 +87,8 @@ from dash_uploader.httprequesthandler import get_chunk_name
 from rq import Queue
 from werkzeug.security import generate_password_hash
 
-from config.config import get_config, get_application_logger
+from config.app_logging import get_application_logger
+from config.config import get_config
 from database import maestro, PL2, repo
 from database.log_ops import log_session_commit, log_file_path
 from database.table_info import DBTable, AttributeValue, primary_key_of

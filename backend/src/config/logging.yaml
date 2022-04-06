@@ -4,25 +4,22 @@ disable_existing_loggers: False
 formatters:
   simple:
     format: "[%(asctime)s] %(name)s | %(levelname)s - %(message)s"
-  detailed:
-    format: "[%(asctime)s] %(name)s | %(funcName)s in %(module)s @ %(lineno)s | %(levelname)s - %(message)s"
+  custom:
+    (): config.app_logging.custom_application_log_formatter
 
 handlers:
   console_debug:
     class: logging.StreamHandler
     level: DEBUG
-    formatter: detailed
-    stream: ext://sys.stdout
-  console_info:
-    class: logging.StreamHandler
-    level: INFO
-    formatter: simple
+    formatter: custom
     stream: ext://sys.stdout
   console_warning:
     class: logging.StreamHandler
     level: WARNING
     formatter: simple
     stream: ext://sys.stdout
+  file_backup:
+    (): config.app_logging.custom_file_handler
 
 loggers:
   # using an application-wide logger rather then module-level loggers. Here's where we control the level of detail
@@ -30,7 +27,7 @@ loggers:
   portal:
     level: DEBUG
     propagate: False
-    handlers: [console_debug]
+    handlers: [console_debug, file_backup]
 
 root:
   level: WARNING

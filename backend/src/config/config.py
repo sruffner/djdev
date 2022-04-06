@@ -11,47 +11,17 @@ Flask sessions or the username/password for the MySQL server.
 """
 from __future__ import annotations  # Needed in Python 3.7 to type-hint a method with the type of enclosing class
 
-import logging
-import logging.config
-import yaml
 import os
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from pathlib import Path
 from typing import Optional
-
-
-_LOG_CFG_FILE = 'config/logging.yaml'
-
-
-def get_application_logger() -> logging.Logger:
-    """
-    Get the singleton logger used to emit all logs from application code in the portal server app. On the first call,
-    application-side logger is configured, along with the 'app' log that the Dash/Flask library uses, and the root
-    logger. The root logger is configured only to emit logs at "WARNING" level and above -- so that we don't get too
-    much crap from third-party libraries. The logging configuration is in config/logging.yaml.
-
-    Returns:
-        The logger to use in all portal server application code.
-    Raises:
-        RuntimeError: If unable to configure the application-wide logger on first invocation.
-    """
-    if not ('portal' in logging.root.manager.loggerDict):
-        try:
-            with open(_LOG_CFG_FILE, 'rt') as f:
-                config = yaml.safe_load(f.read())
-            logging.config.dictConfig(config)
-            if not ('portal' in logging.root.manager.loggerDict):
-                raise Exception('The "portal" logger not found after configuration')
-        except Exception as e:
-            raise RuntimeError(f"Failed to create application-wide logger for portal server: {str(e)}")
-
-    return logging.getLogger('portal')
 
 
 import datajoint as dj
 from redis import Redis, RedisError
+
+import config.app_logging
 
 
 def get_config() -> AppConfig:
@@ -63,12 +33,14 @@ def get_config() -> AppConfig:
     Returns:
         An AppConfig object encapsulating configuration parameters needed for the Lisberger lab data portal.
     """
-    logger = get_application_logger()
     if not hasattr(get_config, 'config'):
+        if 'APP_CONTAINER' not in os.environ:
+            raise RuntimeError('The environment variable APP_CONTAINER is required')
+        app_container = os.environ['APP_CONTAINER']
         if 'WORKSPACE_DIR' not in os.environ:
             raise RuntimeError('The environment variable WORKSPACE_DIR is required.')
-        ws_dir = Path(os.environ['WORKSPACE_DIR'])
-        upload_dir = Path(os.environ['WORKSPACE_DIR'], 'staging')
+        ws_dir = os.environ['WORKSPACE_DIR']
+        upload_dir = f"{os.environ['WORKSPACE_DIR']}/staging"
         if 'MARIADB_ROOT_PASSWORD' not in os.environ:
             raise RuntimeError('The environment variable MARIADB_ROOT_PASSWORD is required.')
         db_password = os.environ['MARIADB_ROOT_PASSWORD']
@@ -83,11 +55,12 @@ def get_config() -> AppConfig:
         conn = Redis(host=os.environ['REDIS_HOST'], port=os.environ['REDIS_PORT'])
         try:
             conn.ping()
-        except RedisError as e:
-            logger.debug(str(e), exc_info=True)
+        except RedisError:
+            raise RuntimeError('Unable to connect to Redis host')
 
-        get_config.config = AppConfig(workspace_dir=ws_dir, dash_upload_dir=upload_dir, dj_database_host=db_host,
-                                      dj_database_password=db_password, flask_secret_key=secret_key, redis_conn=conn)
+        get_config.config = AppConfig(
+            app_container_name=app_container, workspace_dir=ws_dir, dash_upload_dir=upload_dir,
+            dj_database_host=db_host, dj_database_password=db_password, flask_secret_key=secret_key, redis_conn=conn)
         if ('AWS_ACCESS_KEY_ID' in os.environ) and ('AWS_ACCESS_KEY_SECRET' in os.environ) and \
            ('AWS_REGION_NAME' in os.environ) and ('REPO_S3_BUCKET_NAME' in os.environ):
             get_config.config.aws_access_key_id = os.environ['AWS_ACCESS_KEY_ID']
@@ -104,6 +77,11 @@ def get_config() -> AppConfig:
 class AppConfig:
     """
     Application configuration.
+    """
+    app_container_name: str
+    """ 
+    Name of app container -- used to tag application log messages in order to distinguish messages from Flask backend
+    versus an RQ workhorse process running a background task.
     """
     workspace_dir: str
     """ 
@@ -160,7 +138,7 @@ class AppConfig:
         Returns:
             True if connection was established; else False, in which case the application should exit.
         """
-        logger = get_application_logger()
+        logger = config.app_logging.get_application_logger()
         dj.config['database.host'] = self.dj_database_host
         dj.config['database.user'] = self.dj_database_user
         dj.config['database.password'] = self.dj_database_password

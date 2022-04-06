@@ -15,7 +15,7 @@ from typing import Optional, Union, Dict, List
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from config.config import get_application_logger
+from config.app_logging import get_application_logger
 from database.table_info import DBTable, attribute_info
 from database.table_ops import update_table_row, fetch_rows, insert_into_table, row_exists, \
     delete_from_table, fetch_one_row, fetch_restrict_proj
