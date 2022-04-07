@@ -14,6 +14,6 @@
 #
 # This file is not needed for the local Docker Compose nor the single-pod Kubernetes deployment of the portal app. In
 # these deployment scenarios, the "Permission Denied" issue described above did not arise.
-FROM redis:6.2.5-alpine
+FROM redis:6.2.6-alpine
 
 RUN chgrp -R 0 /data && chmod -R g=u /data

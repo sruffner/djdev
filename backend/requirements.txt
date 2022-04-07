@@ -29,13 +29,13 @@ MarkupSafe==1.1.1
 matplotlib==3.3.4
 minio==7.0.4
 networkx==2.5
-numpy==1.20.1
+numpy==1.22.3
 packaging==21.3
 pandas==1.2.3
 parso==0.7.1
 pexpect==4.8.0
 pickleshare==0.7.5
-Pillow==8.3.2
+Pillow==9.1.0
 plotly==5.5.0
 prompt-toolkit==3.0.8
 ptyprocess==0.6.0
