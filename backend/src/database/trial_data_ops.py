@@ -1,9 +1,6 @@
 """
 trial_data_ops.py: Operations that retrieve and collect trial response data from tables in the Lisberger lab portal.
 
-TODO: DESCRIBE This module builds upon the lower-level table_ops module to retreive trial data for a particular
- neural unit recorded during an experiment session. These are DB retrieval operations only; no inserts or updates.
-
 @author: sruffner
 @created: 11oct2021
 """

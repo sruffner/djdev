@@ -10,7 +10,7 @@ behind a reverse proxy that implements SSL so that all requests and responses ar
 
 There are currently 3 different "access levels" for authenticated users; the access level determine what routes in this
 "multi-page" app are accessible to the client:
-    1) Anonymous user: "/explore", and "/neurons".
+    1) Anonymous user: "/explore".
     2) Authenticated "download" user: Same routes as (1), with the ability to download data sets. Also has access to
         "/user_profile" (by which the user can edit their own profile or change their password).
     3) Authenticated "commit" user: Same routes as (2), plus "/commit_session".
@@ -22,8 +22,13 @@ session subsequently expires. For this reason, a Dash Interval component fires o
 client's authentication status and redirect to "/explore" if the client is logged out or otherwise lacks the required
 access level for the current page content.
 
-Note the "__main__"" entry point at the end of the file. The portal application is started in Python with the
-command "python ./index.py". The Dash application instance is created in app.py.
+Note the "__main__"" entry point at the end of the file. When the portal application is started in Python with the
+command "python ./index.py", the application runs an the Flask development server. This mode of "deployment" is only for
+test and development purposes when running in a Docker environment on a single development workstation. For production
+deployment, multiple replicas of the Dash app are managed by a GUnicorn server. In this scenario, the Dash/Flask
+application instance is obtained via get_app(), and GUnicorn is launched by the command "gunicorn --config path/to/cfg
+index:get_app()". The Dash/Flask application instance is created and configured, along with other application
+configuration, in app.py.
 
 @created: oct2020
 @author: sruffner

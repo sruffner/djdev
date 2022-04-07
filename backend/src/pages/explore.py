@@ -4,11 +4,9 @@ explore.py: The starting page in the Lisberger lab's database portal app devoted
 
     This is the only "public" page in the portal (does not require login), and it serves as the landing page when one
 navigates to the portal website.  It provides two ways to search for datasets -- by experiment session or by neural
-unit. Either way, the user selects a session or neural unit, and a detail pane appears with three tabs:
+unit. Either way, the user selects a session or neural unit, and a detail pane appears with two tabs:
 
     Session Info -- Summary information about the experiment session selected.
-
-    Neurons Recorded -- Summary information on each neural unit recorded during the experiment.
 
     Trial Data -- Here is where you can view any trial data recorded during the experiment. You can choose to view the
     target and eye trajectories for a single trial rep, or the mean eye trajectory ("behavioral response") across

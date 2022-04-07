@@ -50,6 +50,7 @@ from datetime import datetime
 from pathlib import Path
 from random import random
 from threading import Thread
+from typing import Optional, List
 
 import yaml
 from redis import RedisError
@@ -203,3 +204,42 @@ def flush_application_message_log_cache() -> bool:
     except Exception:
         logger.error(f"Failed to flush application messages to log file", exc_info=True)
         return False
+
+
+def force_flush_application_message_log() -> None:
+    """
+    Flush all application log messages from the Redis key _APPMSGLOG_BUF_KEY to the application log file in the portal
+    workspace directory.
+
+    This method is intended to be called in a signal handler when the GUnicorn-served backend is about to exit, so that
+    the latest log messages (which might capture an error that has led to the termination) are hopefully preserved in
+    the log file for later examination.
+
+    When this method is called it is possible that a Redis background task is currently performing a periodic flush, or
+    even that the Redis server has gone down, so that the application log cache is no longer available. In these
+    scenarios, the method will at least try to write a message directly into the log file indicating the error.
+    """
+    cfg = config.config.get_config()
+    messages: Optional[List] = None
+    err_msg = None
+    try:
+        conn = cfg.redis_conn
+        if conn.set(_APPMSGLOG_FLUSH_KEY, 'pending', ex=30, nx=True):
+            messages = conn.lrange(_APPMSGLOG_BUF_KEY, start=0, end=-1)
+            conn.ltrim(_APPMSGLOG_BUF_KEY, start=0, end=-1)
+        else:
+            err_msg = "Flush operation already pending"
+    except RedisError as e:
+        err_msg = f"Failed to retrieve application log message cache contents from Redis server: {str(e)}"
+
+    log_path = Path(cfg.workspace_dir, _APPMSGLOG_DIR_NAME, _APPMSGLOG_FILE_NAME)
+    try:
+        with open(log_path, 'a+') as f:
+            if err_msg:
+                f.write(f"Application log cache flush operation failed: {err_msg}\r\n")
+            elif messages and (len(messages) > 0):
+                f.write(f"Flushing {len(messages)} cached messages to application log...\r\n")
+                for message in messages:
+                    f.write(f"{message.decode()}\r\n")
+    except Exception:
+        pass
