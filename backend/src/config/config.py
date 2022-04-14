@@ -52,7 +52,7 @@ def get_config() -> AppConfig:
         secret_key = os.environ['FLASK_SECRET_KEY']
         if ('REDIS_HOST' not in os.environ) or ('REDIS_PORT' not in os.environ):
             raise RuntimeError('The environment variables REDIS_HOST and REDIS_PORT are required.')
-        conn = Redis(host=os.environ['REDIS_HOST'], port=os.environ['REDIS_PORT'])
+        conn = Redis(host=os.environ['REDIS_HOST'], port=int(os.environ['REDIS_PORT']))
         try:
             conn.ping()
         except RedisError:
