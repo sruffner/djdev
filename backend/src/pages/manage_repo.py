@@ -127,11 +127,4 @@ def serve_layout() -> html.Div:
     if flask_login.current_user.is_authenticated:
         portal_user = load_authorized_user(flask_login.current_user.get_id())
     is_admin = (portal_user is not None) and portal_user.is_admin()
-    repo_table_div = _table_of_repo_contents(is_admin)
-
-    card = dbc.Card([
-        dbc.CardHeader("Portal backup repository (in S3)"),
-        dbc.CardBody([repo_table_div]),
-    ], class_name='w-75 mx-auto mt-5')
-
-    return html.Div([card])
+    return _table_of_repo_contents(is_admin)

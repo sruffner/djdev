@@ -117,6 +117,6 @@ def serve_layout() -> html.Div:
     card = dbc.Card([
         dbc.CardHeader("Download History"),
         dbc.CardBody([downloads_table_div]),
-    ], class_name='w-75 mx-auto mt-5')
+    ], class_name='mx-5 my-5')
 
     return html.Div([card])

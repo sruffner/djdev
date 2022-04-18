@@ -94,7 +94,7 @@ def serve_layout() -> html.Div:
         dbc.CardHeader("User Profile"),
         dbc.CardBody(dbc.Form(form_rows)),
         dbc.CardFooter(dbc.Button("Save Changes", id=_SAVE_PROFILE_BTN, disabled=(portal_user is None)))
-    ], class_name='w-75 mt-5 mb-3 mx-auto')
+    ], class_name='mb-3')
 
     form_rows = list()
     entry_widget = dbc.Input(
@@ -123,9 +123,9 @@ def serve_layout() -> html.Div:
         dbc.CardHeader("Change Password"),
         dbc.CardBody(dbc.Form(form_rows)),
         dbc.CardFooter(dbc.Button("Change", id=_CHANGE_PWD_BTN, disabled=(portal_user is None), n_clicks=0))
-    ], class_name='w-75 mx-auto')
+    ])
 
-    return html.Div([profile_card, password_card])
+    return html.Div([profile_card, password_card], className='mx-5 my-5')
 
 
 @callback(

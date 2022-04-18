@@ -121,7 +121,7 @@ def serve_layout() -> html.Div:
             dbc.Row(dbc.Col(html.Div(children=data_table)), class_name="mb-3"),
             dbc.Row(dbc.Col(dbc.Collapse(detail_panel, id=_COLLAPSE_ID)))
         ]),
-    ], class_name='w-75 mx-auto mt-5')
+    ], class_name='mx-5 my-5')
 
     stored_selection = dcc.Store(id=_SELECTED_ROW_ID)
     return html.Div([card, stored_selection])

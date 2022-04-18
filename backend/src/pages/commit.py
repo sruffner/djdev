@@ -236,7 +236,7 @@ def serve_layout() -> html.Div:
     card = dbc.Card([
         dbc.CardHeader("Experiment session commits in progress"),
         dbc.CardBody([alert, button_row, jobs_table]),
-    ], class_name='w-75 mx-auto mt-5')
+    ], class_name='mx-5 my-5')
 
     return html.Div([card, upload_modal, messages_modal, review_modal])
 

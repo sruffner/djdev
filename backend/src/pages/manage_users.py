@@ -210,12 +210,7 @@ def serve_layout() -> html.Div:
         id=_REG_MODAL_ID, backdrop="static", size="xl", centered=True
     )
 
-    card = dbc.Card([
-        dbc.CardHeader("Portal user account management"),
-        dbc.CardBody([user_table_div, control_row]),
-    ], class_name='w-75 mx-auto mt-5')
-
-    return html.Div([card, register_modal])
+    return html.Div([user_table_div, control_row, register_modal])
 
 
 # this clientside callback highlights all cells in the selected row

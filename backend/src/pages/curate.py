@@ -52,12 +52,8 @@ markdown = dcc.Markdown('''
     information that would indirectly cause the removal of experimental data; nevertheless, avoid removing any 
     metadata unless you are sure it is safe!**
     ''', className='mt-1 mb-2')
-container_card = dbc.Card([
-    dbc.CardHeader("Curate the laboratory database"),
-    dbc.CardBody([markdown, tabs_card])
-], class_name='w-75 mx-auto mt-5')
 
-layout = html.Div([container_card])
+layout = html.Div([markdown, tabs_card])
 
 
 @callback(Output("sel-tab-content", "children"), [Input("tabs", "active_tab")])
