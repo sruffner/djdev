@@ -162,8 +162,8 @@ def _fetch_search_results(mode: int = _SESSION_MODE, restrictions: Optional[List
     on each neural unit stored in the Session.Neuron database table: experimenter, subj_id, session_date, session_sfx,
     unit_id, unit_rate, unit_spikes. In both cases, certain filter criteria may be applied to narrow the search results.
 
-    On the filter criteria -- see _filter_restrictions(). In session search mode, all of the defined criteria are
-    applied to the Session table. In neuron search mode, all of the defined criteria are applied to Session.Neuron with
+    On the filter criteria -- see _filter_restrictions(). In session search mode, all the defined criteria are
+    applied to the Session table. In neuron search mode, all the defined criteria are applied to Session.Neuron with
     one exceptioni. To find all neurons recorded as part of a specific research study, we restrict the search result to
     experiment sessions belonging to that study.
 
@@ -672,7 +672,7 @@ def _study_popover(study: Dict[str, ti.AttributeValue]) -> dbc.Popover:
             dcc.Markdown(f"_Title_: {study['study_title']}  \n_Lead Investigator_: {study_lead_contact}  "
                          f"\n{stats_line}  \n  \n_Project Description_:"),
             dbc.Textarea(value=study['study_desc'], rows=6, cols=120, readonly=True, class_name='mb-3'),
-            dcc.Markdown(pubs_markdown)
+            dcc.Markdown(pubs_markdown, dangerously_allow_html=True)
         ])
     ], target=_STUDY_POPOVER_TGT, trigger='legacy')
 
@@ -723,18 +723,18 @@ def _trial_data_tabpane(session: Dict[str, Any]) -> html.Div:
     The tab content includes a "navigation control row" and a Plotly figure. The control row includes dropdowns for
     selecting a trial protocol, a recorded neural unit (or "None" for behavioral response data only), and the type of
     response displayed (single-trial response, mean response across all completed reps of the trial protocol, or the
-    discharge statistics for the selected neuron accumulated across all completed reps of the trial protocol.
+    discharge statistics for the selected neuron accumulated across all completed reps of the trial protocol).
 
     Args:
         session: A dictionary corresponding to one row in the search results table. At a minimum, it must include the
             primary key-value pairs that uniquely identify an experiment session in the database. If it includes the
             ID of a neural unit recorded during the session (when search results table lists neurons instead of
             sessions), then that unit is displayed initially. Otherwise, the first recorded unit is displayed (unless
-            no neurons were recorded during the session.
+            no neurons were recorded during the session).
     Returns:
         An HTML Div that renders the contents of the "Trial Data" tab in the detail panel.
     """
-    # how many units, N, were recorded in the session? The unit IDs are 1..N.
+    # how many units, N, were recorded in the session? The unit IDs are 1 to N.
     num_units = 0
     try:
         pk = {k: session[k] for k in ti.primary_key_of(ti.DBTable.SESSION, False)}
@@ -815,7 +815,7 @@ def _trial_data_tabpane(session: Dict[str, Any]) -> html.Div:
         [dbc.PopoverBody(markdown)],
         id=_TD_HELP_POPOVER_ID, target=_TD_HELP_BADGE_ID, trigger='hover', placement='top-end')
 
-    # the modal component for requesting downloads and the invoking button are handled in a sub-module
+    # the modal component for requesting downloads and the invoking button are handled in a submodule
     download_modal, download_btn = render_download_modal_and_button(session)
 
     nav_row = dbc.Row([
@@ -863,6 +863,7 @@ def _proto_select_options_and_initial_value(session: Dict[str, Any], unit_id: Op
     return proto_options, init_proto
 
 
+# noinspection PyTypeChecker
 def _disp_select_options_and_initial_value(session: Dict[str, Any], proto_hash: str, unit_id: int) -> \
         Tuple[List[Dict], Optional[str]]:
     """
