@@ -197,9 +197,9 @@ def flush_application_message_log_cache() -> bool:
                                  f"{_APPMSGLOG_FILE_NAME}-{now.strftime('%Y%b%d-%H.%M')}")
                 log_path.rename(save_path)
                 save_key = f"/{_APPMSGLOG_DIR_NAME}/{save_path.name}"
-                database.repo.upload_file(save_path, save_key)
-                logger.info(f"Backed up application message log to repository at {save_key}")
-                save_path.unlink(missing_ok=True)
+                if database.repo.upload_file(save_path, save_key):
+                    logger.info(f"Backed up application message log to repository at {save_key}")
+                    save_path.unlink(missing_ok=True)
         return True
     except Exception:
         logger.error(f"Failed to flush application messages to log file", exc_info=True)
@@ -213,7 +213,8 @@ def force_flush_application_message_log() -> None:
 
     This method is intended to be called in a signal handler when the GUnicorn-served backend is about to exit, so that
     the latest log messages (which might capture an error that has led to the termination) are hopefully preserved in
-    the log file for later examination.
+    the log file for later examination. In addition, if that log file has grown large enough, an attempt is made to
+    back it up to S3.
 
     When this method is called it is possible that a Redis background task is currently performing a periodic flush, or
     even that the Redis server has gone down, so that the application log cache is no longer available. In these
@@ -241,5 +242,14 @@ def force_flush_application_message_log() -> None:
                 f.write(f"Flushing {len(messages)} cached messages to application log...\r\n")
                 for message in messages:
                     f.write(f"{message.decode()}\r\n")
+
+        if log_path.stat().st_size > _APPMSGLOG_FILE_SIZE_LIMIT:
+            now = datetime.now()
+            save_path = Path(cfg.workspace_dir, _APPMSGLOG_DIR_NAME,
+                             f"{_APPMSGLOG_FILE_NAME}-{now.strftime('%Y%b%d-%H.%M')}")
+            log_path.rename(save_path)
+            save_key = f"/{_APPMSGLOG_DIR_NAME}/{save_path.name}"
+            if database.repo.upload_file(save_path, save_key):
+                save_path.unlink(missing_ok=True)
     except Exception:
         pass
