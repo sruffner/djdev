@@ -671,7 +671,7 @@ def preprocess_commit_job(job_id: str) -> bool:
             return False
 
         with zipfile.ZipFile(zip_path, 'r') as archive:
-            data_file_name_pattern = re.compile('.[0-9][0-9][0-9][0-9]+$')
+            data_file_name_pattern = re.compile("[.]\\d\\d\\d\\d$")
             archive_list = archive.infolist()
             pl2s_archived: List[zipfile.ZipInfo] = list()
             units_zip_info: Optional[zipfile.ZipInfo] = None

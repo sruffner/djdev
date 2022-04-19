@@ -775,4 +775,5 @@ class TrialData:
         if len(chunks_ok) == 0:
             return 0
         start = chunks_ok[0]
+        # noinspection PyTypeChecker
         return np.nanmean(vel[start:start+100])

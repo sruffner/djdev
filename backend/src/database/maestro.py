@@ -1129,7 +1129,7 @@ RMV_OVAL_ANNULUS = 3
 RMV_APERTURE_LABELS = ['Rectangular', 'Oval', 'Rect. Annulus', 'Oval Annulus']
 
 RMV_FILENAME_LEN = 30
-RMV_FILENAME_PATTERN = re.compile(r'[a-zA-Z0-9_\\.]+')
+RMV_FILENAME_PATTERN = re.compile(r'[a-zA-Z\d_\\.]+')
 RMV_MIN_RECT_DIM = 0.01
 RMV_MAX_RECT_DIM = 120.0
 RMV_MAX_NUM_DOTS = 9999
@@ -1580,6 +1580,7 @@ class Point2D:
         return math.isclose(self.x, 0) and math.isclose(self.y, 0)
 
 
+# noinspection PyUnresolvedReferences
 class Trial(NamedTuple):
     """
     Definition of a single Maestro trial presentation as culled from a Maestro trial data file.
@@ -2401,6 +2402,7 @@ class Trial(NamedTuple):
                     else:
                         start = max(0, t-t_record-vstab_win_len)
                         end = t-t_record
+                        # noinspection PyTypeChecker
                         current_eye_pos.set(np.nanmean(hgpos[start:end]), np.nanmean(vepos[start:end]))
 
                 for i in range(num_tgts):
@@ -2947,7 +2949,7 @@ class ProtocolCandidate:
         """
         try:
             archive_list = archive.infolist()
-            data_file_name_pattern = re.compile('.[0-9][0-9][0-9][0-9]+$')
+            data_file_name_pattern = re.compile("[.]\\d\\d\\d\\d$")
             proto_candidates: List[ProtocolCandidate] = list()
             filename_to_protocol: Dict[str, int] = dict()
             for info in archive_list:

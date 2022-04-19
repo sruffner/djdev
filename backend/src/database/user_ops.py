@@ -153,7 +153,7 @@ def _check_user(username: str, password: str, access: str, full_name: str, email
     if not (5 <= len(full_name) <= 50):
         return "Full name must have 5-50 characters"
     if (len(email) > 80) or \
-            (re.fullmatch(r'^[A-Za-z0-9._+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,6}$', email) is None):
+            (re.fullmatch(r'^[A-Za-z\d._+-]+@(?:[A-Za-z\d-]+\.)+[A-Za-z]{2,6}$', email) is None):
         return "Email address is too long or otherwise invalid"
     if not validate_username(username):
         return "Invalid username"
@@ -170,7 +170,7 @@ def validate_username(username: str) -> bool:
         True only is candidate username is 3-20 characters long, starts with a lowercase letter, and contans only
             lowercase letters and digis.
     """
-    return not (isinstance(username, str) and (re.fullmatch(r'^[a-z][a-z0-9]{2,19}$', username) is None))
+    return not (isinstance(username, str) and (re.fullmatch(r'^[a-z][a-z\d]{2,19}$', username) is None))
 
 
 def validate_password(password: str) -> Optional[str]:
@@ -187,7 +187,7 @@ def validate_password(password: str) -> Optional[str]:
         return "Invalid password"
     elif not (8 <= len(password) <= 32):
         return "Password must have 8-32 characters"
-    elif (re.search(r"[\d]+", password) is None) or (re.search(r"[A-Z]+", password) is None):
+    elif (re.search(r"\d+", password) is None) or (re.search(r"[A-Z]+", password) is None):
         return 'Password must contain at least 1 digit and at least 1 uppercase character'
     return None
 

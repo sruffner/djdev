@@ -700,6 +700,7 @@ def select_row_callback(*args):
     return row is None, disable_review, row is None
 
 
+# noinspection PyTypeChecker
 @callback(
     [Output(_START_BTN_ID, 'disabled'), Output(_JOBS_TABLE_ID, "data"), Output(_JOBS_TABLE_ID, "selected_rows"),
      Output(_UPLOAD_ID, "is_open"), Output(_ALERT_ID, "children"), Output(_ALERT_ID, "is_open")],
