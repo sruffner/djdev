@@ -143,6 +143,25 @@ def download_file(key: str, dst: Path, log: bool = True) -> bool:
     return _download_file_from_bucket(app_cfg.get_config().repo_bucket, key, dst, log)
 
 
+def read_text_file(key: str) -> Optional[str]:
+    """
+    Read the contents of a text file in the portal repository.
+
+    Args:
+        key: The file object key.
+
+    Returns:
+        The text file's content. Returns None if file not found in repository, or some other error occurs.
+    """
+    try:
+        session = _aws_session()
+        s3_resource = session.resource('s3')
+        return s3_resource.Object(app_cfg.get_config().repo_bucket, key).get()["Body"].read().decode('utf-8')
+    except Exception:
+        app_log.get_application_logger().error(f"Failed to read text file at {key} in S3 repo", exc_info=True)
+        return None
+
+
 def download_url_for(key: str) -> Optional[str]:
     """
     Generate a URL by which a data file previously prepared in response to an experiment data download request may be

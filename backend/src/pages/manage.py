@@ -19,7 +19,7 @@ from dash import html
 import dash_bootstrap_components as dbc
 
 from app import PortalUser, load_authorized_user
-from pages import manage_users, manage_repo, curate
+from pages import manage_users, manage_repo, curate, manage_app_log
 
 
 def serve_layout() -> html.Div:
@@ -35,8 +35,9 @@ def serve_layout() -> html.Div:
     content_div = html.Div(dbc.Accordion([
         dbc.AccordionItem(curate.layout, title="Curate Portal Content"),
         dbc.AccordionItem(manage_users.serve_layout(), title='Manage Users'),
-        dbc.AccordionItem(manage_repo.serve_layout(), title='View Backup Repository on S3')
-    ], flush=True))
+        dbc.AccordionItem(manage_repo.serve_layout(), title='View Backup Repository on S3'),
+        dbc.AccordionItem(manage_app_log.serve_layout(), title='Portal Server Message Logs')
+    ], start_collapsed=True, flush=True))
 
     card = dbc.Card([
         dbc.CardHeader("Portal Administration"),

@@ -253,3 +253,76 @@ def force_flush_application_message_log() -> None:
                 save_path.unlink(missing_ok=True)
     except Exception:
         pass
+
+
+def list_application_message_logs() -> List[str]:
+    """
+    Get a list of application message log names. The list will always include "Recent", which refers to the latest
+    messages cached in Redis or flushed to the current log file in the portal server workspace directory. Older log
+    files are backed up in the portal repository on S3 and named by a datetime string (eg, '19Apr2022-22.58') indicating
+    approximately when the log file was moved to S3.
+
+    Returns:
+        List of existing application message log names, as described, in reverse chronological order, with the "Recent"
+            entry first.
+    """
+    out = ["Recent"]
+    repo_listing = database.repo.listing()
+    log_dir = f"/{_APPMSGLOG_DIR_NAME}"
+    msg_log_prefix = f"{_APPMSGLOG_FILE_NAME}-"  # what follows this prefix is a datetime string '%Y%b%d-%H.%M'
+    if log_dir in repo_listing:
+        for key in repo_listing[log_dir]:
+            if key['name'].startswith(msg_log_prefix):
+                out.append(key['name'][len(msg_log_prefix):])
+    # NOTE: list is already sorted b/c the repo file listing is in reverse chronological order already
+    return out
+
+
+def get_message_log_contents(log_name: str) -> str:
+    """
+    Retrieve the contents of the application message log specified.
+
+    Args:
+        log_name: Name of the application message log to retrieve -- one of the log names returned by the method
+            list_application_message_logs().
+
+    Returns:
+        Content of the specified application message log. If an error occurs or log was not found, an appropriate
+            error message is returned instead.
+    """
+    if log_name == 'Recent':
+        try:
+            cfg = config.config.get_config()
+            log_path = Path(cfg.workspace_dir, _APPMSGLOG_DIR_NAME, _APPMSGLOG_FILE_NAME)
+            if log_path.is_file():
+                with open(log_path, 'r') as f:
+                    contents = f.read()
+            else:
+                contents = ""
+            messages = cfg.redis_conn.lrange(_APPMSGLOG_BUF_KEY, start=0, end=-1)
+            if isinstance(messages, list) and (len(messages) > 0):
+                contents += "\r\n".join([msg.decode() for msg in messages])
+            return contents
+        except Exception:
+            get_application_logger().error("Failed to retrieve current application message log", exc_info=True)
+            return "An error occurred while retrieving most recent application message log"
+    else:
+        log_file_key = f"/{_APPMSGLOG_DIR_NAME}/{_APPMSGLOG_FILE_NAME}-{log_name}"
+        contents = database.repo.read_text_file(log_file_key)
+        if contents is None:
+            return "Log file not found, or unable to retrieve it from portal repository"
+        else:
+            return contents
+
+
+def delete_application_message_log(log_name: str) -> bool:
+    """
+    Permanently delete an application message log from the portal repository.
+
+    Args:
+        log_name: Name of the application message log to be deleted -- one of the log names returned by the method
+            list_application_message_logs() -- other than 'Recent', which cannot be deleted
+    Returns:
+        True if successful; False otherwise.
+    """
+    return database.repo.delete_file(f"/{_APPMSGLOG_DIR_NAME}/{_APPMSGLOG_FILE_NAME}-{log_name}")
