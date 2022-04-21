@@ -270,9 +270,9 @@ def fulfill_pending_download_request(req_id: str) -> bool:
     file (.npz) or a Matlab file (.mat). That file is stored in the portal's respository at /downloads/<req_id>.<ext>,
     where <req_id> is the unique identifier assigned to the original download request.
 
-    Depending on the length and number of trials, it could take a minute or more to prepare the download ZIP, so
-    progress is updated regularly in the _DOWNLOAD_STATUS_NS<req_id> key. The request status has 3 possible states -
-    'in progress', 'ready for download', and 'failed'.
+    Depending on the length and number of trials, it could take a minute or more to prepare the download, so progress
+    is updated regularly in the _DOWNLOAD_STATUS_NS<req_id> key. The request status has 3 possible states - 'in
+    progress', 'ready for download', and 'failed'.
 
     Once submitted, a download request cannot be cancelled, but it can be deleted. This method will abort if it
     detects that the request it's working on has been removed from Redis.
@@ -346,6 +346,29 @@ def fulfill_pending_download_request(req_id: str) -> bool:
         return False
 
 
+_DOWNLOAD_FILE_CONTENT_INFO: str = \
+    "This data download file contains trial response data from a Maestro experiment session. In the NPZ file \r\n" \
+    "format, each trial's data is stored in a separate structured array labeled 'trial_N', where N is the trial \r\n" \
+    "index. In the MAT file format, the individual trial records are stored in a single Matlab cell array \r\n" \
+    "called 'trials'. Regardless the file format, here are the fields available in a single trial record: \r\n" \
+    "   index: The trial index (integer) \r\n" \
+    "   protocol_name: The trial protcol name (string) \r\n" \
+    "   duration_ms: The recorded trial duration in milliseconds (integer) \r\n" \
+    "   record_start_ms: Start time of recording, relative to start of trial, in milliseconds (integer) \r\n" \
+    "   timestamp_sec: Trial start time relative to start of experiment session, in seconds (float) \r\n" \
+    "   hgpos: 1KHz-sampled horizontal eye position trajectory in degrees (float array) \r\n" \
+    "   vepos: 1KHz-sampled vertical eye position trajectory in degrees (float array) \r\n" \
+    "   hevel: 1KHz-sampled horizontal eye velocity trajectory in deg/sec (float array) \r\n" \
+    "   hgpos: 1KHz-sampled vertical eye velocity trajectory in deg/sec (float array) \r\n" \
+    "   fix1_hpos, _vpos: 1KHz-computed position trajectory of fixation target #1 in deg (float array) \r\n" \
+    "   fix2_hpos, _vpos: Analogously for fixation target #2 \r\n" \
+    "If a behavioral response was not recorded or a fixation target not designated, the corresponding array \r\n" \
+    "will be empty. In addition, for each neural unit 'unit_M' requested, the trial record includes a field: \r\n" \
+    "   unit_M: The spike occurrence times for unit M during the trial, in seconds since trial start (float \r\n" \
+    "           array. There will be one such field for each neural unit requested. If a unit was being \r\n" \
+    "           recorded during the trial but no spikes occurred, this field is set to NaN. \r\n"
+
+
 def _save_trial_data_to_file(file_path: Path, trial_data: List[TrialData]) -> None:
     """
     Helper method that saves trial response data to a Matlab MAT file or a Numpy NPZ file.
@@ -381,7 +404,8 @@ def _save_trial_data_to_file(file_path: Path, trial_data: List[TrialData]) -> No
         trials.append(curr_trial)
 
     if file_path.name.endswith('mat'):
-        scipy.io.savemat(file_path, dict(trials=np.array(trials, dtype=object)))
+        scipy.io.savemat(file_path, dict(trials=np.array(trials, dtype=object),
+                                         contents=np.array(_DOWNLOAD_FILE_CONTENT_INFO, dtype=np.str_)))
     elif file_path.name.endswith('npz'):
         trials_dict: Dict[str, np.ndarray] = dict()
         while len(trials) > 0:
@@ -404,6 +428,7 @@ def _save_trial_data_to_file(file_path: Path, trial_data: List[TrialData]) -> No
                 dtype.append((k, 'f4') if isinstance(t[k], float) else (k, 'f4', (len(t[k]),)))
                 data.append(t[k])
             trials_dict[f"trial_{t['index']}"] = np.array([tuple(data)], dtype=dtype)
+        trials_dict["contents"] = np.array(_DOWNLOAD_FILE_CONTENT_INFO, dtype=np.str_)
         np.savez(str(file_path), **trials_dict)
     else:
         raise Exception(f'Unsupported output format: {file_path.name}')
