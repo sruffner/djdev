@@ -35,13 +35,15 @@ COMMIT_ACCESS: List[str] = ACCESS_LEVELS[:-1]
 """ List of access levels that allow user to contribute experiment sessions to the lab database. """
 
 
-def authenticate_portal_user(username: str, password: str, admin_only: bool = False) -> Optional[str]:
+def authenticate_portal_user(
+        username: str, password: str, api_access: bool = False, admin_only: bool = False) -> Optional[str]:
     """
     Authenticate the user account on the Lisberger lab portal with the specified name and password.
 
     Args:
         username: The username for the account.
         password: The (plaintext) password for the account.
+        api_access: If True, user is requesting an access token for API access rather than logging in.
         admin_only: If True, require that the user account have 'admin'-level privileges. Default is False.
     Returns:
         None if account was authenticated; else a brief error description (invalid username, etc.)
@@ -64,13 +66,18 @@ def authenticate_portal_user(username: str, password: str, admin_only: bool = Fa
         error_msg = "Admin-level access required"
 
     # when a user is authenticated, update their last login timestamp, but don't fail if this update fails, as
-    # this is not crucial.
+    # this is not crucial. If user is only requesting an access token for API access, don't update login timestamp, but
+    # note it in the application log.
     if error_msg is None:
-        last_login = datetime.now().isoformat(sep=' ', timespec='seconds')  # 'YYYY-MM-DD HH:MM:SS'
-        entry = dict(username=username, last_login=last_login)
-        update_table_row(DBTable.USER, entry)
+        if api_access:
+            get_application_logger().info(f"User {username} requested API access token.")
+        else:
+            last_login = datetime.now().isoformat(sep=' ', timespec='seconds')  # 'YYYY-MM-DD HH:MM:SS'
+            entry = dict(username=username, last_login=last_login)
+            update_table_row(DBTable.USER, entry)
     else:
-        get_application_logger().debug(f"...authentication failed: {error_msg}")
+        get_application_logger().info(
+            f"...{'API access' if api_access else 'portal login'} authentication failed: {error_msg}")
     return error_msg
 
 

@@ -50,6 +50,9 @@ def get_config() -> AppConfig:
         if 'FLASK_SECRET_KEY' not in os.environ:
             raise RuntimeError('The environment variable FLASK_SECRET_KEY is required.')
         secret_key = os.environ['FLASK_SECRET_KEY']
+        if 'JWT_SECRET_KEY' not in os.environ:
+            raise RuntimeError('The environment variable JWT_SECRET_KEY is required.')
+        jwt_secret = os.environ['JWT_SECRET_KEY']
         if ('REDIS_HOST' not in os.environ) or ('REDIS_PORT' not in os.environ):
             raise RuntimeError('The environment variables REDIS_HOST and REDIS_PORT are required.')
         conn = Redis(host=os.environ['REDIS_HOST'], port=int(os.environ['REDIS_PORT']))
@@ -60,7 +63,8 @@ def get_config() -> AppConfig:
 
         get_config.config = AppConfig(
             app_container_name=app_container, workspace_dir=ws_dir, dash_upload_dir=upload_dir,
-            dj_database_host=db_host, dj_database_password=db_password, flask_secret_key=secret_key, redis_conn=conn)
+            dj_database_host=db_host, dj_database_password=db_password, flask_secret_key=secret_key,
+            jwt_secret_key=jwt_secret, redis_conn=conn)
         if ('AWS_ACCESS_KEY_ID' in os.environ) and ('AWS_ACCESS_KEY_SECRET' in os.environ) and \
            ('AWS_REGION_NAME' in os.environ) and ('REPO_S3_BUCKET_NAME' in os.environ):
             get_config.config.aws_access_key_id = os.environ['AWS_ACCESS_KEY_ID']
@@ -101,6 +105,11 @@ class AppConfig:
     set from a secret, not set to a new value every time the app is started -- as that will invalidate existing Flask
     sessions.
     """
+    jwt_secret_key: str
+    """
+    Secret key for encryption of JSON Web tokens required to access RESTful-like API endpoints to retrieve 
+    experimental data from the portal database.
+    """
     redis_conn: Redis
     """ 
     Connection to the Redis server used to cache state so that backend server can remain 'stateless' and thus
@@ -116,7 +125,8 @@ class AppConfig:
     """ Enable/disable python native blobs in DataJoint. """
     flask_permanent_session_lifetime: timedelta = timedelta(hours=24)
     """ Flask session lifetime. Flask-Login uses this to timeout client login sessions. """
-
+    jwt_access_token_lifetime: timedelta = timedelta(hours=2)
+    """ Lifetime of a JWT access token used to access API endpoints for direct database retrievals. """
     aws_access_key_id: Optional[str] = None
     """ Amazon Web Services (AWS) access key ID for IAM user with access privileges to S3."""
     aws_access_key_secret: Optional[str] = None

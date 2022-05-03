@@ -219,6 +219,11 @@ spec:
               secretKeyRef:
                 name: sgl-secret
                 key: flask_secret_key
+          - name: JWT_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: jwt_secret_key
           - name: AWS_ACCESS_KEY_ID
             valueFrom:
               secretKeyRef:
@@ -312,6 +317,11 @@ spec:
               secretKeyRef:
                 name: sgl-secret
                 key: flask_secret_key
+          - name: JWT_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: jwt_secret_key
           - name: AWS_ACCESS_KEY_ID
             valueFrom:
               secretKeyRef:

@@ -7,6 +7,8 @@ app.py: Create and configure the Dash application instance for the Lisberger lab
 from typing import Dict, Optional
 
 # set up the application configuration and logging as early as possible
+from flask_jwt_extended import JWTManager
+
 import config.config
 import config.app_logging
 
@@ -39,6 +41,10 @@ login_manager.login_view = '/explore'
 login_manager.refresh_view = '/explore'
 login_manager.needs_refresh_message = "Session timed out, please login again."
 login_manager.needs_refresh_message_category = "info"
+
+# Setup for Flask-JWT-Extended
+app.server.config.update(JWT_SECRET_KEY=_cfg.jwt_secret_key, JWT_ACCESS_TOKEN_EXPIRES=_cfg.jwt_access_token_lifetime)
+jwt = JWTManager(app.server)
 
 
 class PortalUser(flask_login.UserMixin):
@@ -85,3 +91,8 @@ def load_authorized_user(username: str) -> Optional[PortalUser]:
         config.app_logging.get_application_logger().warning(f"Authentication error: {user_record}")
         return None
     return PortalUser(user_record)
+
+
+# here we define the Flask API endpoints for programmatic retrieval of database content (read-only access)
+# noinspection PyUnresolvedReferences
+from api import endpoints
