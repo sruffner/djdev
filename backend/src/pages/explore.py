@@ -39,6 +39,7 @@ from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_attribute_
     fetch_any_proj
 from database.trial_data_ops import trial_protocols_for_session, trial_protocols_for_neuron, trials_for_session, \
     trials_for_neuron, get_trial_protocol_definition, retrieve_trial_reps_for_neuron
+from pages.commit import display_trial_protocol_definition
 from pages.download_modal import render_download_modal_and_button
 from utils.common import check_date
 
@@ -1136,7 +1137,7 @@ def on_show_hide_protocol_definition(*args):
     elif trigger_id == _PROTO_VIEW_OPEN_ID:
         protocol = get_trial_protocol_definition(args[2])
         if protocol:
-            return True, protocol.display_definition()
+            return True, display_trial_protocol_definition(protocol)
     return False, no_update
 
 

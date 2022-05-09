@@ -48,6 +48,7 @@ from database.commit_ops import CommitStateEnum, initiate_session_commit, get_pe
     cancel_or_remove_commit_job, update_commit_job_on_archive_upload, commit_job_progress, CommitJobStatus, \
     SessionMetaData, session_metadata, update_session_metadata, ready_to_commit, protocol_names, protocol_definition, \
     add_rv_to_protocol, validate_protocol, OmniplexUnit, metrics_for_neural_unit, set_unit_type, commit_to_database
+from database.maestro import Protocol, SegParam, SegParamType
 from database.table_info import Column, DBTable, attribute_info
 from database.table_ops import fetch_restrict_proj, fetch_attribute_values, fetch_rows
 
@@ -609,9 +610,150 @@ def _layout_protocol_div(proto_candidate: Optional[maestro.ProtocolCandidate]) -
             style={} if needs_validation else dict(display='none')))
     ], justify='start', class_name='g-0 mt-3')
 
-    cmpt_list = protocol.display_definition() if protocol else list()
+    cmpt_list = display_trial_protocol_definition(protocol) if protocol else list()
     cmpt_list.insert(0, validate_row)
     return cmpt_list
+
+
+def display_trial_protocol_definition(proto: Protocol) -> List[Any]:
+    """
+    Generate an Dash-based presentation of a Maestro trial protocol's definition. A Dash Datatable component displays
+    the segment table for the protocol, and an HTML Div component houses a series of Bootstrap badges that display key
+    information like: segment index at which recording begins, the target transform, targets, perturbations, tagged
+    sections, and random variables. Tooltips associated with some of the badges reveal more detailed information
+    like target definitions, perturbation details, and so on.
+
+    Returns:
+        A list of two components, a div and a Dash Datable, which should be embedded as children of an outer div.
+    """
+    proto_summary = proto.summary()
+    segments = proto_summary['segments']
+    targets = proto_summary['targets']
+    target_names = [target_desc.split(':')[0] for target_desc in targets]  # THIS IS A HACK
+    perts = proto_summary['perts']
+    sections = proto_summary['sections']
+    rvs = proto_summary['rvs']
+
+    badges = [
+        dbc.Badge(f"Record Seg: {proto_summary['record_seg']}", color="primary", class_name="me-3"),
+        dbc.Badge(f"Transform: {proto_summary['transform']}", color="primary", class_name="me-3"),
+        dbc.Badge(f"Targets: {len(target_names)}", id="disp_proto_targets", color="primary", class_name="me-3"),
+        dbc.Badge(f"Perturbations: {len(perts)}", id="disp_proto_perts", color="primary", class_name="me-3"),
+        dbc.Badge(f"Tagged Sects: {len(sections)}", id="disp_proto_sections", color="primary", class_name="me-3"),
+        dbc.Badge(f"Random Vars: {len(rvs)}", id="disp_proto_random_vars", color="primary"),
+        dbc.Tooltip([html.Div(f"{str(target)}") for target in targets],
+                    target="disp_proto_targets", style={'max-width': '600px'})
+    ]
+    if len(perts) > 0:
+        badges.append(
+            dbc.Tooltip([html.Div(f"{str(pert)}") for pert in perts],
+                        target="disp_proto_perts", style={'max-width': '600px'})
+        )
+    if len(sections) > 0:
+        badges.append(
+            dbc.Tooltip([html.Div(f"{str(section)}") for section in sections],
+                        target="disp_proto_sections", style={'max-width': '600px'})
+        )
+    if len(rvs) > 0:
+        badges.append(
+            dbc.Tooltip([html.Div(f"{str(rv)}") for rv in rvs],
+                        target="disp_proto_random_vars", style={'max-width': '600px'})
+        )
+
+    columns = [{"name": "", "id": "param"}]
+    columns.extend([{"name": f"Segment {i}", "id": f"seg_{i}"} for i in range(len(segments))])
+
+    # NOTE: Any parameter that varies randomly in the trial protocol is represented by an asterisk '*' in the
+    # segment table rendering rather than its value in the representative trial.
+    duration = {"param": "Duration (ms)"}
+    fix1_tgt = {"param": "Fix Tgt #1"}
+    fix2_tgt = {"param": "Fix Tgt #2"}
+    xy_delta = {"param": "XYScope Intv (ms)"}
+    marker = {"param": "Marker Pulse"}
+    tgt_on = [{"param": name} for name in target_names]
+    tgt_vstab = [{"param": "VStab"} for _ in target_names]
+    tgt_pos = [{"param": "Position (deg)"} for _ in target_names]
+    tgt_vel_acc = [{"param": "Vel (d/s), Acc (d/s^2)"} for _ in target_names]
+    tgt_pat = [{"param": "Pattern Vel, Acc"} for _ in target_names]
+    for i, seg in enumerate(segments):
+        seg_id = f"seg_{i}"
+        duration[seg_id] = "***" if SegParam(SegParamType.DURATION, i, -1) in proto.rvs else seg['dur']
+        fix1_tgt[seg_id] = "NONE" if seg['fix1'] < 0 else target_names[seg['fix1']]
+        fix2_tgt[seg_id] = "NONE" if seg['fix2'] < 0 else target_names[seg['fix2']]
+        xy_delta[seg_id] = seg['xy_update']
+        marker[seg_id] = "NONE" if seg['marker'] < 0 else f"DO{seg['marker']}"
+        for tgt_idx in range(len(target_names)):
+            trajectory = seg['trajectories'][tgt_idx]
+            tgt_on[tgt_idx][seg_id] = "ON" if trajectory['on'] else 'OFF'
+            tgt_vstab[tgt_idx][seg_id] = trajectory['vstab']
+            tgt_pos[tgt_idx][seg_id] = proto.trial.segments[i].tgt_pos[tgt_idx].as_string_with_wildcard(
+                (SegParam(SegParamType.TGT_POS_H, i, tgt_idx) in proto.rvs),
+                (SegParam(SegParamType.TGT_POS_V, i, tgt_idx) in proto.rvs))
+            tgt_pos[tgt_idx][seg_id] += " rel" if proto.trial.segments[i].tgt_rel[tgt_idx] else " abs"
+            tgt_vel_out = proto.trial.segments[i].tgt_vel[tgt_idx].as_string_with_wildcard(
+                (SegParam(SegParamType.TGT_VEL_H, i, tgt_idx) in proto.rvs),
+                (SegParam(SegParamType.TGT_VEL_V, i, tgt_idx) in proto.rvs))
+            tgt_acc_out = proto.trial.segments[i].tgt_acc[tgt_idx].as_string_with_wildcard(
+                (SegParam(SegParamType.TGT_ACC_H, i, tgt_idx) in proto.rvs),
+                (SegParam(SegParamType.TGT_ACC_V, i, tgt_idx) in proto.rvs))
+            tgt_vel_acc[tgt_idx][seg_id] = f"{tgt_vel_out}  {tgt_acc_out}"
+            tgt_pat_vel_out = proto.trial.segments[i].tgt_pat_vel[tgt_idx].as_string_with_wildcard(
+                (SegParam(SegParamType.TGT_PAT_VEL_H, i, tgt_idx) in proto.rvs),
+                (SegParam(SegParamType.TGT_PAT_VEL_V, i, tgt_idx) in proto.rvs))
+            tgt_pat_acc_out = proto.trial.segments[i].tgt_pat_acc[tgt_idx].as_string_with_wildcard(
+                (SegParam(SegParamType.TGT_PAT_ACC_H, i, tgt_idx) in proto.rvs),
+                (SegParam(SegParamType.TGT_PAT_ACC_V, i, tgt_idx) in proto.rvs))
+            tgt_pat[tgt_idx][seg_id] = f"{tgt_pat_vel_out}  {tgt_pat_acc_out}"
+            # tgt_pos[tgt_idx][seg_id] = trajectory['pos']
+            # tgt_vel_acc[tgt_idx][seg_id] = f"{trajectory['vel']}  {trajectory['acc']}"
+            # tgt_pat[tgt_idx][seg_id] = f"{trajectory['patvel']}  {trajectory['patacc']}"
+    rows = [duration, fix1_tgt, fix2_tgt, xy_delta, marker]
+    for i in range(len(target_names)):
+        rows.extend([tgt_on[i], tgt_vstab[i], tgt_pos[i], tgt_vel_acc[i], tgt_pat[i]])
+
+    # the segment table rendered as a Dash DataTable...
+    # right-align first column displaying parameter descriptions, but left-align and underline the target names
+    # that appear in that column. Use a brownish-yellow background to ighlight the target name rows, which separate
+    # the target trajectory sections in the segment table. Finally, use a green background to highligh any cell in
+    # the segment table that houses a random variable.
+    tgt_name_row_indices = [5 + i*5 for i in range(len(target_names))]
+    style_data_conditional = [
+        {'if': {'column_id': 'param'}, 'textAlign': 'right'},
+        {'if': {'column_id': 'param', 'row_index': tgt_name_row_indices},
+         'textDecoration': 'underline', 'textAlign': 'left'},
+        {'if': {'row_index': tgt_name_row_indices}, 'backgroundColor': 'rgba(218,165,32,128)', 'color': 'black'}
+    ]
+    for rv in proto.rvs:
+        seg_id = f"seg_{rv.seg_idx}"
+        row_idx = 0
+        if rv.type != SegParamType.DURATION:
+            if rv.type in [SegParamType.TGT_POS_H, SegParamType.TGT_POS_V]:
+                ofs = 2
+            elif rv.type in [SegParamType.TGT_VEL_H, SegParamType.TGT_VEL_V, SegParamType.TGT_ACC_H,
+                             SegParamType.TGT_ACC_V]:
+                ofs = 3
+            else:
+                ofs = 4
+            row_idx = 5 + rv.tgt_idx*5 + ofs
+        style_data_conditional.append(
+            {'if': {'column_id': seg_id, 'row_index': [row_idx]}, 'backgroundColor': 'limegreen', 'color': 'black'}
+        )
+    segment_table = dt.DataTable(
+        columns=columns,
+        data=rows,
+        cell_selectable=False,
+        style_header={'fontWeight': 'bold', 'textAlign': 'center'},
+        style_cell={'textAlign': 'center', 'whiteSpace': 'normal', 'height': 'auto', 'lineHeight': '18px'},
+        style_cell_conditional=[
+            {'if': {'column_id': 'param'}, 'width': '200px'}
+        ],
+        style_data_conditional=style_data_conditional,
+        style_data={'whiteSpace': 'pre-wrap'},
+        style_table={'height': '330px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
+        fixed_rows={'headers': True, 'data': 0},
+        fixed_columns={'headers': True, 'data': 0}
+    )
+    return [html.Div(badges, className='mt-3 mb-1'), segment_table]
 
 
 def _layout_neural_units_tab_content(job_id: Optional[str], num_units: int) -> Tuple[dbc.Card, Optional[str]]:
