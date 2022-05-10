@@ -41,7 +41,7 @@ from api.data_containers import API_VERSION, SessionInfo, NeuronInfo, ROUTE_AUTH
 from app import app
 from config.app_logging import get_application_logger
 from config.config import get_config
-from database.maestro import Protocol
+from utils.maestro import Protocol
 from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_any_proj, fetch_one_row
 import database.table_info as ti
 from database.trial_data_ops import trial_protocols_for_session

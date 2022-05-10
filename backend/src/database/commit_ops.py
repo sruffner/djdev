@@ -89,7 +89,8 @@ from werkzeug.security import generate_password_hash
 
 from config.app_logging import get_application_logger
 from config.config import get_config
-from database import maestro, PL2, repo
+from database import repo
+from utils import maestro, PL2
 from database.log_ops import log_session_commit, log_file_path
 from database.table_info import DBTable, AttributeValue, primary_key_of
 from database.table_ops import fetch_attribute_values, fetch_one_row, fetch_rows, check_row, fetch_restrict_proj, \

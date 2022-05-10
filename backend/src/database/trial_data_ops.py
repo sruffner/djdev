@@ -15,7 +15,7 @@ import numpy as np
 from numpy.lib import stride_tricks
 
 from config.app_logging import get_application_logger
-from database import maestro
+from utils import maestro
 from database.table_info import AttributeValue, DBTable, primary_key_of
 from database.table_ops import fetch_one_row, fetch_rows, fetch_restrict_proj, fetch_any_proj, fetch_attribute_values
 
