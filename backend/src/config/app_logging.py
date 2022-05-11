@@ -58,7 +58,7 @@ from rq import Queue
 
 import config.config
 import database.repo
-from sglportalutils.common import KB
+from sglportalapi.util import KB
 
 _LOG_CFG_FILE = 'config/logging.yaml'
 

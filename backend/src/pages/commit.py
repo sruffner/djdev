@@ -43,12 +43,11 @@ import plotly.express as px
 
 from app import load_authorized_user
 from config.app_logging import get_application_logger
-from sglportalutils import maestro
 from database.commit_ops import CommitStateEnum, initiate_session_commit, get_pending_commit_jobs_for, \
     cancel_or_remove_commit_job, update_commit_job_on_archive_upload, commit_job_progress, CommitJobStatus, \
     SessionMetaData, session_metadata, update_session_metadata, ready_to_commit, protocol_names, protocol_definition, \
     add_rv_to_protocol, validate_protocol, OmniplexUnit, metrics_for_neural_unit, set_unit_type, commit_to_database
-from sglportalutils.maestro import Protocol, SegParam, SegParamType
+from sglportalapi.maestro import Protocol, SegParam, SegParamType, ProtocolCandidate
 from database.table_info import Column, DBTable, attribute_info
 from database.table_ops import fetch_restrict_proj, fetch_attribute_values, fetch_rows
 
@@ -505,7 +504,7 @@ def _layout_session_info_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card, i
 
 def _layout_trial_protocol_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card, Optional[str]]:
     proto_names: List[str]
-    initial_proto: Optional[maestro.ProtocolCandidate] = None
+    initial_proto: Optional[ProtocolCandidate] = None
     err_msg: Optional[str] = None
     if job_id:
         proto_names = protocol_names(job_id)
@@ -548,10 +547,10 @@ _PROTO_RV_GROUP_ID = "review--proto-rv-form"
 """ ID of Bootstrap Form Group containing widgets for adding a random variable to the displayed trial protocol. """
 
 
-def _layout_protocol_div(proto_candidate: Optional[maestro.ProtocolCandidate]) -> List[Any]:
+def _layout_protocol_div(proto_candidate: Optional[ProtocolCandidate]) -> List[Any]:
     # NOTE: This has to work even if ProtocolCandidate is None, so that all widgets are realized -- since they appear
     # in callbacks.
-    protocol: Optional[maestro.Protocol] = maestro.Protocol.from_candidate(proto_candidate) if proto_candidate else None
+    protocol: Optional[Protocol] = Protocol.from_candidate(proto_candidate) if proto_candidate else None
     needs_validation = False
     if proto_candidate:
         needs_validation = (proto_candidate.num_reps == 1) or (proto_candidate.num_reps == 2
@@ -577,9 +576,9 @@ def _layout_protocol_div(proto_candidate: Optional[maestro.ProtocolCandidate]) -
         dbc.InputGroupText("Type"),
         dbc.Select(
             id=_PROTO_RV_TYPE_SELECT_ID,
-            options=[{'label': t.name, 'value': str(t.value)} for t in maestro.SegParamType if
+            options=[{'label': t.name, 'value': str(t.value)} for t in SegParamType if
                      t.can_vary_randomly()],
-            value=str(maestro.SegParamType.DURATION.value)
+            value=str(SegParamType.DURATION.value)
         )
     ], size='sm')
     seg_select = dbc.InputGroup([
@@ -1083,8 +1082,7 @@ def update_proto(*args):
         ofs = 3
         proto_index = int(args[ofs])
         # noinspection PyArgumentList
-        rv: maestro.SegParam = maestro.SegParam(
-            maestro.SegParamType(int(args[ofs + 1])), int(args[ofs + 2]), int(args[ofs + 3]))
+        rv: SegParam = SegParam(SegParamType(int(args[ofs + 1])), int(args[ofs + 2]), int(args[ofs + 3]))
         proto_candidate = add_rv_to_protocol(job_id, proto_index, rv)
         if proto_candidate:
             out[0] = _layout_protocol_div(proto_candidate)

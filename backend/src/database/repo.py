@@ -47,7 +47,7 @@ from boto3.s3.transfer import TransferConfig
 
 import config.app_logging as app_log
 import config.config as app_cfg
-from sglportalutils.common import MB, GB, size_with_units
+from sglportalapi.util import MB, GB, size_with_units
 
 
 def listing() -> Optional[Dict[str, List[Dict[str, Any]]]]:

@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, Tuple, List, Union
 
 import numpy as np
 
-from sglportalutils.maestro import Protocol
+from sglportalapi.maestro import Protocol
 
 API_VERSION: int = 1
 """ The current version number for the portal database access API. """

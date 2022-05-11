@@ -90,14 +90,14 @@ from werkzeug.security import generate_password_hash
 from config.app_logging import get_application_logger
 from config.config import get_config
 from database import repo
-from sglportalutils import maestro, PL2
+from sglportalapi import maestro, PL2
 from database.log_ops import log_session_commit, log_file_path
 from database.table_info import DBTable, AttributeValue, primary_key_of
 from database.table_ops import fetch_attribute_values, fetch_one_row, fetch_rows, check_row, fetch_restrict_proj, \
     SessionCommitter, rollback_session_commit, database_empty, insert_into_table, delete_from_table, update_table_row, \
     update_mapping_table
 from database.user_ops import validate_username, PASSWORD_HASH_METHOD, prompt_for_password
-from sglportalutils.common import DocEnum
+from sglportalapi.util import DocEnum
 
 _logger = get_application_logger()
 

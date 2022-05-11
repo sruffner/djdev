@@ -41,7 +41,7 @@ from app import PortalUser, load_authorized_user
 
 import database.table_info as ti
 from database import repo
-from sglportalutils.common import size_with_units
+from sglportalapi.util import size_with_units
 
 _REPO_TABLE_ID: str = "repo-table"
 """ ID of Dash DataTable presenting a pseudo filelisting of the portal's backup repository contents. """

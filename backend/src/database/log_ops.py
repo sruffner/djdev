@@ -39,7 +39,7 @@ from config.app_logging import get_application_logger
 from config.config import get_config
 from database import repo
 from database.table_info import DBTable, AttributeValue
-from sglportalutils.common import size_with_units
+from sglportalapi.util import size_with_units
 
 _LOG_DIR_NAME: str = 'logs'
 _LOG_FILE_NAME: str = 'database_ops.log'
