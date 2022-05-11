@@ -30,10 +30,10 @@ from typing import Optional, Union, List
 import requests
 from requests import RequestException, Response
 
-from api.data_containers import API_VERSION, SessionInfo, NeuronInfo, ROUTE_AUTHENTICATE, ROUTE_SESSIONINFO, \
+from sglportalutils.data_containers import API_VERSION, SessionInfo, NeuronInfo, ROUTE_AUTHENTICATE, ROUTE_SESSIONINFO, \
     ROUTE_SESSION_NEURONS, ROUTE_SESSION_PROTOCOLS, TrialRep, ROUTE_SESSION_TRIAL, ROUTE_SESSION_BLOCK, \
     ROUTE_PROTOCOL_REPS
-from utils.maestro import Protocol
+from sglportalutils.maestro import Protocol
 
 _REQ_TIMEOUT_SECONDS: float = 20
 """ Any request to a portal API endpoint will timeout after this many seconds. """

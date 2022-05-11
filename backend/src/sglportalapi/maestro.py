@@ -51,7 +51,7 @@ import hashlib
 import pickle
 import numpy as np
 
-from utils.common import DocEnum
+from sglportalutils.common import DocEnum
 
 
 class DataFileError(Exception):

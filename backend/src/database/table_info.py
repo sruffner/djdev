@@ -23,7 +23,7 @@ import numpy as np
 from datetime import date
 from typing import Union, Optional, List, Dict
 
-from utils.common import DocEnum
+from sglportalutils.common import DocEnum
 
 
 def table_label(table_id: DBTable) -> str:

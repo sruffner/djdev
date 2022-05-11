@@ -41,7 +41,7 @@ from database.trial_data_ops import trial_protocols_for_session, trial_protocols
     trials_for_neuron, get_trial_protocol_definition, retrieve_trial_reps_for_neuron
 from pages.commit import display_trial_protocol_definition
 from pages.download_modal import render_download_modal_and_button
-from utils.common import check_date
+from sglportalutils.common import check_date
 
 
 _SESSION_TAB_ID: str = "explore_session_tab"

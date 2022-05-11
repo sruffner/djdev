@@ -17,8 +17,8 @@ from plotly.subplots import make_subplots
 from dash import html, dcc
 import dash_bootstrap_components as dbc
 
-from utils import stats
-from utils.maestro import Protocol, SegParamType
+from sglportalutils import stats
+from sglportalutils.maestro import Protocol, SegParamType
 from database.trial_data_ops import data_for_trial, retrieve_trial_reps_for_session, retrieve_trial_reps_for_neuron
 
 

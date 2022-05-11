@@ -43,12 +43,12 @@ import plotly.express as px
 
 from app import load_authorized_user
 from config.app_logging import get_application_logger
-from utils import maestro
+from sglportalutils import maestro
 from database.commit_ops import CommitStateEnum, initiate_session_commit, get_pending_commit_jobs_for, \
     cancel_or_remove_commit_job, update_commit_job_on_archive_upload, commit_job_progress, CommitJobStatus, \
     SessionMetaData, session_metadata, update_session_metadata, ready_to_commit, protocol_names, protocol_definition, \
     add_rv_to_protocol, validate_protocol, OmniplexUnit, metrics_for_neural_unit, set_unit_type, commit_to_database
-from utils.maestro import Protocol, SegParam, SegParamType
+from sglportalutils.maestro import Protocol, SegParam, SegParamType
 from database.table_info import Column, DBTable, attribute_info
 from database.table_ops import fetch_restrict_proj, fetch_attribute_values, fetch_rows
 

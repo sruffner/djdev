@@ -1,5 +1,5 @@
 """
-common.py: A collection of miscellaneous general-purpose utility functions and classes.
+util.py: A collection of miscellaneous general-purpose utility functions and classes.
 
 @author: sruffner
 @created: 04mar2021

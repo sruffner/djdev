@@ -35,13 +35,13 @@ from typing import Tuple, Optional, List, Dict, Any
 from flask import Response, request
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 
-from api.data_containers import API_VERSION, SessionInfo, NeuronInfo, ROUTE_AUTHENTICATE, ROUTE_SESSIONINFO, \
+from sglportalutils.data_containers import API_VERSION, SessionInfo, NeuronInfo, ROUTE_AUTHENTICATE, ROUTE_SESSIONINFO, \
     ROUTE_SESSION_NEURONS, ROUTE_SESSION_PROTOCOLS, ROUTE_SESSION_TRIAL, TrialRep, ROUTE_SESSION_BLOCK, \
     ROUTE_PROTOCOL_REPS
 from app import app
 from config.app_logging import get_application_logger
 from config.config import get_config
-from utils.maestro import Protocol
+from sglportalutils.maestro import Protocol
 from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_any_proj, fetch_one_row
 import database.table_info as ti
 from database.trial_data_ops import trial_protocols_for_session
