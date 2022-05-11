@@ -85,7 +85,7 @@ class User(dj.Manual):
     # Registered users of the Lisberger lab portal
     username : varchar(20)              # Network login name
     ---
-    password : char(93)                 # Password hash
+    password : varchar(200)             # Password hash
     access : enum("admin", "commit", "download")   # level of access to restricted portal functions
     full_name : varchar(50)             # Full name
     contact_email : varchar(80)         # Email address
