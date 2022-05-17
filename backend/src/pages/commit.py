@@ -660,13 +660,16 @@ def display_trial_protocol_definition(proto: Protocol) -> List[Any]:
         )
 
     columns = [{"name": "", "id": "param"}]
-    columns.extend([{"name": f"Segment {i}", "id": f"seg_{i}"} for i in range(len(segments))])
+    columns.extend([
+        {"name": f"Segment {i}", "id": f"seg_{i}"} for i in range(len(segments))
+    ])
 
     # NOTE: Any parameter that varies randomly in the trial protocol is represented by an asterisk '*' in the
     # segment table rendering rather than its value in the representative trial.
     duration = {"param": "Duration (ms)"}
-    fix1_tgt = {"param": "Fix Tgt #1"}
-    fix2_tgt = {"param": "Fix Tgt #2"}
+    fix_tgts = {"param": "Fixation Targets #1, #2"}
+    fix_accuracy = {"param": "Fix Accuracy H,V (deg)"}
+    grace_period = {"param": "Grace Period (ms)"}
     xy_delta = {"param": "XYScope Intv (ms)"}
     marker = {"param": "Marker Pulse"}
     tgt_on = [{"param": name} for name in target_names]
@@ -677,8 +680,10 @@ def display_trial_protocol_definition(proto: Protocol) -> List[Any]:
     for i, seg in enumerate(segments):
         seg_id = f"seg_{i}"
         duration[seg_id] = "***" if SegParam(SegParamType.DURATION, i, -1) in proto.rvs else seg['dur']
-        fix1_tgt[seg_id] = "NONE" if seg['fix1'] < 0 else target_names[seg['fix1']]
-        fix2_tgt[seg_id] = "NONE" if seg['fix2'] < 0 else target_names[seg['fix2']]
+        fix_tgts[seg_id] = f"{'NONE' if seg['fix1'] < 0 else target_names[seg['fix1']]} , " \
+                           f"{'NONE' if seg['fix2'] < 0 else target_names[seg['fix2']]}"
+        fix_accuracy[seg_id] = f"({seg['fixacc_h']:.1f}, {seg['fixacc_v']:.1f})"
+        grace_period[seg_id] = f"{seg['grace']}"
         xy_delta[seg_id] = seg['xy_update']
         marker[seg_id] = "NONE" if seg['marker'] < 0 else f"DO{seg['marker']}"
         for tgt_idx in range(len(target_names)):
@@ -706,16 +711,16 @@ def display_trial_protocol_definition(proto: Protocol) -> List[Any]:
             # tgt_pos[tgt_idx][seg_id] = trajectory['pos']
             # tgt_vel_acc[tgt_idx][seg_id] = f"{trajectory['vel']}  {trajectory['acc']}"
             # tgt_pat[tgt_idx][seg_id] = f"{trajectory['patvel']}  {trajectory['patacc']}"
-    rows = [duration, fix1_tgt, fix2_tgt, xy_delta, marker]
+    rows = [duration, fix_tgts, fix_accuracy, grace_period, xy_delta, marker]
     for i in range(len(target_names)):
         rows.extend([tgt_on[i], tgt_vstab[i], tgt_pos[i], tgt_vel_acc[i], tgt_pat[i]])
 
     # the segment table rendered as a Dash DataTable...
     # right-align first column displaying parameter descriptions, but left-align and underline the target names
-    # that appear in that column. Use a brownish-yellow background to ighlight the target name rows, which separate
-    # the target trajectory sections in the segment table. Finally, use a green background to highligh any cell in
+    # that appear in that column. Use a brownish-yellow background to highlight the target name rows, which separate
+    # the target trajectory sections in the segment table. Finally, use a green background to highlight any cell in
     # the segment table that houses a random variable.
-    tgt_name_row_indices = [5 + i*5 for i in range(len(target_names))]
+    tgt_name_row_indices = [6 + i*5 for i in range(len(target_names))]
     style_data_conditional = [
         {'if': {'column_id': 'param'}, 'textAlign': 'right'},
         {'if': {'column_id': 'param', 'row_index': tgt_name_row_indices},
@@ -733,7 +738,7 @@ def display_trial_protocol_definition(proto: Protocol) -> List[Any]:
                 ofs = 3
             else:
                 ofs = 4
-            row_idx = 5 + rv.tgt_idx*5 + ofs
+            row_idx = 6 + rv.tgt_idx*5 + ofs
         style_data_conditional.append(
             {'if': {'column_id': seg_id, 'row_index': [row_idx]}, 'backgroundColor': 'limegreen', 'color': 'black'}
         )
@@ -741,10 +746,11 @@ def display_trial_protocol_definition(proto: Protocol) -> List[Any]:
         columns=columns,
         data=rows,
         cell_selectable=False,
-        style_header={'fontWeight': 'bold', 'textAlign': 'center'},
-        style_cell={'textAlign': 'center', 'whiteSpace': 'normal', 'height': 'auto', 'lineHeight': '18px'},
+        style_header={'fontWeight': 'bold', 'textAlign': 'center', 'fontSize': 14, 'font-family': 'sans-serif'},
+        style_cell={'textAlign': 'center', 'whiteSpace': 'normal', 'height': 'auto', 'lineHeight': '18px',
+                    'fontSize': 14, 'font-family': 'sans-serif'},
         style_cell_conditional=[
-            {'if': {'column_id': 'param'}, 'width': '200px'}
+            {'if': {'column_id': 'param'}, 'width': '200px', 'fontWeight': 'bold'}
         ],
         style_data_conditional=style_data_conditional,
         style_data={'whiteSpace': 'pre-wrap'},
@@ -1058,7 +1064,7 @@ def update_session_data(*args):
 @callback(
     [Output(_PROTO_DIV_ID, 'children'), Output(_PROTO_ALERT_DIV, 'children'),
      Output(_PROTO_VALID_BTN_ID, 'children'), Output(_PROTO_VALID_BTN_ID, 'disabled'),
-     Output(_PROTO_RV_GROUP_ID, 'style'), Output(_PROTO_SELECT_ID, 'options')],
+     Output(_PROTO_RV_GROUP_ID, 'style'), Output(_PROTO_SELECT_ID, 'options'), Output(_PROTO_SELECT_ID, 'value')],
     [Input(_PROTO_SELECT_ID, 'value'), Input(_PROTO_ADD_RV_BTN_ID, 'n_clicks'), Input(_PROTO_VALID_BTN_ID, 'n_clicks')],
     [State(_PROTO_SELECT_ID, 'value'), State(_PROTO_RV_TYPE_SELECT_ID, 'value'),
      State(_PROTO_RV_SEG_SELECT_ID, 'value'), State(_PROTO_RV_TGT_SELECT_ID, 'value'),
@@ -1067,7 +1073,7 @@ def update_proto(*args):
     ctx = callback_context
     if not ctx.triggered:
         raise dash_exc.PreventUpdate
-    out = [no_update] * 6
+    out = [no_update] * 7
     # job ID is in the modal header title text
     idx = args[-1].find(":")
     job_id = args[-1][idx + 2:]
@@ -1087,26 +1093,43 @@ def update_proto(*args):
         if proto_candidate:
             out[0] = _layout_protocol_div(proto_candidate)
         else:
-            out[1] = "danger-An error occurred while adding modifying protocol definition"
+            out[1] = "danger-An error occurred while modifying protocol definition"
     elif trigger == _PROTO_VALID_BTN_ID:
         proto_index = int(args[3])
         if not validate_protocol(job_id, proto_index):
             out[1] = "danger-An error occurred while validating protocol definition on server"
         else:
+            # strip the leading '** ' off the label for the just-validated protocol
             options = args[-2]
-            proto_name = options[proto_index]['label'][3:]   # strip off the leading '** ' now that it's validated
+            proto_name = options[proto_index]['label'][3:]
             options[proto_index] = {'label': proto_name, 'value': str(proto_index)}
-            out[2] = "\u2713 Validated"
-            out[3] = True
-            out[4] = dict(display='none')
             out[5] = options
+
+            # update alert to reflect fact that we just validated a protocol
             ok, ready, msg = ready_to_commit(job_id)
             out[1] = f"{'danger' if not ok else ('success' if ready else 'warning')}-{msg}"
+
+            # preferably, load a different protocol that's not yet validated. However, if there aren't any unvalidated
+            # protocols left or an error occurs retrieving it, just update the display for the current protocol to
+            # reflect that it's now validated.
+            next_proto: Optional[ProtocolCandidate] = None
+            proto_index = 0
+            while proto_index < len(options) and not options[proto_index]['label'].startswith('** '):
+                proto_index += 1
+            if proto_index < len(options):
+                next_proto = protocol_definition(job_id, proto_index)
+            if next_proto is None:
+                out[2] = "\u2713 Validated"
+                out[3] = True
+                out[4] = dict(display='none')
+            else:
+                out[0] = _layout_protocol_div(next_proto)
+                out[6] = str(proto_index)
     return tuple(out)
 
 
 @callback(
-    [Output(_UNIT_DIV_ID, 'children'), Output(_UNIT_ALERT_DIV, 'children')],
+    [Output(_UNIT_DIV_ID, 'children'), Output(_UNIT_ALERT_DIV, 'children'), Output(_UNIT_SELECT_ID, 'value')],
     [Input(_UNIT_SELECT_ID, 'value'), Input(_UNIT_TYPE_SELECT_ID, "value"), Input(_UNIT_TYPE_APPLY_ALL_ID, "n_clicks")],
     [State(_UNIT_TYPE_SELECT_ID, 'value'), State(_UNIT_SELECT_ID, 'value'), State(_REVIEW_TITLE_ID, "children")]
 )
@@ -1121,9 +1144,9 @@ def update_unit(*args):
     if trigger == _UNIT_SELECT_ID:
         unit: OmniplexUnit = metrics_for_neural_unit(job_id, int(args[0]))
         if unit:
-            return _layout_unit_div(unit), no_update
+            return _layout_unit_div(unit), no_update, no_update
         else:
-            return no_update, "danger-An error occurred while retrieving neural unit metrics from server"
+            return no_update, "danger-An error occurred while retrieving neural unit metrics from server", no_update
     elif (trigger == _UNIT_TYPE_SELECT_ID) or (trigger == _UNIT_TYPE_APPLY_ALL_ID):
         unit_idx = -1 if (trigger == _UNIT_TYPE_APPLY_ALL_ID) else int(args[-2])
         nt_id = int(args[1] if trigger == _UNIT_TYPE_SELECT_ID else args[-3])
@@ -1131,10 +1154,15 @@ def update_unit(*args):
         if ok:
             ok, ready, msg = ready_to_commit(job_id)
             msg = f"{'danger' if not ok else ('success' if ready else 'warning')}-{msg}"
+            if ok and trigger == _UNIT_TYPE_SELECT_ID:
+                # Automatically move forward to the next unit in list, if there is one
+                unit: OmniplexUnit = metrics_for_neural_unit(job_id, unit_idx+1)
+                if unit is not None:
+                    return _layout_unit_div(unit), no_update, str(unit_idx+1)
         else:
             msg = "danger-An error occurred while updating neural unit type on server"
-        return no_update, msg
-    return no_update, no_update
+        return no_update, msg, no_update
+    return no_update, no_update, no_update
 
 
 @callback(

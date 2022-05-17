@@ -1590,7 +1590,7 @@ def metrics_for_neural_unit(job_id: str, index: int) -> Optional[OmniplexUnit]:
             were culled from the archive during preprocessing.
 
     Returns:
-        The requested neural unit. Returns None if the operation failed for whatever reason.
+        The requested neural unit. Returns None if index invalid or the operation failed for whatever reason.
     """
     try:
         conn = get_config().redis_conn
@@ -1599,7 +1599,7 @@ def metrics_for_neural_unit(job_id: str, index: int) -> Optional[OmniplexUnit]:
             pipe.lindex(f"{UNITTYPES_NS}{job_id}", index)
             raw_unit, raw_type = pipe.execute()
         if (raw_unit is None) or (raw_type is None):
-            raise Exception(f"Cached neural unit metrics not found at index {index}")
+            return None
         unit: OmniplexUnit = pickle.loads(raw_unit)
         type_id: int = int(raw_type.decode('utf-8'))
         unit.neuron_type = None if type_id == -1 else type_id

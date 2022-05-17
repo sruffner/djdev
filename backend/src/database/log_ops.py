@@ -16,6 +16,11 @@ The operations log is currently implemented as a single log file that continues 
 may be necessary to divide it into a sequence of log files: database_ops.log.N, where the integer extension indicates
 the order in which the files were written.
 
+**Log entries are serialized using the standard python pickle module.** Since the database log is internal to the
+portal backend and not exposed to external input, this is considered a safe usage of pickle. One issue for the future
+is resilience in the face of changing the format of log entries or adding new kinds of database information to them. The
+current implementation is rather NON-resilient!
+
 The database operations log, like the database itself, is a global resource. Since replicas of the portal backend may
 be running simultaneously in the cloud-deployed portal application, it is possible that more than one replica (process)
 could try to write the log at the same time. In an effort to prevent this, we implement an interprocess lock using a

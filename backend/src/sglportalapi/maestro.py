@@ -30,13 +30,7 @@ SAMPLE USAGE::
     with open(file_path, 'rb') as f:
         data_file = maestro_file.DataFile.load(f.read(), file_path.name)
 
-
-TODO: Parse per-segment fixation accuracy and grace period and include in Trial.Segment. But because Trial is preserved
-in pickled form in the portal database and in session preprocessing results, this should be done BEFORE the portal
-does into "production.
-
-@author: sruffner
-@created: 08dec2020
+Author: sruffner
 """
 
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
@@ -1606,6 +1600,12 @@ class Trial(NamedTuple):
             """ Digital output channel number for marker pulse delivered at segment start (-1 if no marker pulse). """
             self.fix1: int = -1
             self.fix2: int = -1
+            self.fixacc_h: float = 0.0
+            """ Horizontal fixation accuracy during segment in visual deg (if fixation enforced during segment). """
+            self.fixacc_v: float = 0.0
+            """ Vertical fixation accuracy during segment in visual deg (if fixation enforced during segment). """
+            self.grace: int = 0
+            """ Grace period during which fixation is not enforced, in ms (0 = no grace period). """
             self.xy_update_intv: int = 4
             """ XYScope update interval for segment, in milliseconds. """
             self.tgt_on: List[bool] = [False for _ in range(num_targets)]
@@ -1665,6 +1665,12 @@ class Trial(NamedTuple):
                 return self.fix1
             elif param_type == SegParamType.FIX_TGT2:
                 return self.fix2
+            elif param_type == SegParamType.FIXACC_H:
+                return self.fixacc_h
+            elif param_type == SegParamType.FIXACC_V:
+                return self.fixacc_v
+            elif param_type == SegParamType.GRACE_PER:
+                return self.grace
             elif param_type == SegParamType.XY_UPDATE_INTV:
                 return self.xy_update_intv
             elif param_type == SegParamType.TGT_ON_OFF:
@@ -1715,6 +1721,12 @@ class Trial(NamedTuple):
                 self.fix1 = int(value)
             elif param_type == SegParamType.FIX_TGT2:
                 self.fix2 = int(value)
+            elif param_type == SegParamType.FIXACC_H:
+                self.fixacc_h = float(value)
+            elif param_type == SegParamType.FIXACC_V:
+                self.fixacc_v = float(value)
+            elif param_type == SegParamType.GRACE_PER:
+                self.grace = int(value)
             elif param_type == SegParamType.XY_UPDATE_INTV:
                 self.xy_update_intv = int(value)
             elif param_type == SegParamType.TGT_ON_OFF:
@@ -1748,17 +1760,19 @@ class Trial(NamedTuple):
             """
             Generate a summary of this trial segment for display purposes only. Returns a dictionary with the following
             fields: 'dur' is the segment duration in ms (int); 'fix1' and 'fix2' are the target indices of the two
-            designated fixation targets during segment (int; -1 = 'None'); 'xy_update' is the XYScope update interval
-            (if applicable) during segment, in ms (int); 'marker' is the DO pulse channel on which marker pulse is
-            delivered at segment start (int; -1 = 'None'). Lastly, trajectories' is a list, with the i-the element a
-            dictionary describing the trajectory of the i-th target during the segment: 'on' indicates whether that
-            target is on during the segment (bool), 'vstab' is a description of the target's velocity stabilization
-            status (str), 'pos' is the target's (x,y) position change in visual degrees at the start of the segment,
-            including whether that change is relative or absolute (str), 'vel' is the target's (x,y) velocity in
-            deg/sec, 'acc' is its (x,y) acceleration in deg/sec^2, 'patvel' is its (x,y) pattern velocity, and 'patacc'
-            is its pattern acceleration.
+            designated fixation targets during segment (int; -1 = 'None'); 'fixacc_h' and 'fixacc_v' set the fixation
+            window size in deg (float); 'grace' is the grace period in ms (int, 0 = no grace period); 'xy_update' is the
+            XYScope update interval (if applicable) during segment, in ms (int); 'marker' is the DO pulse channel on
+            which marker pulse is delivered at segment start (int; -1 = 'None'). Lastly, trajectories' is a list, with
+            the i-the element a dictionary describing the trajectory of the i-th target during the segment: 'on'
+            indicates whether that target is on during the segment (bool), 'vstab' is a description of the target's
+            velocity stabilization status (str), 'pos' is the target's (x,y) position change in visual degrees at the
+            start of the segment, including whether that change is relative or absolute (str), 'vel' is the target's
+            (x,y) velocity in deg/sec, 'acc' is its (x,y) acceleration in deg/sec^2, 'patvel' is its (x,y) pattern
+            velocity, and 'patacc' is its pattern acceleration.
             """
-            out = {'dur': self.dur, 'fix1': self.fix1, 'fix2': self.fix2, 'xy_update': self.xy_update_intv,
+            out = {'dur': self.dur, 'fix1': self.fix1, 'fix2': self.fix2,  'fixacc_h': self.fixacc_h,
+                   'fixacc_v': self.fixacc_v, 'grace': self.grace, 'xy_update': self.xy_update_intv,
                    'marker': self.pulse_ch}
             trajectories = list()
             for i in range(self.num_targets()):
@@ -1853,12 +1867,12 @@ class Trial(NamedTuple):
         culled from a Maestro data file. NOTE: We DO NOT invert the trial trajectory parameters IAW the global target
         transform found in the file header. Because the "similarity test" for two trial instances now requires that
         they have the same transform, there is no need to do so.
+
         Args:
             codes: The trial codes culled from data file
             header: The data file header
             targets: The participating trial target list.
             sections: List of tagged sections, or None if no sections are defined.
-
         Returns:
             The reconstructed trial definition.
         """
@@ -2005,6 +2019,13 @@ class Trial(NamedTuple):
                         # select/deselect a target as fixation target #2 (N=2)
                         curr_segment.fix2 = codes[code_idx+1].code
                         code_idx += 2
+                    elif tc.code == TC_FIX_ACCURACY:
+                        # set H, V fixation accuracy and possibly grace period
+                        curr_segment.fixacc_h = float(codes[code_idx + 1].code) / TC_SLO_SCALE2
+                        curr_segment.fixacc_v = float(codes[code_idx + 1].time) / TC_SLO_SCALE2
+                        if tc.time > seg_start_time:
+                            curr_segment.grace = tc.time - seg_start_time
+                        code_idx += 2
                     elif tc.code == TC_PULSE_ON:
                         # at segment start, deliver marker pulse on specified DO channel (N=2
                         curr_segment.pulse_ch = codes[code_idx+1].code
@@ -2012,7 +2033,7 @@ class Trial(NamedTuple):
                     elif tc.code in [TC_ADC_OFF, TC_CHECK_RESP_OFF, TC_FAILSAFE, TC_START_TRIAL]:
                         # N=1 code groups that are not needed to prepare trial object
                         code_idx += 1
-                    elif tc.code in [TC_FIX_ACCURACY, TC_REWARD_LEN, TC_MID_TRIAL_REW, TC_CHECK_RESP_ON, TC_RANDOM_SEED,
+                    elif tc.code in [TC_REWARD_LEN, TC_MID_TRIAL_REW, TC_CHECK_RESP_ON, TC_RANDOM_SEED,
                                      TC_XY_TARGET_USED]:
                         # N=2 code groups that are not needed to prepare trial object
                         code_idx += 2
@@ -2154,7 +2175,7 @@ class Trial(NamedTuple):
         sections, same perturbations, and the same global target transforms. Recording must start on the same segment
         in both trials. Per-segment marker pulse channel, fixation target designations, and XYScope update interval
         (if XYScope used) must match. Per-segment, per-target on/off states, relative/absolute position flags, and
-        velocity stabilization masks must also match.
+        velocity stabilization masks must also match. Per-segment fixation accuracy and grace period are NOT considered.
 
         Args:
             other: The trial to compare.
@@ -2259,7 +2280,9 @@ class Trial(NamedTuple):
         of these errors, two instances of the same trial protocol presented with two different target transforms
         could have slightly different target trajectory parameters.
 
-        For two trials to be comparable, they must be similar enough -- see is_similar_to().
+        For two trials to be comparable, they must be similar enough -- see is_similar_to(). Fixation accuracy and grace
+        period are currently excluded from consideration in the similarity test, so those parameters will never appear
+        in a list of segment table differences.
 
         Args:
             other: The other trial. Must have the same number of targets as this segment.
@@ -2435,26 +2458,30 @@ class SegParamType(DocEnum):
     MARKER = 2, "Channel on which marker pulse is delivered at segment start (if any)"
     FIX_TGT1 = 3, "Index position (zero-based) of target designated as the first fixation target"
     FIX_TGT2 = 4, "Index position (zero-based) of target designated as the second fixation target"
-    XY_UPDATE_INTV = 5, "XYScope update interval during segment (milliseconds)"
-    TGT_ON_OFF = 6, "Target on/off state"
-    TGT_REL = 7, "Target position change relative or absolute"
-    TGT_VSTAB = 8, "Target velocity stabilization state"
-    TGT_POS_H = 9, "Horizontal target position change at segment start (degrees)"
-    TGT_POS_V = 10, "Vertical target position change at segment start (degrees)"
-    TGT_VEL_H = 11, "Horizontal target velocity during segment (deg/sec)"
-    TGT_VEL_V = 12, "Vertical target velocity during segment (deg/sec)"
-    TGT_ACC_H = 13, "Horizontal target acceleration during segment (deg/sec^2)"
-    TGT_ACC_V = 14, "Vertical target acceleration during segment (deg/sec^2)"
-    TGT_PAT_VEL_H = 15, "Horizontal target pattern velocity during segment (deg/sec)"
-    TGT_PAT_VEL_V = 16, "Vertical target pattern velocity during segment (deg/sec)"
-    TGT_PAT_ACC_H = 17, "Horizontal target pattern acceleration during segment (deg/sec^2)"
-    TGT_PAT_ACC_V = 18, "Vertical target pattern acceleration during segment (deg/sec^2)"
+    FIXACC_H = 5, "Horizontal fixation accuracy in visual degrees (if enforced)"
+    FIXACC_V = 6, "Vertical fixation accuracy in visual degrees (if enforced)"
+    GRACE_PER = 7, "Grace period for segment (milliseconds; 0 = no grace period)"
+    XY_UPDATE_INTV = 8, "XYScope update interval during segment (milliseconds)"
+    TGT_ON_OFF = 9, "Target on/off state"
+    TGT_REL = 10, "Target position change relative or absolute"
+    TGT_VSTAB = 11, "Target velocity stabilization state"
+    TGT_POS_H = 12, "Horizontal target position change at segment start (degrees)"
+    TGT_POS_V = 13, "Vertical target position change at segment start (degrees)"
+    TGT_VEL_H = 14, "Horizontal target velocity during segment (deg/sec)"
+    TGT_VEL_V = 15, "Vertical target velocity during segment (deg/sec)"
+    TGT_ACC_H = 16, "Horizontal target acceleration during segment (deg/sec^2)"
+    TGT_ACC_V = 17, "Vertical target acceleration during segment (deg/sec^2)"
+    TGT_PAT_VEL_H = 18, "Horizontal target pattern velocity during segment (deg/sec)"
+    TGT_PAT_VEL_V = 19, "Vertical target pattern velocity during segment (deg/sec)"
+    TGT_PAT_ACC_H = 20, "Horizontal target pattern acceleration during segment (deg/sec^2)"
+    TGT_PAT_ACC_V = 21, "Vertical target pattern acceleration during segment (deg/sec^2)"
 
     def is_target_trajectory_parameter(self) -> bool:
         """
         Does this SegParamType identify a target trajectory parameter within a Maestro trial's segment table?
         """
         return self not in [SegParamType.DURATION, SegParamType.MARKER, SegParamType.FIX_TGT1, SegParamType.FIX_TGT2,
+                            SegParamType.FIXACC_H, SegParamType.FIXACC_V, SegParamType.GRACE_PER,
                             SegParamType.XY_UPDATE_INTV]
 
     def can_vary_randomly(self) -> bool:
@@ -2507,11 +2534,14 @@ class Protocol(NamedTuple):
         the protocol. Typically, this will contain zero or just a single parameter.
 
         md5_digest (str) - The hexadecimal character digest of the MD5 hash for the protocol object. It is 32 characters
-        long and serves to uniquely identify the protocol. Currently, the hash includes the following aspects of a trial
-        protocol: trial's full name (including set and subset, if applicable), # of segments, the participating target
-        list, any defined perturbations and tagged sections, and the index of the segment when recording started. The
-        detailed segment table is NOT part of the hash digest, nor is the 'diffs' attribute listing any 'random
-        variables' in the trial protocol.
+            long and serves to uniquely identify the protocol. Currently, the hash includes the following aspects of a
+            trial protocol: trial's full name (including set and subset, if applicable), the participating target list,
+            any defined perturbations and tagged sections, and the index of the segment when recording started. The
+            detailed segment table is ALSO part of the hash digest, with the exception of per-segment fixation accuracy
+            (H and V), per-segment grace period, and any target trajectory parameter that is a random variable.
+
+    Fixation accuracy and grace period are not included in the hash because they are not considered when determining
+    whether two different trial reps are "similar", ie, instances of the same Maestro trial protocol.
     """
     trial: Trial
     rvs: List[SegParam]
@@ -2520,7 +2550,7 @@ class Protocol(NamedTuple):
     @staticmethod
     def from_candidate(candidate: ProtocolCandidate) -> Protocol:
         # calculating the (hopefully unique!) MD5 hash digest for the protocol. Note that all segment table parameters
-        # are included EXCEPT those that are protocol RVs.
+        # are included EXCEPT fixation accuracy and grace period, plus any params that are protocol RVs.
         hash_attrs = [candidate.trial.path_name(), candidate.trial.record_seg, hash(candidate.trial.global_transform),
                       [hash(tgt) for tgt in candidate.trial.targets],
                       [hash(pert) for pert in candidate.trial.perts],
@@ -2533,7 +2563,8 @@ class Protocol(NamedTuple):
                     for tgt_idx in range(num_targets):
                         if not (SegParam(param_type, seg_idx, tgt_idx) in candidate.rvs):
                             seg_params.append(segment.value_of(param_type, tgt_idx))
-                elif not (SegParam(param_type, seg_idx, -1) in candidate.rvs):
+                elif not ((param_type in [SegParamType.FIXACC_H, SegParamType.FIXACC_V, SegParamType.GRACE_PER]) or
+                          (SegParam(param_type, seg_idx, -1) in candidate.rvs)):
                     seg_params.append(segment.value_of(param_type, -1))
             hash_attrs.append(seg_params)
 
