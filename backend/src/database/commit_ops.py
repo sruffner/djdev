@@ -642,8 +642,8 @@ def preprocess_commit_job(job_id: str) -> bool:
     The list of neural units culled from the session data archive during pre-processing. Includes information required
     to prepare an entry in the Session.Neuron part table for each neural unit.
     """
-    proto_candidates: List[maestro.ProtocolCandidate]
-    """ The list of trial protocol candidates culled from the session data archive during pre-processing. """
+    protocols: List[maestro.Protocol]
+    """ The list of trial protocol culled from the session data archive during pre-processing. """
     session_info: SessionMetaData = SessionMetaData()
     """
     Metadata about session that is partially initialized during preprocessing phase, then reviewed and updated by user
@@ -683,7 +683,7 @@ def preprocess_commit_job(job_id: str) -> bool:
                     pl2s_archived.append(info)
                 elif data_file_name_pattern.search(info.filename) is not None:
                     sample_maestro_file_name = info.filename
-                    header = maestro.DataFileHeader.parse_header(archive.read(info))
+                    header = maestro.DataFileHeader(archive.read(info))
                     file_index = int(info.filename[-4:])
                     header_timestamp = header.timestamp_ms if header.version >= 21 else None
                     if session_date is None:
@@ -703,22 +703,13 @@ def preprocess_commit_job(job_id: str) -> bool:
 
             if _background_job_update(job_id, "Processing archive for trial protocols..."):
                 return False
-            proto_candidates, file_to_proto = \
-                maestro.ProtocolCandidate.extract_protocols_from_session_data(archive)
-            if len(proto_candidates) == 0:
+            existing_protos = set([str(h) for h in fetch_attribute_values(DBTable.TRIAL_PROTOCOL, 'proto_hash')])
+            protocols, file_to_proto = \
+                maestro.Protocol.extract_protocols_from_session_data(archive, existing_protos)
+            if len(protocols) == 0:
                 raise Exception("No trial protocols found in session archive!")
             for filename, proto_index in file_to_proto.items():
                 trial_info[filename].proto_index = proto_index
-            # if any protocol candidate is based on 2 or more reps, compute the protocol's hash and check to see if
-            # that protocol already exists. For any candidate based on a single rep, or on 2 reps but does not match
-            # an existing protocol, the user must manually review and validate the protocol candidate before the
-            # session is committed to the database.
-            proto_hash_map = \
-                {ph: 1 for ph in fetch_attribute_values(DBTable.TRIAL_PROTOCOL, 'proto_hash')}
-            for proto in [p for p in proto_candidates if p.num_reps >= 2]:
-                test_proto = maestro.Protocol.from_candidate(proto)
-                if test_proto.md5_digest in proto_hash_map:
-                    proto.matches_existing = True
 
             unit_data: Optional[Dict[str, List[Any]]] = None
             if units_zip_info is not None:
@@ -764,7 +755,7 @@ def preprocess_commit_job(job_id: str) -> bool:
             # save preprocessing results in a pickle file in the staging directory
             if _background_job_update(job_id, "Saving results from preprocessing..."):
                 return False
-            results = {'protocols': proto_candidates, 'trials': trial_info, 'units': units,
+            results = {'protocols': protocols, 'trials': trial_info, 'units': units,
                        'session': session_info}
             with open(Path(_get_subfolder_in_staging_directory(job_id), PREPROC_FNAME), 'wb') as file:
                 pickle.dump(results, file)
@@ -775,8 +766,8 @@ def preprocess_commit_job(job_id: str) -> bool:
             info = pickle.dumps(session_info)
             proto_names = list()
             proto_defs = list()
-            for p in proto_candidates:
-                proto_names.append(f"{'** ' if p.needs_validation() else ''}{p.trial.path_name()}")
+            for p in protocols:
+                proto_names.append(f"{'** ' if p.is_candidate else ''}{p.trial.path_name}")
                 proto_defs.append(pickle.dumps(p))
             unit_metrics = list()
             unit_types = list()
@@ -1338,7 +1329,7 @@ def _initialize_session_metadata(
     if recent_session is None:
         rig_ids = fetch_attribute_values(DBTable.RIG, 'rig_id')
         study_ids = fetch_attribute_values(DBTable.STUDY, 'study_id')
-        default_rig_id = rig_ids and (len(rig_ids) > 0) and rig_ids[0]
+        default_rig_id = rig_ids and (len(rig_ids) > 0) and int(rig_ids[0])
         default_study_id = study_ids and (len(study_ids) > 0) and int(study_ids[0])   # fetch returns np.int64 !!
     default_ba_id = recent_ephys and recent_ephys['ba_id']
     if recent_ephys is None:
@@ -1476,21 +1467,22 @@ def protocol_names(job_id: str) -> Optional[List[str]]:
         return None
 
 
-def protocol_definition(job_id: str, index: int) -> Optional[maestro.ProtocolCandidate]:
+def protocol_definition(job_id: str, index: int) -> Optional[maestro.Protocol]:
     """
-    Get the full definition of a trial protocol "candidate" culled during pre-processing of the session data ZIP
-    archive for the specified commit job.
+    Get the full definition of a trial protocol culled during pre-processing of the session data ZIP archive for the
+    specified commit job.
 
     This information is available ONLY during the "Review" phase of a commit job -- after pre-processing and before the
     actual database commit begins. In concert with protocol_names(), this method provides a mechanism by which the
-    client front-end can present a user interface for reviewing and validating each trial protocol candidate.
+    client front-end can present a user interface for reviewing each trial protocol and validating any protcol that
+    requires manual validation (1 or 2 reps encountered, and does not match an existing protocol in the database).
 
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
         index: The zero-based index of the protocol candidate requested. IMPORTANT: This corresponds to the protocol's
             ordinal position in the list returned by protocol_names().
     Returns:
-        The requested trial protocol candidate. Returns None if operation fails.
+        The requested trial protocol. Returns None if operation fails.
     """
     try:
         raw_proto = get_config().redis_conn.lindex(f"{PROTODEFS_NS}{job_id}", index)
@@ -1503,18 +1495,18 @@ def protocol_definition(job_id: str, index: int) -> Optional[maestro.ProtocolCan
         return None
 
 
-def add_rv_to_protocol(job_id: str, index: int, rv: maestro.SegParam) -> Optional[maestro.ProtocolCandidate]:
+def add_rv_to_protocol(job_id: str, index: int, rv: maestro.SegParam) -> Optional[maestro.Protocol]:
     """
-    Add a random variable to the definition of a trial protocol candidate culled during preprocessing of the session
-    data ZIP archive for the specified commit job. This operation is available only during the review phase of the job,
-    when the user interactively reviews and edits information required before the experiment session  can be committed
-    to the portal database.
+    Add a random variable to the definition of a trial protocol culled during preprocessing of the session data ZIP
+    archive for the specified commit job. This operation is available only during the review phase of the job, when the
+    user interactively reviews and edits information required before the experiment session can be committed o the
+    portal database.
 
-    When a protocol candidate's definition is based on fewer than 3 trial reps over the course of a session, AND it
-    does not match an existing trial protocol in the lab database, the user must validate the definition before
-    the protocol and the session can be committed to the database. Part of validation is adding any missing random
-    variables that are part of that definition. When only 1 rep is processed, it is impossible to identify any
-    random variables; with only 2 reps, it's possible we might miss one.
+    When a protocol definition is based on fewer than 3 trial reps over the course of a session, AND it does not match
+    an existing trial protocol in the lab database, it is considered a "candiaate" protocol. The user must validate the
+    definition before the protocol and the session can be committed to the database. Part of validation may require
+    adding any missing random variables that are part of that definition. When only 1 rep is processed, it is impossible
+    to identify any random variables; with only 2 reps, it's possible we might miss one.
 
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
@@ -1528,11 +1520,11 @@ def add_rv_to_protocol(job_id: str, index: int, rv: maestro.SegParam) -> Optiona
         raw_proto = conn.lindex(f"{PROTODEFS_NS}{job_id}", index)
         if raw_proto is None:
             raise Exception(f"Cached protocol definition not found at index {index}")
-        proto_candidate: maestro.ProtocolCandidate = pickle.loads(raw_proto)
-        if not proto_candidate.add_random_variable(rv):
-            raise Exception("Invalid random variable specification")
-        conn.lset(f"{PROTODEFS_NS}{job_id}", index, pickle.dumps(proto_candidate))
-        return proto_candidate
+        proto: maestro.Protocol = pickle.loads(raw_proto)
+        if not proto.add_random_variable(rv):
+            raise Exception("Invalid random variable specification, or protocol is already validated")
+        conn.lset(f"{PROTODEFS_NS}{job_id}", index, pickle.dumps(proto))
+        return proto
     except Exception as e:
         _logger.error(f"Error while adding RV to trial protocol definition for commit job {job_id}: {str(e)}",
                       exc_info=True)
@@ -1541,15 +1533,14 @@ def add_rv_to_protocol(job_id: str, index: int, rv: maestro.SegParam) -> Optiona
 
 def validate_protocol(job_id: str, index: int) -> bool:
     """
-    Validate the definition of a trial protocol candidate culled during preprocessing of of the session data ZIP archive
-    for the specified commit job. This operation is available only during the review phase of the job, when the user
-    interactively reviews and edits information required before the experiment session can be committed to the portal
-    database.
+    Validate the definition of a trial protocol culled during preprocessing of of the session data ZIP archive for the
+    specified commit job. This operation is available only during the review phase of the job, when the user reviews and
+    edits information required before the experiment session can be committed to the portal database.
 
-    When a protocol candidate's definition is based on fewer than 3 trial reps over the course of a session, AND it
-    does not match an existing trial protocol in the lab database, the user must manually add any missing random
-    variables in the protocol definition and mark the protocol candidate as valid before the protocol and the
-    session can be committed to the database.
+    When a protocol's definition is based on fewer than 3 trial reps over the course of a session, AND it does not match
+    an existing trial protocol in the lab database, the user must manually add any missing random variables in the
+    protocol definition and mark the protocol candidate as valid before the protocol and the session can be committed to
+    the database.
 
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
@@ -1562,12 +1553,12 @@ def validate_protocol(job_id: str, index: int) -> bool:
         raw_proto = conn.lindex(f"{PROTODEFS_NS}{job_id}", index)
         if raw_proto is None:
             raise Exception(f"Cached protocol definition not found at index {index}")
-        proto_candidate: maestro.ProtocolCandidate = pickle.loads(raw_proto)
-        proto_candidate.user_validated = True
+        proto: maestro.Protocol = pickle.loads(raw_proto)
+        proto.validate()
         # we cache the updated protocol candidate definition AND remove the '** ' from the cached protocol path name
         with conn.pipeline() as pipe:
-            pipe.lset(f"{PROTODEFS_NS}{job_id}", index, pickle.dumps(proto_candidate))
-            pipe.lset(f"{PROTONAMES_NS}{job_id}", index, proto_candidate.trial.path_name())
+            pipe.lset(f"{PROTODEFS_NS}{job_id}", index, pickle.dumps(proto))
+            pipe.lset(f"{PROTONAMES_NS}{job_id}", index, proto.trial.path_name)
             pipe.execute()
         return True
     except Exception as e:
@@ -1839,8 +1830,8 @@ def finish_commit_job(job_id: str) -> bool:
     The list of neural units culled from the session data archive during pre-processing. Includes information required
     to prepare an entry in the Session.Neuron part table for each neural unit.
     """
-    proto_candidates: List[maestro.ProtocolCandidate]
-    """ The list of trial protocol candidates culled from the session data archive during pre-processing. """
+    protocols: List[maestro.Protocol]
+    """ The list of trial protocols culled from the session data archive during pre-processing. """
     session_info: SessionMetaData
     """
     Metadata about session that is partially initialized during preprocessing phase, then reviewed and updated by user
@@ -1888,10 +1879,10 @@ def finish_commit_job(job_id: str) -> bool:
             _logger.debug(f"Commit job {job_id} failed: {msg}")
             _background_job_update(job_id, msg, CommitStateEnum.FAIL)
             return False
-        proto_candidates = [pickle.loads(proto_raw) for proto_raw in res[1]]
-        for p in proto_candidates:
-            if p.needs_validation():
-                msg = f"Error: At least one trial protocol ({p.trial.path_name()} still requires user validation!"
+        protocols = [pickle.loads(proto_raw) for proto_raw in res[1]]
+        for p in protocols:
+            if p.is_candidate:
+                msg = f"Error: At least one trial protocol ({p.trial.path_name} still requires user validation!"
                 _logger.debug(f"Commit job {job_id} failed: {msg}")
                 _background_job_update(job_id, msg, CommitStateEnum.FAIL)
                 return False
@@ -1923,9 +1914,7 @@ def finish_commit_job(job_id: str) -> bool:
             for i, u in enumerate(units):
                 u.neuron_type = unit_types[i]
 
-        # convert all trial protocol candidates to the protocol objects that are added to the database. Then
-        # update the individual trial info to include the protocol's unique MD5 hexadecimal digest
-        protocols = [maestro.Protocol.from_candidate(c) for c in proto_candidates]
+        # update the individual trial info to include the corresponding protocol's unique MD5 hexadecimal digest
         for _, t_info in trial_info.items():
             protocol = protocols[t_info.proto_index]
             t_info.proto_hash = protocol.md5_digest
@@ -2164,7 +2153,7 @@ class _SessionCommitMgr(SessionCommitter):
                 # trial length according to Omniplex is more than 2ms off, fail.
                 maestro_omniplex_time_scaling = 1.0
                 if t_info.omniplex_start is not None:
-                    trial_length = (data_file.trial.record_start() + data_file.header.num_scans_saved - 1) / 1000.0
+                    trial_length = (data_file.trial.record_start + data_file.header.num_scans_saved - 1) / 1000.0
                     omniplex_length = t_info.omniplex_stop - t_info.omniplex_start
                     if abs(trial_length - omniplex_length) > 0.002:
                         raise Exception(f"Trial duration on Omniplex does not match Maestro trial "
@@ -2178,7 +2167,7 @@ class _SessionCommitMgr(SessionCommitter):
                     trial_header=pickle.dumps(data_file.header),
                     trial_filename=trial_filename,
                     trial_dur=data_file.header.num_scans_saved - 1,
-                    trial_record_start=data_file.trial.record_start(),
+                    trial_record_start=data_file.trial.record_start,
                     trial_success=((data_file.header.flags & maestro.FLAG_REWARD_EARNED) != 0),
                     trial_rewarded=((data_file.header.flags & maestro.FLAG_REWARD_GIVEN) != 0),
                     trial_rew1=data_file.header.reward_len1_ms,
@@ -2204,7 +2193,7 @@ class _SessionCommitMgr(SessionCommitter):
                     raise Exception(
                         f"Internal inconsistency: No trial protocol defined for trial in {trial_filename}")
                 rv_values: List[Any] = list()
-                for param in protocol.rvs:
+                for param in protocol.random_variables:
                     rv_value = data_file.trial.retrieve_segment_table_parameter_value(param)
                     if not rv_value:
                         raise Exception(
@@ -2253,7 +2242,7 @@ class _SessionCommitMgr(SessionCommitter):
                     for di_channel in data_file.events:
                         # convert event times from ms to sec and offset if event recording started after trial began
                         event_times = np.array(
-                            data_file.events[di_channel]) * 0.001 + data_file.trial.record_start()
+                            data_file.events[di_channel]) * 0.001 + data_file.trial.record_start
                         event_entry = dict(
                             session_key,
                             trial_idx=(num_inserted + 1),

@@ -356,7 +356,7 @@ class TrialRep:
                 out.append(f"{np.array2string(v, threshold=4)},\n")
             elif isinstance(v, Protocol):
                 p: Protocol = v
-                out.append(f"{p.trial.path_name()} [#segs={len(p.trial.segments)}, #tgts={len(p.trial.targets)}],\n")
+                out.append(f"{p.trial.path_name} [#segs={len(p.trial.segments)}, #tgts={len(p.trial.targets)}],\n")
             elif isinstance(v, dict):
                 out.append("{\n")
                 for k2, v2 in v.items():

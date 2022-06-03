@@ -235,7 +235,7 @@ def average_response_figure(session: Dict[str, Any], proto_hash: str, unit_id: O
     elif len(trial_data) < 3:
         return html.Div(dbc.Alert(f"Fewer than 3 successful trial reps ({len(trial_data)}) found for selected protocol",
                                   is_open=True))
-    elif not trial_data[0].protocol.can_aggregate_responses():
+    elif not trial_data[0].protocol.can_aggregate_responses:
         return html.Div(dbc.Alert("Selected protocol is not conducive to averaging across trial reps", is_open=True))
 
     protocol = trial_data[0].protocol
@@ -252,7 +252,7 @@ def average_response_figure(session: Dict[str, Any], proto_hash: str, unit_id: O
         None if (unit_id is None) else [td.instantaneous_firing_rate(unit_id, smooth=True) for td in trial_data]
     firing_rate = None
     sem_fr = None
-    if len(protocol.rvs) == 0:
+    if len(protocol.random_variables) == 0:
         hevel = np.nanmean(hevel_list, axis=0)
         vevel = np.nanmean(vevel_list, axis=0)
         if firing_rate_list:
@@ -265,7 +265,7 @@ def average_response_figure(session: Dict[str, Any], proto_hash: str, unit_id: O
         # the RV is the duration of a segment -- not necessarily the first one. For the random-duration segment, we
         # only average over the last T ms of that segment, where T is the minimum observed duration across trial reps.
         # This implies a "discontinuity" in the mean response traces.
-        vary_dur_seg = protocol.rvs[0].seg_idx
+        vary_dur_seg = protocol.random_variables[0].seg_idx
         min_dur = int(min([td.trial_rvs[0] for td in trial_data]) + 0.5)
         prelude = sum([protocol.trial.segments[i].dur for i in range(vary_dur_seg)])
 
@@ -449,7 +449,7 @@ def discharge_statistics_figure(session: Dict[str, Any], proto_hash: str, unit_i
             raise Exception("Failed to retrieve data")
         protocol = trial_data[0].protocol
         num_segs = len(protocol.trial.segments)
-        rand_dur_seg = -1 if len(protocol.rvs) == 0 else protocol.rvs[0].seg_idx
+        rand_dur_seg = -1 if len(protocol.random_variables) == 0 else protocol.random_variables[0].seg_idx
         seg_durations = [seg.dur for seg in protocol.trial.segments]
         for td in trial_data:
             spike_times = td.neuronal[unit_id]
@@ -525,8 +525,8 @@ def trial_target_trajectory_figure(proto: Protocol, rand_seg_dur: int = 0) -> go
         The prepared Plotly figure displaying the computed trial target trajectories.
     """
     rv_seg_idx = -1
-    if (len(proto.rvs) == 1) and (proto.rvs[0].type == SegParamType.DURATION):
-        rv_seg_idx = proto.rvs[0].seg_idx
+    if (len(proto.random_variables) == 1) and (proto.random_variables[0].type == SegParamType.DURATION):
+        rv_seg_idx = proto.random_variables[0].seg_idx
         seg_dur = rand_seg_dur if rand_seg_dur > 0 else proto.trial.segments[rv_seg_idx].dur
         fix1_pos, fix2_pos = proto.compute_fixation_target_trajectories([seg_dur])
         fix1_on, fix2_on = proto.compute_fixation_target_on_epochs([seg_dur])

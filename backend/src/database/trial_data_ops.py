@@ -49,8 +49,8 @@ def trial_protocols_for_session(session_key: Dict[str, AttributeValue], aggregat
                     proto = get_trial_protocol_definition(h)
                     if proto is None:
                         return None
-                    elif proto.can_aggregate_responses():
-                        out[h] = proto.trial.path_name()
+                    elif proto.can_aggregate_responses:
+                        out[h] = proto.trial.path_name
         else:
             restriction = [f"proto_hash = '{h}'" for h in unique_proto_hashes]
             protocols = fetch_any_proj(DBTable.TRIAL_PROTOCOL, restriction, ['proto_name', 'proto_set', 'proto_subset'])
@@ -99,8 +99,8 @@ def trial_protocols_for_neuron(neuron_key: Dict[str, AttributeValue], aggregate:
                     proto = get_trial_protocol_definition(h)
                     if proto is None:
                         return None
-                    elif proto.can_aggregate_responses():
-                        out[h] = proto.trial.path_name()
+                    elif proto.can_aggregate_responses:
+                        out[h] = proto.trial.path_name
         else:
             restriction = [f"proto_hash = '{h}'" for h in proto_hashes]
             protocols = fetch_any_proj(DBTable.TRIAL_PROTOCOL, restriction, ['proto_name', 'proto_set', 'proto_subset'])

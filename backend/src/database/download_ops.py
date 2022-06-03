@@ -385,7 +385,7 @@ def _save_trial_data_to_file(file_path: Path, trial_data: List[TrialData]) -> No
         td = trial_data.pop(0)
         curr_trial = dict(
             index=td.trial_idx,
-            protocol_name=td.protocol.trial.path_name(),
+            protocol_name=td.protocol.trial.path_name,
             duration_ms=td.duration_ms,
             record_start_ms=td.record_start_ms,
             success=td.success,

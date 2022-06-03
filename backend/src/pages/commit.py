@@ -47,7 +47,7 @@ from database.commit_ops import CommitStateEnum, initiate_session_commit, get_pe
     cancel_or_remove_commit_job, update_commit_job_on_archive_upload, commit_job_progress, CommitJobStatus, \
     SessionMetaData, session_metadata, update_session_metadata, ready_to_commit, protocol_names, protocol_definition, \
     add_rv_to_protocol, validate_protocol, OmniplexUnit, metrics_for_neural_unit, set_unit_type, commit_to_database
-from sglportalapi.maestro import Protocol, SegParam, SegParamType, ProtocolCandidate
+from sglportalapi.maestro import Protocol, SegParam, SegParamType, Target, Point2D
 from database.table_info import Column, DBTable, attribute_info
 from database.table_ops import fetch_restrict_proj, fetch_attribute_values, fetch_rows
 
@@ -504,7 +504,7 @@ def _layout_session_info_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card, i
 
 def _layout_trial_protocol_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card, Optional[str]]:
     proto_names: List[str]
-    initial_proto: Optional[ProtocolCandidate] = None
+    initial_proto: Optional[Protocol] = None
     err_msg: Optional[str] = None
     if job_id:
         proto_names = protocol_names(job_id)
@@ -547,16 +547,10 @@ _PROTO_RV_GROUP_ID = "review--proto-rv-form"
 """ ID of Bootstrap Form Group containing widgets for adding a random variable to the displayed trial protocol. """
 
 
-def _layout_protocol_div(proto_candidate: Optional[ProtocolCandidate]) -> List[Any]:
-    # NOTE: This has to work even if ProtocolCandidate is None, so that all widgets are realized -- since they appear
+def _layout_protocol_div(proto: Optional[Protocol]) -> List[Any]:
+    # NOTE: This has to work even if argumentsis None, so that all widgets are realized -- since they appear
     # in callbacks.
-    protocol: Optional[Protocol] = Protocol.from_candidate(proto_candidate) if proto_candidate else None
-    needs_validation = False
-    if proto_candidate:
-        needs_validation = (proto_candidate.num_reps == 1) or (proto_candidate.num_reps == 2
-                                                               and not proto_candidate.matches_existing)
-        needs_validation = needs_validation and not proto_candidate.user_validated
-
+    needs_validation = False if (proto is None) else proto.is_candidate
     valid_btn = dbc.Button("Validate" if needs_validation else "\u2713 Validated", id=_PROTO_VALID_BTN_ID,
                            disabled=(not needs_validation), size='sm')
     tool_tip = dbc.Tooltip(
@@ -564,14 +558,10 @@ def _layout_protocol_div(proto_candidate: Optional[ProtocolCandidate]) -> List[A
         "be manually verified by the user. Add any missing random variables (eg, a random-duration fixation "
         "segment) to the definition (if any), then press this button to validate the protocol.",
         target=_PROTO_VALID_BTN_ID)
-    reps_badge = dbc.Badge(
-        f"# reps = {proto_candidate.num_reps if proto_candidate else 0} "
-        f"{'; found match' if (proto_candidate and proto_candidate.matches_existing) else ''}",
-        color='info', class_name='ms-2 me-5'
-    )
+    reps_badge = dbc.Badge(f"# reps = {proto.num_reps if proto else 0} ", color='info', class_name='ms-2 me-5')
     add_rv_btn = dbc.Button("Add Random Var:", id=_PROTO_ADD_RV_BTN_ID, size='sm')
-    n_segs = len(proto_candidate.trial.segments) if proto_candidate else 0
-    n_tgts = len(proto_candidate.trial.targets) if proto_candidate else 0
+    n_segs = proto.trial.num_segments if proto else 0
+    n_tgts = proto.trial.num_targets if proto else 0
     select_rv_type = dbc.InputGroup([
         dbc.InputGroupText("Type"),
         dbc.Select(
@@ -589,11 +579,13 @@ def _layout_protocol_div(proto_candidate: Optional[ProtocolCandidate]) -> List[A
             value='0' if n_segs > 0 else None
         )
     ], size='sm')
+    tgt: Target
+    opts = [{'label': tgt.name, 'value': str(i)} for i, tgt in enumerate(proto.trial.targets)] if n_tgts > 0 else []
     tgt_select = dbc.InputGroup([
         dbc.InputGroupText("Target"),
         dbc.Select(
             id=_PROTO_RV_TGT_SELECT_ID,
-            options=[{'label': proto_candidate.trial.targets[i].name, 'value': str(i)} for i in range(n_tgts)],
+            options=opts,
             value='0' if n_tgts > 0 else None
         )
     ], size='sm')
@@ -609,7 +601,7 @@ def _layout_protocol_div(proto_candidate: Optional[ProtocolCandidate]) -> List[A
             style={} if needs_validation else dict(display='none')))
     ], justify='start', class_name='g-0 mt-3')
 
-    cmpt_list = display_trial_protocol_definition(protocol) if protocol else list()
+    cmpt_list = display_trial_protocol_definition(proto) if proto else list()
     cmpt_list.insert(0, validate_row)
     return cmpt_list
 
@@ -625,43 +617,37 @@ def display_trial_protocol_definition(proto: Protocol) -> List[Any]:
     Returns:
         A list of two components, a div and a Dash Datable, which should be embedded as children of an outer div.
     """
-    proto_summary = proto.summary()
-    segments = proto_summary['segments']
-    targets = proto_summary['targets']
-    target_names = [target_desc.split(':')[0] for target_desc in targets]  # THIS IS A HACK
-    perts = proto_summary['perts']
-    sections = proto_summary['sections']
-    rvs = proto_summary['rvs']
-
     badges = [
-        dbc.Badge(f"Record Seg: {proto_summary['record_seg']}", color="primary", class_name="me-3"),
-        dbc.Badge(f"Transform: {proto_summary['transform']}", color="primary", class_name="me-3"),
-        dbc.Badge(f"Targets: {len(target_names)}", id="disp_proto_targets", color="primary", class_name="me-3"),
-        dbc.Badge(f"Perturbations: {len(perts)}", id="disp_proto_perts", color="primary", class_name="me-3"),
-        dbc.Badge(f"Tagged Sects: {len(sections)}", id="disp_proto_sections", color="primary", class_name="me-3"),
-        dbc.Badge(f"Random Vars: {len(rvs)}", id="disp_proto_random_vars", color="primary"),
-        dbc.Tooltip([html.Div(f"{str(target)}") for target in targets],
+        dbc.Badge(f"Record Seg: {proto.trial.record_seg}", color="primary", class_name="me-3"),
+        dbc.Badge(f"Transform: {str(proto.trial.global_transform)}", color="primary", class_name="me-3"),
+        dbc.Badge(f"Targets: {proto.trial.num_targets}", id="disp_proto_targets", color="primary", class_name="me-3"),
+        dbc.Badge(f"Perturbations: {proto.trial.num_perturbations}", id="disp_proto_perts", color="primary",
+                  class_name="me-3"),
+        dbc.Badge(f"Tagged Sects: {proto.trial.num_tagged_sections}", id="disp_proto_sections", color="primary",
+                  class_name="me-3"),
+        dbc.Badge(f"Random Vars: {len(proto.random_variables)}", id="disp_proto_random_vars", color="primary"),
+        dbc.Tooltip([html.Div(f"{str(target)}") for target in proto.trial.targets],
                     target="disp_proto_targets", style={'max-width': '600px'})
     ]
-    if len(perts) > 0:
+    if proto.trial.num_perturbations > 0:
         badges.append(
-            dbc.Tooltip([html.Div(f"{str(pert)}") for pert in perts],
+            dbc.Tooltip([html.Div(f"{str(pert)}") for pert in proto.trial.perturbations],
                         target="disp_proto_perts", style={'max-width': '600px'})
         )
-    if len(sections) > 0:
+    if proto.trial.num_tagged_sections > 0:
         badges.append(
-            dbc.Tooltip([html.Div(f"{str(section)}") for section in sections],
+            dbc.Tooltip([html.Div(f"{str(section)}") for section in proto.trial.tagged_sections],
                         target="disp_proto_sections", style={'max-width': '600px'})
         )
-    if len(rvs) > 0:
+    if len(proto.random_variables) > 0:
         badges.append(
-            dbc.Tooltip([html.Div(f"{str(rv)}") for rv in rvs],
+            dbc.Tooltip([html.Div(f"{str(rv)}") for rv in proto.random_variables],
                         target="disp_proto_random_vars", style={'max-width': '600px'})
         )
 
     columns = [{"name": "", "id": "param"}]
     columns.extend([
-        {"name": f"Segment {i}", "id": f"seg_{i}"} for i in range(len(segments))
+        {"name": f"Segment {i}", "id": f"seg_{i}"} for i in range(proto.trial.num_segments)
     ])
 
     # NOTE: Any parameter that varies randomly in the trial protocol is represented by an asterisk '*' in the
@@ -672,47 +658,51 @@ def display_trial_protocol_definition(proto: Protocol) -> List[Any]:
     grace_period = {"param": "Grace Period (ms)"}
     xy_delta = {"param": "XYScope Intv (ms)"}
     marker = {"param": "Marker Pulse"}
+
+    target_names = [tgt.name for tgt in proto.trial.targets]
     tgt_on = [{"param": name} for name in target_names]
     tgt_vstab = [{"param": "VStab"} for _ in target_names]
     tgt_pos = [{"param": "Position (deg)"} for _ in target_names]
     tgt_vel_acc = [{"param": "Vel (d/s), Acc (d/s^2)"} for _ in target_names]
     tgt_pat = [{"param": "Pattern Vel, Acc"} for _ in target_names]
-    for i, seg in enumerate(segments):
+    for i, seg in enumerate(proto.trial.segments):
         seg_id = f"seg_{i}"
-        duration[seg_id] = "***" if SegParam(SegParamType.DURATION, i, -1) in proto.rvs else seg['dur']
-        fix_tgts[seg_id] = f"{'NONE' if seg['fix1'] < 0 else target_names[seg['fix1']]} , " \
-                           f"{'NONE' if seg['fix2'] < 0 else target_names[seg['fix2']]}"
-        fix_accuracy[seg_id] = f"({seg['fixacc_h']:.1f}, {seg['fixacc_v']:.1f})"
-        grace_period[seg_id] = f"{seg['grace']}"
-        xy_delta[seg_id] = seg['xy_update']
-        marker[seg_id] = "NONE" if seg['marker'] < 0 else f"DO{seg['marker']}"
-        for tgt_idx in range(len(target_names)):
-            trajectory = seg['trajectories'][tgt_idx]
-            tgt_on[tgt_idx][seg_id] = "ON" if trajectory['on'] else 'OFF'
-            tgt_vstab[tgt_idx][seg_id] = trajectory['vstab']
-            tgt_pos[tgt_idx][seg_id] = proto.trial.segments[i].tgt_pos[tgt_idx].as_string_with_wildcard(
-                (SegParam(SegParamType.TGT_POS_H, i, tgt_idx) in proto.rvs),
-                (SegParam(SegParamType.TGT_POS_V, i, tgt_idx) in proto.rvs))
-            tgt_pos[tgt_idx][seg_id] += " rel" if proto.trial.segments[i].tgt_rel[tgt_idx] else " abs"
-            tgt_vel_out = proto.trial.segments[i].tgt_vel[tgt_idx].as_string_with_wildcard(
-                (SegParam(SegParamType.TGT_VEL_H, i, tgt_idx) in proto.rvs),
-                (SegParam(SegParamType.TGT_VEL_V, i, tgt_idx) in proto.rvs))
-            tgt_acc_out = proto.trial.segments[i].tgt_acc[tgt_idx].as_string_with_wildcard(
-                (SegParam(SegParamType.TGT_ACC_H, i, tgt_idx) in proto.rvs),
-                (SegParam(SegParamType.TGT_ACC_V, i, tgt_idx) in proto.rvs))
+        duration[seg_id] = "***" if SegParam(SegParamType.DURATION, i, -1) in proto.random_variables else seg.dur
+        fix_tgts[seg_id] = f"{'NONE' if seg.fix1 < 0 else target_names[seg.fix1]} , " \
+                           f"{'NONE' if seg.fix2 < 0 else target_names[seg.fix2]}"
+        fix_accuracy[seg_id] = f"({seg.fixacc_h:.1f}, {seg.fixacc_v:.1f})"
+        grace_period[seg_id] = f"{seg.grace}"
+        xy_delta[seg_id] = seg.xy_update_intv
+        marker[seg_id] = "NONE" if seg.pulse_ch < 0 else f"DO{seg.pulse_ch}"
+        pt = Point2D()
+        for tgt_idx in range(proto.trial.num_targets):
+            tgt_on[tgt_idx][seg_id] = "ON" if seg.tgt_on(tgt_idx) else 'OFF'
+            tgt_vstab[tgt_idx][seg_id] = seg.tgt_vel_stab_as_string(tgt_idx)
+            pt.set_coords(seg.tgt_pos(tgt_idx))
+            tgt_pos[tgt_idx][seg_id] = pt.as_string_with_wildcard(
+                (SegParam(SegParamType.TGT_POS_H, i, tgt_idx) in proto.random_variables),
+                (SegParam(SegParamType.TGT_POS_V, i, tgt_idx) in proto.random_variables))
+            tgt_pos[tgt_idx][seg_id] += " rel" if seg.tgt_rel(tgt_idx) else " abs"
+            pt.set_coords(seg.tgt_vel(tgt_idx))
+            tgt_vel_out = pt.as_string_with_wildcard(
+                (SegParam(SegParamType.TGT_VEL_H, i, tgt_idx) in proto.random_variables),
+                (SegParam(SegParamType.TGT_VEL_V, i, tgt_idx) in proto.random_variables))
+            pt.set_coords(seg.tgt_acc(tgt_idx))
+            tgt_acc_out = pt.as_string_with_wildcard(
+                (SegParam(SegParamType.TGT_ACC_H, i, tgt_idx) in proto.random_variables),
+                (SegParam(SegParamType.TGT_ACC_V, i, tgt_idx) in proto.random_variables))
             tgt_vel_acc[tgt_idx][seg_id] = f"{tgt_vel_out}  {tgt_acc_out}"
-            tgt_pat_vel_out = proto.trial.segments[i].tgt_pat_vel[tgt_idx].as_string_with_wildcard(
-                (SegParam(SegParamType.TGT_PAT_VEL_H, i, tgt_idx) in proto.rvs),
-                (SegParam(SegParamType.TGT_PAT_VEL_V, i, tgt_idx) in proto.rvs))
+            pt.set_coords(seg.tgt_pat_vel(tgt_idx))
+            tgt_pat_vel_out = pt.as_string_with_wildcard(
+                (SegParam(SegParamType.TGT_PAT_VEL_H, i, tgt_idx) in proto.random_variables),
+                (SegParam(SegParamType.TGT_PAT_VEL_V, i, tgt_idx) in proto.random_variables))
+            pt.set_coords(seg.tgt_pat_acc(tgt_idx))
             tgt_pat_acc_out = proto.trial.segments[i].tgt_pat_acc[tgt_idx].as_string_with_wildcard(
-                (SegParam(SegParamType.TGT_PAT_ACC_H, i, tgt_idx) in proto.rvs),
-                (SegParam(SegParamType.TGT_PAT_ACC_V, i, tgt_idx) in proto.rvs))
+                (SegParam(SegParamType.TGT_PAT_ACC_H, i, tgt_idx) in proto.random_variables),
+                (SegParam(SegParamType.TGT_PAT_ACC_V, i, tgt_idx) in proto.random_variables))
             tgt_pat[tgt_idx][seg_id] = f"{tgt_pat_vel_out}  {tgt_pat_acc_out}"
-            # tgt_pos[tgt_idx][seg_id] = trajectory['pos']
-            # tgt_vel_acc[tgt_idx][seg_id] = f"{trajectory['vel']}  {trajectory['acc']}"
-            # tgt_pat[tgt_idx][seg_id] = f"{trajectory['patvel']}  {trajectory['patacc']}"
     rows = [duration, fix_tgts, fix_accuracy, grace_period, xy_delta, marker]
-    for i in range(len(target_names)):
+    for i in range(proto.trial.num_targets):
         rows.extend([tgt_on[i], tgt_vstab[i], tgt_pos[i], tgt_vel_acc[i], tgt_pat[i]])
 
     # the segment table rendered as a Dash DataTable...
@@ -720,14 +710,14 @@ def display_trial_protocol_definition(proto: Protocol) -> List[Any]:
     # that appear in that column. Use a brownish-yellow background to highlight the target name rows, which separate
     # the target trajectory sections in the segment table. Finally, use a green background to highlight any cell in
     # the segment table that houses a random variable.
-    tgt_name_row_indices = [6 + i*5 for i in range(len(target_names))]
+    tgt_name_row_indices = [6 + i*5 for i in range(proto.trial.num_targets)]
     style_data_conditional = [
         {'if': {'column_id': 'param'}, 'textAlign': 'right'},
         {'if': {'column_id': 'param', 'row_index': tgt_name_row_indices},
          'textDecoration': 'underline', 'textAlign': 'left'},
         {'if': {'row_index': tgt_name_row_indices}, 'backgroundColor': 'rgba(218,165,32,128)', 'color': 'black'}
     ]
-    for rv in proto.rvs:
+    for rv in proto.random_variables:
         seg_id = f"seg_{rv.seg_idx}"
         row_idx = 0
         if rv.type != SegParamType.DURATION:
@@ -1112,7 +1102,7 @@ def update_proto(*args):
             # preferably, load a different protocol that's not yet validated. However, if there aren't any unvalidated
             # protocols left or an error occurs retrieving it, just update the display for the current protocol to
             # reflect that it's now validated.
-            next_proto: Optional[ProtocolCandidate] = None
+            next_proto: Optional[Protocol] = None
             proto_index = 0
             while proto_index < len(options) and not options[proto_index]['label'].startswith('** '):
                 proto_index += 1

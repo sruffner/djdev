@@ -1043,13 +1043,13 @@ def _discharge_statistics_panel(unit_key: Dict[str, Any], proto_hash: str) -> ht
     elif len(trial_data) < 3:
         return html.Div(dbc.Alert(f"Fewer than 3 successful trial reps ({len(trial_data)} found for selected protocol",
                                   is_open=True))
-    elif not trial_data[0].protocol.can_aggregate_responses():
+    elif not trial_data[0].protocol.can_aggregate_responses:
         return html.Div(dbc.Alert("Selected protocol is not conducive to averaging across trial reps", is_open=True))
 
     # figure displaying fixation target position trajectories and ON epochs represents the trial rep with the minimum
     # observed duration for the random-duration segment (if the protocol has a random-duration segment)
     protocol = trial_data[0].protocol
-    min_dur = int(min([td.trial_rvs[0] for td in trial_data])) if len(protocol.rvs) > 0 else 0
+    min_dur = int(min([td.trial_rvs[0] for td in trial_data])) if len(protocol.random_variables) > 0 else 0
     proto_plot = trial_target_trajectory_figure(protocol, min_dur)
 
     # range slider selects the contiguous interval of trial segments over which the ACG and ISI are computed.
