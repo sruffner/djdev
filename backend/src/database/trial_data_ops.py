@@ -7,7 +7,7 @@ trial_data_ops.py: Operations that retrieve and collect trial response data from
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
 import functools
-import pickle
+import json
 from dataclasses import dataclass
 from datetime import date
 from typing import List, Union, Dict, Tuple, Optional
@@ -129,7 +129,7 @@ def get_trial_protocol_definition(proto_hash: str) -> Optional[maestro.Protocol]
     try:
         protocol_entry = fetch_one_row(DBTable.TRIAL_PROTOCOL, dict(proto_hash=proto_hash))
         if protocol_entry:
-            return pickle.loads(protocol_entry['proto_def'])
+            return maestro.Protocol.from_bytes(protocol_entry['proto_def'])
     except Exception as e:
         get_application_logger().error(str(e), exc_info=True)
     return None
@@ -234,7 +234,7 @@ def data_for_trial(trial_key: Dict[str, AttributeValue], unit_ids: Optional[List
         for response in neuronal_responses:
             if response['unit_id'] in unit_ids:
                 neuronal_field[response['unit_id']] = response['spike_times']
-        proto_def: maestro.Protocol = pickle.loads(proto_info['proto_def'])
+        proto_def: maestro.Protocol = maestro.Protocol.from_bytes(proto_info['proto_def'])
 
         trial_data: TrialData = TrialData(
             experimenter=trial_pk['experimenter'],
@@ -252,7 +252,7 @@ def data_for_trial(trial_key: Dict[str, AttributeValue], unit_ids: Optional[List
             reward2_ms=trial_info['trial_rew2'],
             vstab_win_len_ms=trial_info['vstab_win_len'],
             timestamp_sec=trial_info['trial_ts'],
-            trial_rvs=pickle.loads(trial_info['trial_rvs']),
+            trial_rvs=json.loads(trial_info['trial_rvs'].decode()),
             behavior=behavioral_field,
             neuronal=neuronal_field
         )
@@ -336,7 +336,7 @@ def retrieve_trial_block(
                 proto = fetch_one_row(DBTable.TRIAL_PROTOCOL, dict(proto_hash=trial_info['proto_hash']))
                 if proto is None:
                     return None
-                protocols[trial_info['proto_hash']] = pickle.loads(proto['proto_def'])
+                protocols[trial_info['proto_hash']] = maestro.Protocol.from_bytes(proto['proto_def'])
 
             neuronal_field: Dict[int, Optional[np.ndarray]] = dict()
             for unit_id in unit_ids:
@@ -354,7 +354,7 @@ def retrieve_trial_block(
                 response = behavioral_responses.pop()
                 behavioral_field[response['response_id']] = response['response_trace']
 
-            trial_rvs = pickle.loads(trial_info['trial_rvs'])
+            trial_rvs: List[int | float] = json.loads(trial_info['trial_rvs'].decode())
             fix1, fix2 = None, None
             if include_fixtgts:
                 fix1, fix2 = protocols[trial_info['proto_hash']].compute_fixation_target_trajectories(
@@ -428,7 +428,7 @@ def retrieve_trial_reps_for_neuron(neuron_key: Dict[str, AttributeValue], proto_
         if proto_info is None:
             get_application_logger().error(f"Trial protocol (hash={proto_hash}) not found in database!")
             return None
-        proto_def: maestro.Protocol = pickle.loads(proto_info['proto_def'])
+        proto_def = maestro.Protocol.from_bytes(proto_info['proto_def'])
 
         # retrieve all relevant trials, and the neuronal and behavioral responses for those trials
         relevant_trials = fetch_restrict_proj([DBTable.TRIAL, DBTable.TRIAL_NEURONAL],
@@ -474,7 +474,7 @@ def retrieve_trial_reps_for_neuron(neuron_key: Dict[str, AttributeValue], proto_
                 reward2_ms=trial_info['trial_rew2'],
                 vstab_win_len_ms=trial_info['vstab_win_len'],
                 timestamp_sec=trial_info['trial_ts'],
-                trial_rvs=pickle.loads(trial_info['trial_rvs']),
+                trial_rvs=json.loads(trial_info['trial_rvs'].decode()),
                 behavior=behavioral_field,
                 neuronal=neuronal_field
             ))
@@ -510,7 +510,7 @@ def retrieve_trial_reps_for_session(session_key: Dict[str, AttributeValue], prot
         if proto_info is None:
             get_application_logger().error(f"Trial protocol (hash={proto_hash}) not found in database!")
             return None
-        proto_def: maestro.Protocol = pickle.loads(proto_info['proto_def'])
+        proto_def = maestro.Protocol.from_bytes(proto_info['proto_def'])
 
         # retrieve all relevant trials, and the behavioral responses for those trials
         relevant_trials = fetch_rows(DBTable.TRIAL, trial_restriction)
@@ -548,7 +548,7 @@ def retrieve_trial_reps_for_session(session_key: Dict[str, AttributeValue], prot
                 reward2_ms=trial_info['trial_rew2'],
                 vstab_win_len_ms=trial_info['vstab_win_len'],
                 timestamp_sec=trial_info['trial_ts'],
-                trial_rvs=pickle.loads(trial_info['trial_rvs']),
+                trial_rvs=json.loads(trial_info['trial_rvs'].decode()),
                 behavior=behavioral_field,
                 neuronal=dict()
             ))

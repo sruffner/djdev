@@ -31,7 +31,7 @@ TODO: IMPLEMENTATION ISSUES --
 @created: 18oct2021
 """
 import uuid
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, List, Dict, Any, Tuple
 
 from dash import callback_context, callback, exceptions as dash_exc, no_update, dash_table as dt, html, dcc, Input, \
@@ -386,7 +386,8 @@ def _layout_session_info_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card, i
             err_msg = "Error - Failed to retrieve brain area list from database."
     brain_areas.sort(key=lambda x: x['ba_name'])
 
-    # Widgets for attributes in Session table...
+    # Widgets for attributes in Session table... NOTE that this has to work even if an error occurs above while
+    # retrieving information.
     initial_value = info.experimenter if (info and info.experimenter) \
         else (experimenters[0] if (len(experimenters) > 0) else None)
     experimenter_group = dbc.InputGroup([
@@ -421,7 +422,7 @@ def _layout_session_info_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card, i
     suffix_group = dbc.InputGroup([
         dbc.InputGroupText("Suffix (0-9)"),
         dbc.Input(id=_SUFFIX_INPUT_ID, type='number', minlength=1, maxlength=1,
-                  value=info.session_suffix if (info and info.session_suffix) else 1)
+                  value=info.session_sfx if (info and info.session_sfx) else 1)
     ], size='sm')
     notes_group = dbc.InputGroup([
         dbc.InputGroupText("Session Notes"),
@@ -1034,14 +1035,23 @@ def update_session_data(*args):
         idx = args[-1].find(":")
         job_id = args[-1][idx + 2:]
         ofs = 1
-        info = SessionMetaData(
-            experimenter=args[ofs], subj_id=args[ofs + 1], rig_id=args[ofs + 2], session_date=args[ofs + 3],
-            session_suffix=args[ofs + 4] and int(args[ofs + 4]), study_id=args[ofs + 5] and int(args[ofs + 5]),
-            session_notes=args[ofs + 6],
-            ephys_src=args[ofs + 7], probe_type=args[ofs + 8], sampling_rate=args[ofs + 9] and float(args[ofs + 9]),
-            probe_x=args[ofs + 10] and float(args[ofs + 10]), probe_y=args[ofs + 11] and float(args[ofs + 11]),
-            probe_depth=args[ofs + 12] and float(args[ofs + 12]), ba_id=args[ofs + 13] and int(args[ofs + 13]))
-        ok = update_session_metadata(job_id, info)
+        session_dict = dict(experimenter=args[ofs], subj_id=args[ofs + 1], rig_id=args[ofs + 2],
+                            session_sfx=int(args[ofs + 4]), study_id=int(args[ofs + 5]), session_notes=args[ofs + 6],
+                            ephys_src=args[ofs + 7], probe_type=args[ofs + 8], ba_id=int(args[ofs + 13]))
+        try:
+            session_dict['session_date'] = date.fromisoformat(args[ofs + 3])
+            if args[ofs + 9]:
+                session_dict['sampling_rate'] = float(args[ofs + 9])
+            if args[ofs + 10]:
+                session_dict['probe_x'] = float(args[ofs + 10])
+            if args[ofs + 11]:
+                session_dict['probe_y'] = float(args[ofs + 11])
+            if args[ofs + 12]:
+                session_dict['probe_depth'] = float(args[ofs + 12])
+        except Exception:
+            pass
+
+        ok = update_session_metadata(job_id, session_dict)
         if not ok:
             alert_msg, alert_color = 'Error - Failed to update session metadata on server', 'danger'
         else:

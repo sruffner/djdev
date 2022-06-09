@@ -11,8 +11,7 @@ experimment session to the database is an inherently stateful workflow, so we ne
 
 The workflow for committing an experiment session has the following stages:
     1) Uploading. During this phase, the session data archive (containing all Maestro and Omniplex files, as well as
-       a pickle file with neural unit spike times from spike sorting) is uploaded to a staging directory in the
-       repository.
+       a file with neural unit spike times from spike sorting) is uploaded to a staging directory in the repository.
     2) Preprocessing. The session archive is preprocessed to collect timing information on trials, parse out trial
        protocols presented, calculate neural unit metrics, etc. This phase does not require user interaction and can
        occur in a background process. The preprocessing results must be cached somewhere so that the user can review
@@ -40,7 +39,8 @@ in-progress commit job. See the descriptions of the various Redis "namespace" pr
     PROTODEFS_NS:<job_id> : Redis LIST of trial protocol definitions found during preprocessing and possibly modified
         via client input during the review phase. In same order as PROTONAMES_NS:<job_id>.
     UNITMETRICS_NS:<job_id> : Redis LIST of neural unit metrics (SNR, 10-ms template, etc; but no spike times) objects,
-        one per unit recorded. Created during preprocessing stage and accessed during review stage.
+        one per unit recorded. Created during preprocessing stage and accessed during review stage; read-only, just used
+        to retrieve metrics to display on clientside UI.
     UNITTYPES_NS:<job_id> : Redis LIST of neuron type IDs assigned to each recorded unit for a commit job. Created
         during preprocessing and reviewed/revised during review phase. In same order as UNITMETRICS_NS:<job_id>.
 The last two keys will not exist for a given commit job if the experiment session did not record from neural units.
@@ -51,15 +51,15 @@ single ZIP file that could be up to 10GB in size) in chunks from the client mach
 repository (unique to that client's Flask session). After the archive is uploaded and ready for preprocessing, the
 upload subfolder is renamed to the job ID (so the client can reuse the original upload subfolder for the next upload --
 due to limitations of using Dash and the Dash Uploader component on the client). The results of pre-processing are also
-stored in a pickle file in this directory.
+stored in a custom binary file in this directory.
 
 Session commits are restricted to registered users with the appropriate access level. Calls to this module should be
 protected by a mechanism that verifies the specified user is logged in with the access level required.
 
 Storing session archives in S3. Once the data from an experiment session has been committed to the portal database, the
-uploaded session archive and the preprocessing results are NOT discarded. Rather, the preprocessing results (a pickle
-file) are added to the archive ZIP, and then this ZIP file is uploaded to the portal backing repository, which is
-maintained in a Amazon Web Services S3 "bucket". The archive's object key is like a file system path:
+uploaded session archive and the preprocessing results are NOT discarded. Rather, the binary file containing all
+preprocessing results is added to the archive ZIP, and then this ZIP file is uploaded to the portal backing repository,
+which is maintained in a Amazon Web Services S3 "bucket". The archive's object key is like a file system path:
 /repo/<experimenter>/<subj_id>_<session_date>_<session_sfx>.zip, where <experimenter>, <subj_id>, <session_date> and
 <session_sfx> form the primary key for the experiment session.
 
@@ -68,9 +68,11 @@ maintained in a Amazon Web Services S3 "bucket". The archive's object key is lik
 """
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
+import json
 import pickle
 import re
 import shutil
+import struct
 import sys
 import time
 import uuid
@@ -111,7 +113,7 @@ COMMIT_NS: str = 'commit:'
 STATUS_NS: str = 'status:'
 """ 
 Redis namespace for commit job status. Append job ID to retrieve status information for that job. The STRING key
-holds a pickled CommitJobStatus object summarizing the job's current status.
+holds a serialized CommitJobStatus object summarizing the job's current status.
 """
 PROGRESS_NS: str = 'progress:'
 """
@@ -121,33 +123,33 @@ messages posted for that job, scored by message timestamp.
 INFO_NS: str = 'info:'
 """
 Redis namespace for cached session metadata. Append job ID to access session metadata for a commit job. The STRING key
-is a pickled SessionMetaData object containing information to prepare the Session and -- if applicable -- Session.EPhys
-table entries when the experiment session is committed to the database.
+is a serialized SessionMetaData object containing information to prepare the Session and -- if applicable -- 
+Session.EPhys table entries when the experiment session is committed to the database.
 """
 PROTONAMES_NS: str = 'protonames:'
 """
 Redis key namespace for the names of trial protocols presented during an experiment seesion. Append commit job ID to
-access the trial protocol names for that job. Each element in the LIST is the name of a different protocol candidate -- 
-prepended with '** ' if the candidate requires user validation and has not yet been validated. This key is present only
-after the preprocessing phase of the commit job has finished, and the order in the list matches the order in which
-protocol candidates were culled from the session data archive during that phase.
+access the trial protocol names for that job. Each element in the LIST is the name of a different protocol -- prepended
+with '** ' if the protocol definition requires user validation and has not yet been validated. This key is present only
+after the preprocessing phase of the commit job has finished, and the order in the list matches the order in which the
+trial protocols were culled from the session data archive during that phase.
 """
 PROTODEFS_NS: str = 'protodefs:'
 """
 Redis key namespace for the definitions of all trial protocols presented during an experiment session. Append commit job
-ID to access the trial protocol "candidate" definitions for that job. Each element in the LIST is a pickled
-ProtocolCandidate object; the order matches that in the corresponding PROTONAMES_NS key. This key is present only after
-the preprocessing phase of the commit job has finished.
+ID to access the trial protocols for that job. Each element in the LIST is a serialized Protocol object; the order
+matches that in the corresponding PROTONAMES_NS key. This key is present only after the preprocessing phase of the
+commit job has finished.
 """
 UNITMETRICS_NS: str = 'unitmetrics:'
 """
-Redis key namespace for select metrics on neural units recorded during an experiment session. Append commit job ID to 
-access the unit metrics for that job. Each element in the LIST is a pickled OmniplexUnit object holding metrics for a
+Redis key namespace for metrics of neural units recorded during an experiment session. Append commit job ID to access
+the unit metrics for that job. Each element in the LIST is a serialized OmniplexUnit object holding metrics for a
 distinct neural unit recorded during the session. The order in the list reflects the order in which units were culled
 from the data archive during preprocessing. The key is present only after the preprocessing phase of the commit job has
 finished, and only for experiment sessions in which neural units were recorded. NOTE that the unit spike times are
 excluded from the metrics because they are not needed during the review phase and could potentially require a lot of
-storage space.
+storage space. 
 """
 UNITTYPES_NS: str = 'unittypes:'
 """
@@ -162,33 +164,12 @@ _STAGING_DIR_PREFIX: str = 'commit-'
 """ Commit staging directory prefix, followed by a generated UUID. """
 PROGRESS_HISTORY_SIZE: int = 30
 """ Maximum number of messages kept in a commit job's progress message history."""
-PREPROC_FNAME = 'preproc.pickle'
-""" Results from preprocesing phase are stored in this file in the staging directory for a commit job. """
-
-
-@dataclass()
-class CommitJobStatus:
-    id: str
-    """ The commit job's ID. """
-    owner: str
-    """ The username of the commit job owner. """
-    started: float
-    """ Timestamp (seconds since the Epoch) when commit job was initiated. """
-    state: CommitStateEnum
-    """ The job's current state/phase. """
-    zip: str
-    """ 
-    When the commit job is started, this is the name of the subfolder (within the portal's commit staging directory) to 
-    which the session data archive file will be uploaded. The folder name is a UUID assigned when the uploader UI is 
-    realized on the client. After upload has finished and is verified on the server side, this will be the archive
-    filename. 
-    """
-    units: Optional[int] = None
-    """ Number of neural units recorded in the session. Set during preprocessing; 0 for behavioral sessions. """
-    updated: Optional[float] = None
-    """ Timestamp (seconds since the Epoch) when last progress message was posted for the commit job. """
-    msg: Optional[str] = None
-    """ Text of the last progress message posted for the commit job. """
+PREPROC_FNAME = 'preproc.bin'
+"""
+Results from preprocesing phase are stored in this binary file in the staging directory for a commit job. Some
+information in the file may be updated during the review phase. After session commit, this file is added to the
+original session archive ZIP so that database reconstruction can happen without user intervention.
+"""
 
 
 class CommitStateEnum(DocEnum):
@@ -211,6 +192,126 @@ class CommitStateEnum(DocEnum):
         working on the job, the job should NOT be deleted.
         """
         return self not in [CommitStateEnum.PREPROCESS, CommitStateEnum.CANCEL, CommitStateEnum.COMMIT]
+
+
+class CommitJobStatus:
+    """ Status information for a session commit job in progress on the lab portal server. """
+    def __init__(self, job_id: str, owner: str, filename: str, started: Optional[float] = None,
+                 updated: Optional[float] = None, state: CommitStateEnum = CommitStateEnum.UPLOADING,
+                 msg: str = "Waiting for ZIP archive upload from client...", num_units: Optional[int] = 0):
+        """
+        Construct a session commit job status object.
+        Args:
+            job_id: The job ID.
+            owner: Username of the committer.
+            filename: Before and during upload, this is the name of the subfolder (within portal's staging directory)
+                to which the session archive is uploaded. After upload, this is the archive filename.
+            started: Timestamp (seconds since the Epoch) when job was started. If None, use the current time.
+            updated: Timestamp when job was last updated. If None, use the value of the 'started' argument
+            state: The current job state.
+            msg: Text of most recent progress message for this job.
+            num_units: The number of neural units recorded during the session. Default = 0.
+        """
+        self._definition: Dict[str, Any] = dict()
+        self._definition['id'] = job_id
+        self._definition['owner'] = owner
+        self._definition['zip'] = filename
+        self._definition['started'] = started if isinstance(started, float) else time.time()
+        self._definition['updated'] = updated if isinstance(updated, float) else self._definition['started']
+        self._definition['state'] = state
+        self._definition['msg'] = msg
+        self._definition['units'] = num_units
+
+    @property
+    def id(self) -> str:
+        """ The commit job's ID. """
+        return self._definition['id']
+
+    @property
+    def owner(self) -> str:
+        """ The username of the commit job owner. """
+        return self._definition['owner']
+
+    @property
+    def zip(self) -> str:
+        """
+        Before and during the upload phase of a session commit, this is the name of the subfolder (within the portal's
+        commit staging directory) to which the session data archive file is uploaded. After upload has finished and is
+        verified on the server side, this will be the archive filename.
+        """
+        return self._definition['zip']
+
+    @property
+    def started(self) -> float:
+        """ Timestamp (seconds since the Epoch) when commit job was initiated. """
+        return self._definition['started']
+
+    @property
+    def updated(self) -> float:
+        """ Timestamp (seconds since the Epoch) when last progress message was posted for the commit job. """
+        return self._definition['updated']
+
+    @property
+    def state(self) -> CommitStateEnum:
+        """ The job's current state/phase. """
+        return self._definition['state']
+
+    @property
+    def msg(self) -> str:
+        """ Text of the last progress message posted for the commit job. """
+        return self._definition['msg']
+
+    @property
+    def units(self) -> Optional[int]:
+        """ Number of neural units recorded in the session. Set during preprocessing; 0 for behavioral sessions. """
+        return self._definition['units']
+
+    def on_update(self, msg: str, filename: Optional[str] = None, state: Optional[CommitStateEnum] = None,
+                  units: Optional[int] = None, updated: Optional[float] = None) -> None:
+        """
+        Update this session commit job status.
+
+        Args:
+            msg: The latest progress message.
+            filename: The name of the session archive uploaded (set after upload finishes).
+            state: If not None, the updated job state.
+            units: If not None, the number of neural units recorded during session (set after preprocessing.
+            updated: Timestamp for this update (seconds since Epoch). If None, use the current time.
+        """
+        self._definition['msg'] = msg
+        if isinstance(filename, str):
+            self._definition['zip'] = filename
+        if isinstance(state, CommitStateEnum):
+            self._definition['state'] = state
+        if isinstance(units, int) and units >= 0:
+            self._definition['units'] = units
+        self._definition['updated'] = updated if isinstance(updated, float) else time.time()
+
+    def to_bytes(self) -> bytes:
+        """ Encode this commit job status object as a byte sequence. """
+        # we transform to JSON, but convert floats to hex strings to keep precision
+        out = dict()
+        for k, v in self._definition.items():
+            out[k] = float(v).hex() if k in ['updated', 'started'] else v.value if k == 'state' else v
+        return json.dumps(out).encode()
+
+    @staticmethod
+    def from_bytes(raw: bytes) -> CommitJobStatus:
+        """
+        Reconstruct a commit job status from a byte sequence previously generated by to_bytes().
+
+        Args:
+            raw: A byte sequence
+        Raises:
+            ValueError: If deserialization fails for any reason.
+        """
+        try:
+            d = json.loads(raw.decode())
+            return CommitJobStatus(job_id=d['id'], owner=d['owner'], filename=d['zip'],
+                                   started=float.fromhex(d['started']), updated=float.fromhex(d['updated']),
+                                   state=CommitStateEnum(d['state']), msg=d['msg'], num_units=d['units'])
+        except Exception as e:
+            raise ValueError(f"Failed to deserialize CommitJobStatus: {str(e)}")
 
 
 @dataclass
@@ -244,11 +345,9 @@ class _TrialInfo:
     """ The zero-based index into the list of all trial protocol candidates presented during the session. """
     proto_hash: Optional[str] = None
     """ The MD5 hexadecimal digest uniquely identifying the trial protocol for this particular trial instance. It is
-    set only after all trial protocol candidates culled from an experiment session have been validated and converted to
-    protocol objects. """
+    set just prior to committing the experiment session to the database. """
 
 
-@dataclass
 class OmniplexUnit:
     """
     Data object containing information that will be stored in the Session.Neuron part table in the lab database for each
@@ -256,81 +355,360 @@ class OmniplexUnit:
     timestamps for each unit are extracted from the spike-sort results file that must be included in the session data
     archive when committing an experiment session to the database. Other metrics are computed from the original Omniplex
     analog data stream from which the unit spike times were "sorted".
+
+    Intended for read-only use outside of this module.
     """
-    source_file: str
-    """ The name of the Omniplex PL2 file containing the analog data for the neural unit. """
-    channel: str
-    """ The Omniplex source channel name, which consists of the tag 'WB' (wide-band channel) or 'SPKC' (narrow-band
-    channel) followed by a 2-digit number."""
-    spike_times: np.ndarray
-    """ 1D Numpy array holding the sorted spike times in seconds since the start of the Omniplex recording."""
-    num_spikes: int
-    """ 
-    Number of spikes sorted. This field is here for technical reasons -- so we can store unit metrics EXCEPT the spike
-    times array, which could be VERY large.
-    """
-    firing_rate: float
-    """ Mean firing rate in Hz (computed from spike times array). """
-    snr: float
-    """ Signal-to-noise ratio (computed from spike times array and original analog data stream. """
-    template: np.ndarray
-    """ Average spike template waveform (computed by averaging 10-ms clips of filtered analog channel stream starting
-    1ms before each timestamp in the spike times array). Units = micro-volts. """
-    neuron_type: Optional[int] = None
-    """ ID of the neuron type associated with this unit (value of primary key in NeuronType table). """
+    def __init__(self, src: str, ch: str, spikes: Optional[np.ndarray], num_spikes: int, rate: float, snr: float,
+                 template: np.ndaray, neuron_type: int = -1):
+        """
+        An Omniplex neural unitrecord, storing calculated metrics and the spike train recorded from this unit.
+
+        Args:
+            src: The filename of the original Omniplex source file.
+            ch: Omniplex channel on which unit was recorded.
+            spikes: The spike train, with times in seconds since Omniplex recording started. May be None when using
+                this structure to store unit metrics without the spike train, which can be VERY large.
+            num_spikes: The total number of spikes recorded. If `spikes` is not None, then this argument is
+                ignored and `len(spikes)` is the number of recorded spikes.
+            rate: Estimated mean firing rate in Hz.
+            snr: Estimated signal-to-noise ratio.
+            template: The spike template waveform.
+            neuron_type: The neuron type ID (-1 if not known).
+        """
+        self._definition: Dict[str, Any] = dict()
+        """ The Omniplex-recorded neural unit as a dictionary of parameter values keyed by parameter names. """
+        self._definition['source_file'] = src
+        self._definition['channel'] = ch
+        self._definition['spike_times'] = spikes
+        self._definition['num_spikes'] = len(spikes) if spikes else num_spikes
+        self._definition['firing_rate'] = rate
+        self._definition['snr'] = snr
+        self._definition['template'] = template
+        self._definition['neuron_type'] = neuron_type
+
+    @property
+    def source_file(self) -> str:
+        """ The name of the original Omniplex PL2 file containing the analog data for the neural unit. """
+        return self._definition['source_file']
+
+    @property
+    def channel(self) -> str:
+        """
+        The Omniplex source channel name, which consists of the tag 'WB' (wide-band channel) or 'SPKC' (narrow-band
+        channel) followed by a 2-digit number.
+        """
+        return self._definition['channel']
+
+    @property
+    def spike_times(self) -> Optional[np.ndarray]:
+        """
+        Ordered train of spike times in seconds since the start of the Omniplex recording (1D Numpy array). If None,
+        then spike train times were not saved in this record.
+        """
+        return self._definition['spike_times']
+
+    @property
+    def num_spikes(self) -> int:
+        """ Number of spikes recorded/detected from this neurol unit. """
+        return self._definition['num_spikes']
+
+    @property
+    def firing_rate(self) -> float:
+        """ Mean firing rate in Hz (computed from spike times array). """
+        return self._definition['firing_rate']
+
+    @property
+    def snr(self) -> float:
+        """ Signal-to-noise ratio (computed from spike times array and original analog data stream). """
+        return self._definition['snr']
+
+    @property
+    def template(self) -> np.ndarray:
+        """
+        Average spike template waveform (computed by averaging 10-ms clips of filtered analog channel stream starting
+        1ms before each timestamp in the spike times array). Units = micro-volts.
+        """
+        return self._definition['template']
+
+    @property
+    def neuron_type(self) -> Optional[int]:
+        """
+        ID of the neuron type associated with this unit (value of primary key in NeuronType table). None if not yet set
+        (must be manually selected by user during review phase of a session commit.
+        """
+        return None if self._definition['neuron_type'] <= 0 else self._definition['neuron_type']
+
+    @neuron_type.setter
+    def neuron_type(self, nt_id: Optional[int] = None) -> None:
+        """ Update neuron type for this neural unit. Intended for internal use only. """
+        self._definition['neuron_type'] = nt_id if (isinstance(nt_id, int) and nt_id > 0) else -1
+
+    def to_bytes(self, omit_spikes: bool = False) -> bytes:
+        """
+        Serialize this Omniplex neural unit record as a byte sequence.
+
+        Args:
+            omit_spikes: If True, the unit's spike train (which can be very large) is NOT serialized. The number of
+                spikes in the train is serialized.
+        """
+
+        hdr = dict(source_file=self.source_file, channel=self.channel, firing_rate=self.firing_rate.hex(),
+                   snr=self.snr.hex(), neuron_type=self._definition['neuron_type'], num_spikes=self.num_spikes)
+        hdr_raw = json.dumps(hdr).encode()
+        if not omit_spikes:
+            spikes_raw = self.spike_times.tobytes()
+        else:
+            spikes_raw = []
+        template_raw = self.template.tobytes()
+        out = bytearray(struct.pack("<3i", len(hdr_raw), len(spikes_raw), len(template_raw)))
+        out.extend(hdr_raw)
+        if not omit_spikes:
+            out.extend(spikes_raw)
+        out.extend(template_raw)
+        return bytes(out)
+
+    @staticmethod
+    def from_bytes(raw: bytes) -> OmniplexUnit:
+        """
+        Reconstruct an Omniplex neurol unit record previously serialized by to_bytes().
+
+        Args:
+            raw: The byte sequence.
+        Returns:
+            The reconstructed Omniplex neural unit record.
+        Raises:
+            ValueError: If unable to parse byte sequence as an Omniplex unit record, for whatever reason.
+        """
+        try:
+            hdr_len, spks_len, template_len = struct.unpack_from("<3i", raw, offset=0)
+            offset = struct.calcsize("<3i")
+            hdr = json.loads(raw[offset:offset+hdr_len].decode())
+            offset += hdr_len
+            spikes: Optional[np.ndarray] = None
+            if spks_len > 0:
+                spikes = np.frombuffer(raw[offset:offset+spks_len])
+                offset += spks_len
+            template = np.frombuffer(raw[offset:offset+template_len])
+            return OmniplexUnit(src=hdr['source_file'], ch=hdr['channel'], spikes=spikes, num_spikes=hdr['num_spikes'],
+                                rate=float.fromhex(hdr['firing_rate']), snr=float.fromhex(hdr['snr']),
+                                template=template, neuron_type=hdr['neuron_type'])
+        except Exception as e:
+            raise ValueError(f"Failed to deserialize _OmniplexUnit record: {str(e)}")
 
 
-@dataclass
 class SessionMetaData:
     """
-    Data object holding metadata for an experiment session to be committed to the portal database. It includes all
-    attributes of the Session table and its Session.EPhys part table that may be updated by the user during the review
-    phase of a session commit job. It also includes the number of neural units recorded during the session. If zero,
-    then the session is behavioral only and the Session.EPhys attributes do not apply.
+    Metadata for an experiment session to be committed to the portal database. It includes all attributes of the Session
+    table and its Session.EPhys part table that may be updated by the user during the review phase of a session commit
+    job. It also includes the number of neural units recorded during the session. If zero, then the session is
+    behavioral only and the Session.EPhys attributes do not apply.
     """
-    experimenter: Optional[str] = None
-    """ The user responsible for the experiment session (primary key into User table). """
-    subj_id: Optional[str] = None
-    """ ID of experiment subject (primary key into Subject table). """
-    session_date: Optional[date] = None
-    """ Date of session. """
-    session_suffix: Optional[int] = None
-    """ Session suffix (in case multiple sessions were recorded with the same subject on the same day. """
-    rig_id: Optional[int] = None
-    """ ID of the experiment rig (primary key into Rig table). """
-    study_id: Optional[int] = None
-    """ ID of the associated research study (primary key into Study table). """
-    session_notes: Optional[str] = None
-    """ Session notes. """
-    num_units: Optional[int] = 0
-    """ Number of neural units recorded during session; 0 for a behavior-only session. Not user-editable. """
-    num_trials: Optional[int] = 0
-    """ Total number of trials presented during session. Not user-editable. """
-    ephys_src: Optional[str] = None
-    """ The electrophysiology recording method/source. """
-    probe_type: Optional[str] = None
-    """ The electrophysiology recording probe type. """
-    sampling_rate: Optional[float] = None
-    """ Electrode signal sampling rate in Hz. """
-    probe_x: Optional[float] = None
-    """ X-coordinate of electrode location within recording cylinder implant, in mm.  """
-    probe_y: Optional[float] = None
-    """ Y-coordinate of electrode location within recording cylinder implant, in mm. """
-    probe_depth: Optional[float] = None
-    """ Electrode insertion depth in mm. """
-    ba_id: Optional[int] = None
-    """ ID of brain region in which electrode was inserted (primary key into BrainArea table). """
+    __REQUIRED_TYPES: Dict[str, type] = dict(
+        experimenter=str, subj_id=str, session_date=date, session_sfx=int, rig_id=int, study_id=int, session_notes=str,
+        num_units=int, num_trials=int
+    )
+    __EPHYS_TYPES: Dict[str, type] = dict(
+        ephys_src=str, probe_type=str, sampling_rate=float, probe_x=float, probe_y=float, probe_depth=float, ba_id=int
+    )
+
+    def __init__(self, **kwargs):
+        """
+        Construct a SessionMetaData object. Intended only for internal module use.
+
+        Args:
+            **kwargs: Metadata dictionary.
+        Raises:
+            ValueError: If any required parameters are missing from the keyword arguments.
+            TypeError: If any supplied parameter is the incorrect type.
+        """
+        self._definition = dict()
+        """ The session metata as a dictionary of parameter values keyed by parameter names. """
+
+        for k, t in SessionMetaData.__REQUIRED_TYPES.items():
+            if not (k in kwargs):
+                raise ValueError(f'Missing required parameter: {k}')
+            if not isinstance(kwargs[k], t):
+                raise TypeError(f'Invalid type for: {k}')
+            self._definition[k] = kwargs[k]
+        if kwargs['num_units'] > 0:
+            for k, t in SessionMetaData.__EPHYS_TYPES.items():
+                if not (k in kwargs):
+                    raise ValueError(f'Missing electrophysiology parameter: {k}')
+                if not isinstance(kwargs[k], t):
+                    raise TypeError(f'Invalid type for: {k}')
+                self._definition[k] = kwargs[k]
+        else:
+            for k in SessionMetaData.__EPHYS_TYPES.keys():
+                self._definition[k] = None
+
+    @property
+    def experimenter(self) -> str:
+        """ The user responsible for the experiment session (primary key into User table). """
+        return self._definition['experimenter']
+
+    @property
+    def subj_id(self) -> str:
+        """ ID of experiment subject (primary key into Subject table). """
+        return self._definition['subj_id']
+
+    @property
+    def session_date(self) -> date:
+        """ Recording date for session. """
+        return self._definition['session_date']
+
+    @property
+    def session_sfx(self) -> int:
+        """ Session suffix (in case multiple sessions were recorded with the same subject on the same day). """
+        return self._definition['session_sfx']
+
+    @property
+    def rig_id(self) -> int:
+        """ ID of the experiment rig (primary key into Rig table). """
+        return self._definition['rig_id']
+
+    @property
+    def study_id(self) -> int:
+        """ ID of the associated research study (primary key into Study table). """
+        return self._definition['study_id']
+
+    @property
+    def session_notes(self) -> str:
+        """ Session notes (could be an empty string if no session notes provided by user). """
+        return self._definition['session_notes']
+
+    @property
+    def num_units(self) -> int:
+        """ Number of neural units recorded during session; 0 for a behavior-only session. """
+        return self._definition['num_units']
+
+    @property
+    def num_trials(self) -> int:
+        """ Total number of trials presented during session. """
+        return self._definition['num_trials']
+
+    @property
+    def ephys_src(self) -> Optional[str]:
+        """ The electrophysiological recording method/source; None for behavior-only sessions. """
+        return self._definition['ephys_src']
+
+    @property
+    def probe_type(self) -> Optional[str]:
+        """ The electrophysiological recording probe type; None for behavior-only sessions. """
+        return self._definition['probe_type']
+
+    @property
+    def sampling_rate(self) -> Optional[float]:
+        """ Electrode signal sampling rate in Hz; None for behavior-only sessions. """
+        return self._definition['sampling_rate']
+
+    @property
+    def probe_x(self) -> Optional[float]:
+        """ X-coordinate of probe within the recording cylinder implant, in mm; None for behavior-only session. """
+        return self._definition['probe_x']
+
+    @property
+    def probe_y(self) -> Optional[float]:
+        """ Y-coordinate of probe within the recording cylinder implant, in mm; None for behavior-only session. """
+        return self._definition['probe_y']
+
+    @property
+    def probe_depth(self) -> Optional[float]:
+        """ Insertion depth of probe, in mm; None for behavior-only session. """
+        return self._definition['probe_depth']
+
+    @property
+    def ba_id(self) -> Optional[int]:
+        """ ID of brain area studied (primary key into BrainArea table); None for behavior-only sessions. """
+        return self._definition['ba_id']
 
     def session_table_entry(self) -> Dict[str, Optional[AttributeValue]]:
+        """ Generate the entry for the lab database's Session Table from this session metadata. """
         return dict(experimenter=self.experimenter, subj_id=self.subj_id, session_date=self.session_date,
-                    session_sfx=self.session_suffix, rig_id=self.rig_id, study_id=self.study_id,
+                    session_sfx=self.session_sfx, rig_id=self.rig_id, study_id=self.study_id,
                     session_notes=self.session_notes, num_units=self.num_units, num_trials=self.num_trials)
 
     def ephys_table_entry(self) -> Dict[str, Optional[AttributeValue]]:
-        return dict(experimenter=self.experimenter, subj_id=self.subj_id, session_date=self.session_date,
-                    session_sfx=self.session_suffix, ephys_src=self.ephys_src, probe_type=self.probe_type,
+        """
+        Generate the entry for the lab database's Session.EPhys table from this session metadata. Returns an
+        empty dictionary for a behavior-only session!
+        """
+        if self.num_units <= 0:
+            return dict()
+        return dict(experimenter=self.experimenter, subj_id=self.subj_id, session_date=str(self.session_date),
+                    session_sfx=self.session_sfx, ephys_src=self.ephys_src, probe_type=self.probe_type,
                     sampling_rate=self.sampling_rate, probe_x=self.probe_x, probe_y=self.probe_y,
                     probe_depth=self.probe_depth, ba_id=self.ba_id)
+
+    def update(self, **kwargs) -> None:
+        """
+        Update one or more session metadata parameters. The number of trials and number of recorded units cannot be
+        changed here; any parameters related to electrophysiological recordings are ignored for a behavior-only
+        session (zero units recorded).
+
+        Args:
+            **kwargs: Parameter values to update, keyed by parameter name.
+        Raises:
+            TypeError: If any supplied parameter is the incorrect type.
+        """
+        for k, t in SessionMetaData.__REQUIRED_TYPES.items():
+            if k in kwargs:
+                if not isinstance(kwargs[k], t):
+                    raise TypeError(f"Invalid type for {k}")
+                self._definition[k] = kwargs[k]
+        if self.num_units > 0:
+            for k, t in SessionMetaData.__EPHYS_TYPES.items():
+                if k in kwargs:
+                    if not isinstance(kwargs[k], t):
+                        raise TypeError(f"Invalid type for {k}")
+                    self._definition[k] = kwargs[k]
+
+    def to_bytes(self) -> bytes:
+        """ Serialize this session metadata record as a byte sequence. """
+        out = dict()
+        for k, t in SessionMetaData.__REQUIRED_TYPES.items():
+            if t == date:
+                d: date = self._definition[k]
+                out[k] = d.isoformat()
+            elif t == float:
+                f: float = self._definition[k]
+                out[k] = f.hex()
+            else:
+                out[k] = self._definition[k]
+        if self.num_units > 0:
+            for k, t in SessionMetaData.__EPHYS_TYPES.items():
+                if t == float:
+                    f: float = self._definition[k]
+                    out[k] = f.hex()
+                else:
+                    out[k] = self._definition[k]
+        return json.dumps(out).encode()
+
+    @staticmethod
+    def from_bytes(raw: bytes) -> SessionMetaData:
+        """
+        Reconstruct an session metadata record previously serialized by to_bytes().
+
+        Args:
+            raw: The byte sequence.
+        Returns:
+            The reconstructed session metadata record.
+        Raises:
+            ValueError: If unable to parse byte sequence as a session metadata record, for whatever reason.
+        """
+        try:
+            rec: Dict[str, Any] = json.loads(raw.decode())
+            for k, t in SessionMetaData.__REQUIRED_TYPES.items():
+                if t == date:
+                    rec[k] = date.fromisoformat(rec[k])
+                elif t == float:
+                    rec[k] = float.fromhex(rec[k])
+            if rec['num_units'] > 0:
+                for k, t in SessionMetaData.__EPHYS_TYPES.items():
+                    if t == float:
+                        rec[k] = float.fromhex(rec[k])
+            return SessionMetaData(**rec)
+        except Exception as e:
+            raise ValueError(f"Failed to deserialize SessionMetaData record: {str(e)}")
 
 
 def _get_subfolder_in_staging_directory(subfolder: str) -> Path:
@@ -377,10 +755,7 @@ def initiate_session_commit(username: str, upload_id: str) -> Union[str, CommitJ
         _logger.error(msg, exc_info=True)
         return msg
 
-    now = time.time()
-    init_progress_msg = "Waiting for ZIP archive upload from client..."
-    job_status = CommitJobStatus(id=job_id, owner=username, started=now, state=CommitStateEnum.UPLOADING,
-                                 zip=upload_id, updated=now, msg=init_progress_msg)
+    job_status = CommitJobStatus(job_id=job_id, owner=username, filename=upload_id)
     commit_jobs_key = f"{COMMIT_NS}{username}"
     status_key = f"{STATUS_NS}{job_id}"
     job_progress_key = f"{PROGRESS_NS}{job_id}"
@@ -388,8 +763,8 @@ def initiate_session_commit(username: str, upload_id: str) -> Union[str, CommitJ
         conn = get_config().redis_conn
         with conn.pipeline() as pipe:
             pipe.rpush(commit_jobs_key, job_id)
-            pipe.set(status_key, pickle.dumps(job_status))
-            pipe.zadd(job_progress_key, {init_progress_msg: now})
+            pipe.set(status_key, job_status.to_bytes())
+            pipe.zadd(job_progress_key, {job_status.msg: job_status.started})
             pipe.execute()
     except Exception as e:
         _logger.error(f"Failed to persist commit job info: {str(e)}", exc_info=True)
@@ -424,7 +799,7 @@ def get_pending_commit_jobs_for(username: str) -> Union[str, List[CommitJobStatu
                     pipe.get(f"{STATUS_NS}{raw_job_id.decode('utf-8')}")
                 res = pipe.execute()
             for r in res:
-                job_status: CommitJobStatus = pickle.loads(r)
+                job_status: CommitJobStatus = CommitJobStatus.from_bytes(r)
                 out.append(job_status)
         return out
     except Exception as e:
@@ -448,7 +823,7 @@ def commit_job_status(job_id: str) -> Union[str, CommitJobStatus]:
         if job is None:
             _logger.debug(f"Got request for status info on a commit job (id={job_id}) that does not exist.")
             return f"Commit job (id={job_id}) not found on server."
-        job_status: CommitJobStatus = pickle.loads(job)
+        job_status: CommitJobStatus = CommitJobStatus.from_bytes(job)
         return job_status
     except Exception as e:
         _logger.error(f"Error while retrieving commit job status info: {str(e)}", exc_info=True)
@@ -506,7 +881,7 @@ def update_commit_job_on_archive_upload(job_id: str, filename: str) -> Union[str
         if job is None:
             _logger.debug(f"Got upload complete for a commit job (id={job_id}) that does not exist.")
             return f"Commit job (id={job_id}) not found on server."
-        job_status: CommitJobStatus = pickle.loads(job)
+        job_status: CommitJobStatus = CommitJobStatus.from_bytes(job)
         if job_status.state != CommitStateEnum.UPLOADING:
             _logger.debug(f"Got upload complete for a commit task (id={job_id}), but upload was already finished.")
 
@@ -518,12 +893,9 @@ def update_commit_job_on_archive_upload(job_id: str, filename: str) -> Union[str
 
         now = time.time()
         update_msg = f"Upload complete - {filename}. Queued job to preprocess session archive."
-        job_status.zip = filename
-        job_status.state = CommitStateEnum.PREPROCESS
-        job_status.updated = now
-        job_status.msg = update_msg
+        job_status.on_update(msg=update_msg, filename=filename, state=CommitStateEnum.PREPROCESS, updated=now)
         with conn.pipeline() as pipe:
-            pipe.set(status_key, pickle.dumps(job_status))
+            pipe.set(status_key, job_status.to_bytes())
             pipe.zadd(progress_key, {update_msg: now})
             pipe.zremrangebyrank(progress_key, 0, -(PROGRESS_HISTORY_SIZE + 1))
             pipe.execute()
@@ -563,7 +935,7 @@ def cancel_or_remove_commit_job(job_id: str) -> Tuple[bool, str, Optional[Commit
             # job not found -- assume it was already removed
             _logger.debug(f"Got request to remove a commit job (id={job_id}) that was not found.")
             return True, "", None
-        job_status: CommitJobStatus = pickle.loads(job)
+        job_status: CommitJobStatus = CommitJobStatus.from_bytes(job)
         if job_status.state.can_delete_job_in_this_state():
             # Job can be deleted immediately -- remove from Redis cache and delete relevant directory in repo
             # If cancelled during upload, remove the upload folder; else remove the staging folder for the commit
@@ -586,11 +958,9 @@ def cancel_or_remove_commit_job(job_id: str) -> Tuple[bool, str, Optional[Commit
             # If not already cancelling, move job to that state and append a progress message in Redis
             now = time.time()
             cancel_msg = "User cancelled job."
-            job_status.state = CommitStateEnum.CANCEL
-            job_status.msg = cancel_msg
-            job_status.update = now
+            job_status.on_update(msg=cancel_msg, state=CommitStateEnum.CANCEL, updated=now)
             with conn.pipeline() as pipe:
-                pipe.set(status_key, pickle.dumps(job_status))
+                pipe.set(status_key, job_status.to_bytes())
                 pipe.zadd(progress_key, {cancel_msg: now})
                 pipe.zremrangebyrank(progress_key, 0, -(PROGRESS_HISTORY_SIZE+1))
                 pipe.execute()
@@ -644,7 +1014,7 @@ def preprocess_commit_job(job_id: str) -> bool:
     """
     protocols: List[maestro.Protocol]
     """ The list of trial protocol culled from the session data archive during pre-processing. """
-    session_info: SessionMetaData = SessionMetaData()
+    session_meta: SessionMetaData
     """
     Metadata about session that is partially initialized during preprocessing phase, then reviewed and updated by user
     before committing the session to the database. It includes attributes from the Session and Session.EPhys tables.
@@ -749,34 +1119,30 @@ def preprocess_commit_job(job_id: str) -> bool:
                 if choice.lower() in test_str:
                     subj_id_found = choice
                     break
-            _initialize_session_metadata(job_status.owner, session_date, subj_id_found, session_info, units)
-            session_info.num_trials = len(trial_info)
+            session_meta = _initialize_session_metadata(job_status.owner, session_date, subj_id_found,
+                                                        len(trial_info), units)
 
-            # save preprocessing results in a pickle file in the staging directory
+            # save preprocessing results in a binary file in the staging directory
             if _background_job_update(job_id, "Saving results from preprocessing..."):
                 return False
-            results = {'protocols': protocols, 'trials': trial_info, 'units': units,
-                       'session': session_info}
-            with open(Path(_get_subfolder_in_staging_directory(job_id), PREPROC_FNAME), 'wb') as file:
-                pickle.dump(results, file)
+            _write_session_preprocessing_file(Path(_get_subfolder_in_staging_directory(job_id), PREPROC_FNAME),
+                                              session_meta, trial_info, protocols, units)
 
             # store in Redis all information that will be needed to interact with user during the review phase: session
             # and electrophysiology metadata; protocol candidate definitions; and unit metrics (excluding spike times,
             # which could consume a lot of storage!)
-            info = pickle.dumps(session_info)
+            info = session_meta.to_bytes()
             proto_names = list()
             proto_defs = list()
             for p in protocols:
                 proto_names.append(f"{'** ' if p.is_candidate else ''}{p.trial.path_name}")
-                proto_defs.append(pickle.dumps(p))
+                proto_defs.append(p.to_bytes())
             unit_metrics = list()
             unit_types = list()
             for u in units:
                 # we don't store spike times in Redis, and we leave neuron type as None b/c all of the unit neuron
                 # types are stored in a separate key -- the user can only edit the neuron type of each unit.
-                modified_unit = OmniplexUnit(u.source_file, u.channel, np.asarray([]), u.num_spikes, u.firing_rate,
-                                             u.snr, u.template)
-                unit_metrics.append(pickle.dumps(modified_unit))
+                unit_metrics.append(u.to_bytes(omit_spikes=True))
                 unit_types.append(-1 if u.neuron_type is None else u.neuron_type)
             with get_config().redis_conn.pipeline() as pipe:
                 pipe.set(f"{INFO_NS}{job_id}", info)
@@ -879,22 +1245,21 @@ def _background_job_update(job_id: str, msg: str, next_state: Optional[CommitSta
     job = conn.get(status_key)
     if job is None:
         raise Exception(f"Got request for status info on a commit job (id={job_id}) that does not exist.")
-    job_status: CommitJobStatus = pickle.loads(job)
+    job_status: CommitJobStatus = CommitJobStatus.from_bytes(job)
     if job_status.state not in [CommitStateEnum.PREPROCESS, CommitStateEnum.COMMIT, CommitStateEnum.CANCEL]:
         raise Exception(f"Commit job {job_id} found in an unexpected state for background work.")
     if (job_status.state == CommitStateEnum.CANCEL) and (next_state != CommitStateEnum.DONE):
         next_state = CommitStateEnum.FAIL
         was_cancelled = True
 
-    if next_state:
-        job_status.state = next_state
-        if next_state == CommitStateEnum.REVIEW:
-            job_status.units = num_units if isinstance(num_units, int) else 0
+    set_units: Optional[None] = None
+    if next_state == CommitStateEnum.REVIEW:
+        set_units = num_units if (isinstance(num_units, int) and num_units >= 0) else 0
     now = time.time()
-    job_status.msg = "Background task cancelled!" if was_cancelled else msg
-    job_status.updated = now
+    job_status.on_update(msg="Background task cancelled!" if was_cancelled else msg, state=next_state, units=set_units,
+                         updated=now)
     with conn.pipeline() as pipe:
-        pipe.set(status_key, pickle.dumps(job_status))
+        pipe.set(status_key, job_status.to_bytes())
         pipe.zadd(progress_key, {job_status.msg: now})
         pipe.zremrangebyrank(progress_key, 0, -(PROGRESS_HISTORY_SIZE + 1))
         pipe.execute()
@@ -903,20 +1268,20 @@ def _background_job_update(job_id: str, msg: str, next_state: Optional[CommitSta
 
 def _validate_neural_unit_data(unit_data: Dict[str, List[Any]], pl2_filenames: List[str]) -> bool:
     """
-    Helper method validates the object loaded from a single dedicated pickle file in the session ZIP archive that
-    lists all identified neurons and their spike times.
+    Helper method validates the object loaded from a single dedicated file in the session ZIP archive that lists all
+    identified neurons and their spike times.
 
     When researchers prepare the ZIP archive containing all data files for an experiment session including neural
     unit recordings, they must provide a single Python pickle file with the results of their spike-sorting analysis of
-    all units recorded during the session. This pickle file contains a dictionary with 2-3 fields: 'channel',
-    'spiketimes', and (optionally) 'filename'. The last field is required ONLY if there is more than one Omniplex PL2
-    file in the archive. Each field is a list of length N, where N is the number of neural units. The 'channel' key
-    holds the Omniplex-specific channel ID for the analog channel on which the unit was recorded, the 'filename' key
-    holds the name of the Omniplex PL2 file within the ZIP archive, and the 'spiketimes' key holds the spike times (in
-    seconds since the Omniplex recording started) for each unit, as a Numpy array.
+    all units recorded during the session. This file contains a dictionary with 2-3 fields: 'channel', 'spiketimes', and
+    (optionally) 'filename'. The last field is required ONLY if there is more than one Omniplex PL2 file in the archive.
+    Each field is a list of length N, where N is the number of neural units. The 'channel' key holds the Omniplex
+    channel ID for the analog channel on which the unit was recorded, the 'filename' key holds the name of the Omniplex
+    PL2 file within the ZIP archive, and the 'spiketimes' key holds the spike times (in seconds since the Omniplex
+    recording started) for each unit, as a Numpy array.
 
     Args:
-        unit_data: The dictionary loaded from the neural units pickle file.
+        unit_data: The dictionary loaded from the neural units file.
         pl2_filenames: List of all Omniplex PL2 files found in the session archive.
 
     Returns:
@@ -1143,7 +1508,7 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
     units were recorded and calculates selected metrics for those units: firing rate, SNR, and the average spike
     template waveform.
 
-    On calculating the template waveform and SNR for each neural unit: The channel ID in the pickle file must start
+    On calculating the template waveform and SNR for each neural unit: The unit's recorded channel ID must start
     with "WB" (wide band data) or "SPKC" (narrow band data). Wide band data is preferred because the filtering
     parameters for SPKC can be changed during an Omniplex session and are not stored in the PL2 file. If the
     specified channel ID is "SPKC<num>", where <num> is a 2-digit number, the method first looks for the wide-band
@@ -1276,34 +1641,38 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
         snr = (np.max(template[i]) - np.min(template[i])) / (1.96 * noise)
         firing_rate = float(len(spikes[i])) / (spikes[i][-1] - spikes[i][0])
         template[i] *= to_volts * 1.0e6
-        out.append(OmniplexUnit(filename, channel_id, spikes[i], len(spikes[i]), firing_rate, snr, template[i]))
+        out.append(OmniplexUnit(src=filename, ch=channel_id, spikes=spikes[i], num_spikes=len(spikes[i]),
+                                rate=firing_rate, snr=snr, template=template[i]))
     return out
 
 
 def _initialize_session_metadata(
-        username: str, session_date: Optional[date], subj_id: Optional[str], session_info: SessionMetaData,
-        units: List[OmniplexUnit]) -> None:
+        username: str, session_date: Optional[date], subj_id: Optional[str], num_trials: int,
+        units: List[OmniplexUnit]) -> SessionMetaData:
     """
     Helper method for _preprocess_session_archive(). It looks up the experiment session most recently committed to
     the database by the user committing the current session, and uses metadata from that previous session to fill in
     reasonable defaults for the current session. If this is the user's first session commit, at least some session
-    metadata will be left uninitialized.
+    metadata will be a "guess".
 
-    (NOTE there's an implicit assumption here that the user committing the current session is, in fact, the person
-    that conducted that session.)
+    It is assumed that the user committing the current session is also the person that conducted the session. In order
+    to fully initialize session metadata, the lab database MUST contain at least one experiment subject, rig, research
+    study, and brain area. Otherwise, this method raises an exception.
 
     Args:
         username:  The username of the registered portal user to which the commit job belongs.
         session_date: The session date as extracted from the header of a Maestro data file.
         subj_id: The ID of the experiment subject, if matched in the session archive filename or the name of a
             Maestro data file in that archive.
-        session_info: [in/out] The session metadata object. This method initializes as many fields in this object as
-            it can, based on information available.
+        num_trials: The number of trials presented during the session.
         units: A list of all neural units recorded during the session. Will be empty for a behavioral session. This
             method will associate each unit with the "Unspecified" neuron type IF that type is in the database. Else,
             it is left untouched.
+    Returns:
+        The initialized session metadata record.
     Raises:
-        Exception: If an error occurs while looking up the previous experiment session in the database.
+        Exception: If an error occurs while looking up the previous experiment session in the database, or if unable to
+            obtain enough information from database to successfully initialize the session metadata.
     """
     # get most recent session committed by user (if one exists)
     recent_session: Optional[Dict[str, AttributeValue]] = None
@@ -1355,27 +1724,24 @@ def _initialize_session_metadata(
     if res and (len(res) == 1):
         unspecified_id = int(res[0]['nt_id'])
 
-    # fill in whatever session metadata we can. The electrophysiology metadata is left untouched if no neural units
-    # were recorded.
-    session_info.experimenter = username
-    session_info.subj_id = subj_id
-    session_info.session_date = session_date
-    session_info.session_suffix = session_sfx
-    session_info.rig_id = default_rig_id
-    session_info.study_id = default_study_id
-    session_info.session_notes = ""
-    session_info.num_units = len(units)
+    # initialize session metadata, as well as neuron type for each neural unit
+    session_dict = dict(experimenter=username, subj_id=subj_id, session_date=session_date or date.today(),
+                        session_sfx=session_sfx, rig_id=default_rig_id, study_id=default_study_id, session_notes="",
+                        num_units=len(units), num_trials=num_trials)
     if len(units) > 0:
-        for unit in units:
-            unit.neuron_type = unspecified_id
+        for u in units:
+            u.neuron_type = unspecified_id
         channel_ids = {unit.channel for unit in units}
-        session_info.ephys_src = 'Omniplex'
-        session_info.probe_type = 'single' if len(channel_ids) == 1 else '32-channel'
-        session_info.sampling_rate = len(units[0].template) / 0.01
-        session_info.probe_x = None if (recent_ephys is None) else recent_ephys['probe_x']
-        session_info.probe_y = None if (recent_ephys is None) else recent_ephys['probe_y']
-        session_info.probe_depth = None if (recent_ephys is None) else recent_ephys['probe_depth']
-        session_info.ba_id = default_ba_id
+        session_dict['ephys_src'] = 'Omniplex'
+        session_dict['probe_type'] = 'single' if len(channel_ids) == 1 else '32-channel'
+        session_dict['sampling_rate'] = len(units[0].template) / 0.01
+        session_dict['probe_x'] = 0.0 if (recent_ephys is None) else recent_ephys['probe_x']
+        session_dict['probe_y'] = 0.0 if (recent_ephys is None) else recent_ephys['probe_y']
+        session_dict['probe_depth'] = 10.0 if (recent_ephys is None) else recent_ephys['probe_depth']
+        session_dict['ba_id'] = default_ba_id
+
+    # a ValueError or TypeError is raised here if any missing session metadata
+    return SessionMetaData(**session_dict)
 
 
 def session_metadata(job_id: str) -> Optional[SessionMetaData]:
@@ -1394,25 +1760,25 @@ def session_metadata(job_id: str) -> Optional[SessionMetaData]:
         info_raw = get_config().redis_conn.get(f"{INFO_NS}{job_id}")
         if info_raw is None:
             raise Exception("Session metadata not found!")
-        return pickle.loads(info_raw)
+        return SessionMetaData.from_bytes(info_raw)
     except Exception as e:
         _logger.error(f"Error while retrieving session metadata for commit job {job_id}: {str(e)}", exc_info=True)
         return None
 
 
-def update_session_metadata(job_id: str, session_info: SessionMetaData) -> bool:
+def update_session_metadata(job_id: str, updated_params: Dict[str, Any]) -> bool:
     """
     Update the session metadata for an in-progress commit job. This operation is available only during the review
     phase of the job, when the user interactively reviews and edits information required before the experiment session
     can be committed to the portal database.
 
-    The supplied metadata need not be complete or valid; if not, the method returns a description of the first attribute
-    in the metadata that is missing or invalid.
-
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
-        session_info: The updated session metadata. It is not checked for completeness or validity. Select fields are
-            ignored (num_units, num_trials) because these are fixed and cannot be changed by the user.
+        updated_params: A dictionary of parameter names and values to be updated. Can contain any of the following keys
+            (value type in parentheses): experimenter (str), subj_id (str), session_date (date), session_sfx (int, 1-9),
+            rig_id (int), study_id (int), session_notes (str), ephys_src (str), probe_type (str), sampling_rate (float),
+            probe_x (float), probe_y (float), probe_depth (float), ba_id (int). If the session is behavior only, the
+            electrophysiology metadata are ignored. The operation will fail if any parameter has an invalid type.
 
     Returns:
         True if successful; False otherwise
@@ -1425,13 +1791,13 @@ def update_session_metadata(job_id: str, session_info: SessionMetaData) -> bool:
             res = pipe.execute()
         if res is None:
             raise Exception("Did not find commit job status or session metadata on server!")
-        job_status = pickle.loads(res[0])
-        old_session_info = pickle.loads(res[1])
+        job_status = CommitJobStatus.from_bytes(res[0])
+        session_meta = SessionMetaData.from_bytes(res[1])
         if job_status.state != CommitStateEnum.REVIEW:
             raise Exception("Cannot modify session metadata for a commit job that is not in the 'Review' stage.")
-        session_info.num_units = old_session_info.num_units   # the client must not change these
-        session_info.num_trials = old_session_info.num_trials
-        conn.set(f"{INFO_NS}{job_id}", pickle.dumps(session_info))
+
+        session_meta.update(**updated_params)
+        conn.set(f"{INFO_NS}{job_id}", session_meta.to_bytes())
         return True
     except Exception as e:
         _logger.error(f"Error while updating session metadata for commit job {job_id}: {str(e)}", exc_info=True)
@@ -1488,7 +1854,7 @@ def protocol_definition(job_id: str, index: int) -> Optional[maestro.Protocol]:
         raw_proto = get_config().redis_conn.lindex(f"{PROTODEFS_NS}{job_id}", index)
         if raw_proto is None:
             raise Exception(f"Cached protocol definition not found at index {index}")
-        return pickle.loads(raw_proto)
+        return maestro.Protocol.from_bytes(raw_proto)
     except Exception as e:
         _logger.error(f"Error while retrieving trial protocol definition for commit job {job_id}: {str(e)}",
                       exc_info=True)
@@ -1520,10 +1886,10 @@ def add_rv_to_protocol(job_id: str, index: int, rv: maestro.SegParam) -> Optiona
         raw_proto = conn.lindex(f"{PROTODEFS_NS}{job_id}", index)
         if raw_proto is None:
             raise Exception(f"Cached protocol definition not found at index {index}")
-        proto: maestro.Protocol = pickle.loads(raw_proto)
+        proto: maestro.Protocol = maestro.Protocol.from_bytes(raw_proto)
         if not proto.add_random_variable(rv):
             raise Exception("Invalid random variable specification, or protocol is already validated")
-        conn.lset(f"{PROTODEFS_NS}{job_id}", index, pickle.dumps(proto))
+        conn.lset(f"{PROTODEFS_NS}{job_id}", index, proto.to_bytes())
         return proto
     except Exception as e:
         _logger.error(f"Error while adding RV to trial protocol definition for commit job {job_id}: {str(e)}",
@@ -1553,11 +1919,11 @@ def validate_protocol(job_id: str, index: int) -> bool:
         raw_proto = conn.lindex(f"{PROTODEFS_NS}{job_id}", index)
         if raw_proto is None:
             raise Exception(f"Cached protocol definition not found at index {index}")
-        proto: maestro.Protocol = pickle.loads(raw_proto)
+        proto: maestro.Protocol = maestro.Protocol.from_bytes(raw_proto)
         proto.validate()
         # we cache the updated protocol candidate definition AND remove the '** ' from the cached protocol path name
         with conn.pipeline() as pipe:
-            pipe.lset(f"{PROTODEFS_NS}{job_id}", index, pickle.dumps(proto))
+            pipe.lset(f"{PROTODEFS_NS}{job_id}", index, proto.to_bytes())
             pipe.lset(f"{PROTONAMES_NS}{job_id}", index, proto.trial.path_name)
             pipe.execute()
         return True
@@ -1583,6 +1949,8 @@ def metrics_for_neural_unit(job_id: str, index: int) -> Optional[OmniplexUnit]:
     Returns:
         The requested neural unit. Returns None if index invalid or the operation failed for whatever reason.
     """
+    # remember: during review phase, the neuron types are stored in UNITTYPES key, while all other metrics are
+    # stored as serialized OmniplexUnits in UNITMETRICS_NS.
     try:
         conn = get_config().redis_conn
         with conn.pipeline() as pipe:
@@ -1590,8 +1958,8 @@ def metrics_for_neural_unit(job_id: str, index: int) -> Optional[OmniplexUnit]:
             pipe.lindex(f"{UNITTYPES_NS}{job_id}", index)
             raw_unit, raw_type = pipe.execute()
         if (raw_unit is None) or (raw_type is None):
-            return None
-        unit: OmniplexUnit = pickle.loads(raw_unit)
+            raise Exception(f"Missing unit metrics or neuron type in Redis cache at index {index}")
+        unit = OmniplexUnit.from_bytes(raw_unit)
         type_id: int = int(raw_type.decode('utf-8'))
         unit.neuron_type = None if type_id == -1 else type_id
         return unit
@@ -1619,7 +1987,6 @@ def set_unit_type(job_id: str, index: int, neuron_type: int) -> bool:
             to ALL identified units in the session.
         neuron_type: The neuron type ID. This should identify an existing entry in the database's NeuronType table,
             but it is not checked until the session is actually committed to the database.
-
     Returns:
         True if successful; False if the operation fails for whatever reason.
     """
@@ -1669,7 +2036,7 @@ def ready_to_commit(job_id: str) -> Tuple[bool, bool, str]:
         status_raw = conn.get(f"{STATUS_NS}{job_id}")
         if status_raw is None:
             return False, False, "Did not find commit job status on server!"
-        job_status = pickle.loads(status_raw)
+        job_status = CommitJobStatus.from_bytes(status_raw)
         if job_status.state != CommitStateEnum.REVIEW:
             return False, False, "Cannot check session data readiness for a commit job not in the 'Review' stage."
 
@@ -1684,7 +2051,7 @@ def ready_to_commit(job_id: str) -> Tuple[bool, bool, str]:
                 raise Exception(f"Got {len(res)} responses from Redis pipe; expected {3 if has_units else 2}")
             if any([(r is None) for r in res]):
                 raise Exception(f"Missing Redis response data from pipe")
-        info = pickle.loads(res[0])
+        info = SessionMetaData.from_bytes(res[0])
         msg = check_row(DBTable.SESSION, info.session_table_entry())
         if (msg is None) and job_status.units and (job_status.units > 0):
             msg = check_row(DBTable.SESSION_EPHYS, info.ephys_table_entry(), omit_master=True)
@@ -1740,18 +2107,16 @@ def commit_to_database(job_id: str) -> Optional[str]:
         if job is None:
             _logger.debug(f"Got request to finalize a commit job (id={job_id}) that does not exist.")
             return f"Commit job (id={job_id}) not found on server."
-        job_status: CommitJobStatus = pickle.loads(job)
+        job_status: CommitJobStatus = CommitJobStatus.from_bytes(job)
         if job_status.state != CommitStateEnum.REVIEW:
             _logger.debug(f"Got request to finalize a commit job (id={job_id}) that is not in the review phase.")
             return f"Commit job must be in the 'Review' stage before committing to database"
 
         now = time.time()
         update_msg = "Queueing job to commit experiment session to the database."
-        job_status.state = CommitStateEnum.COMMIT
-        job_status.updated = now
-        job_status.msg = update_msg
+        job_status.on_update(msg=update_msg, state=CommitStateEnum.COMMIT, updated=now)
         with conn.pipeline() as pipe:
-            pipe.set(status_key, pickle.dumps(job_status))
+            pipe.set(status_key, job_status.to_bytes())
             pipe.zadd(progress_key, {update_msg: now})
             pipe.zremrangebyrank(progress_key, 0, -(PROGRESS_HISTORY_SIZE + 1))
             pipe.execute()
@@ -1779,11 +2144,10 @@ def finish_commit_job(job_id: str) -> bool:
         2) The Trial table and its part tables are populated with data from all the trials presented during the
         session. We post a progress message and check for user cancel periodically during this process.
 
-        3) A pickle file, "preproc.pickle", is generated that contains the preprocessing results, along with session and
-        electrophysiology metadata entered manually by the user during the review stage. The pickle file is appended to
-        the original session archive ZIP. As a result, the ZIP file contains everything needed to recommit the
-        experiment session -- without user intervention -- in the event the portal database was corrupted and had to be
-        reconstructed from scratch.
+        3) A custom binary file, "preproc.bin", is generated that contains the preprocessing results, along with session
+        metadata entered manually by the user during the review stage. The file is appended to the original session
+        archive ZIP. As a result, the ZIP file contains everything needed to recommit the experiment session -- without
+        user intervention -- in the event the portal database was corrupted and had to be reconstructed from scratch.
 
         4) The altered ZIP file is uploaded to the portal's backing repository, which is maintained in an AWS S3 bucket
         provisioned by the lab expressly for this purpose. The object key under which the ZIP file is stored uniquely
@@ -1870,16 +2234,16 @@ def finish_commit_job(job_id: str) -> bool:
             if num_units > 0:
                 pipe.lrange(f"{UNITTYPES_NS}{job_id}", 0, -1)
             res = pipe.execute()
-        session_info = pickle.loads(res[0])
+        session_info = SessionMetaData.from_bytes(res[0])
         msg = check_row(DBTable.SESSION, session_info.session_table_entry())
         if (msg is None) and num_units > 0:
             msg = check_row(DBTable.SESSION_EPHYS, session_info.ephys_table_entry(), omit_master=True)
         if msg:
-            msg = f"Error: Session metadata incomplete: {msg}"
+            msg = f"Error: Session metadata incomplete/invalid: {msg}"
             _logger.debug(f"Commit job {job_id} failed: {msg}")
             _background_job_update(job_id, msg, CommitStateEnum.FAIL)
             return False
-        protocols = [pickle.loads(proto_raw) for proto_raw in res[1]]
+        protocols = [maestro.Protocol.from_bytes(proto_raw) for proto_raw in res[1]]
         for p in protocols:
             if p.is_candidate:
                 msg = f"Error: At least one trial protocol ({p.trial.path_name} still requires user validation!"
@@ -1892,7 +2256,7 @@ def finish_commit_job(job_id: str) -> bool:
             _logger.debug(f"Commit job {job_id} failed: {msg}")
             _background_job_update(job_id, msg, CommitStateEnum.FAIL)
             return False
-        if unit_types.count(-1) > 0:   # in Redis key, an undefined neuron type is specified as -1
+        if unit_types.count(-1) > 0:
             msg = f"Error: The neuron type is undefined for at least one neural unit!"
             _logger.debug(f"Commit job {job_id} failed: {msg}")
             _background_job_update(job_id, msg, CommitStateEnum.FAIL)
@@ -1902,17 +2266,14 @@ def finish_commit_job(job_id: str) -> bool:
         # units. We don't need trial info nor the (potentially huge) unit spike time arrays during the review phase,
         # so these weren't cached in Redis and so must be recovered from the temporary file. Set neuron type for each
         # unit IAW cached neuron type list that may have been altered during review phase.
-        with open(preproc_path, 'rb') as file:
-            res = pickle.load(file)
-            trial_info = res['trials']
-            units = res['units']
-            if len(units) != num_units:
-                msg = f"Error: Number of preprocessed units inconsistent with job status info!"
-                _logger.debug(f"Commit job {job_id} failed: {msg}")
-                _background_job_update(job_id, msg, CommitStateEnum.FAIL)
-                return False
-            for i, u in enumerate(units):
-                u.neuron_type = unit_types[i]
+        _, trial_info, _, units = _read_session_preprocessing_file(preproc_path)
+        if len(units) != num_units:
+            msg = f"Error: Number of preprocessed units inconsistent with job status info!"
+            _logger.debug(f"Commit job {job_id} failed: {msg}")
+            _background_job_update(job_id, msg, CommitStateEnum.FAIL)
+            return False
+        for i, u in enumerate(units):
+            u.neuron_type = unit_types[i]
 
         # update the individual trial info to include the corresponding protocol's unique MD5 hexadecimal digest
         for _, t_info in trial_info.items():
@@ -1939,22 +2300,17 @@ def finish_commit_job(job_id: str) -> bool:
         return False
     added_proto_hashes = [p['proto_hash'] for p in commit_mgr.trial_protocols()]
 
-    # at this point, the session has been committed to the database. Now we need rewrite the preprocessing pickle file
+    # at this point, the session has been committed to the database. Now we need to rewrite the preprocessing file
     # to include the information supplied during the review stage, and append it to the ZIP archive. Then we upload the
     # amended ZIP archive to the portal backing repository. If any of those operations fail, we have to remove the
     # session from the database!
     key = f"/repo/{session_info.experimenter}/" \
-          f"{session_info.subj_id}_{str(session_info.session_date)}_{session_info.session_suffix}.zip"
+          f"{session_info.subj_id}_{str(session_info.session_date)}_{session_info.session_sfx}.zip"
     archive_uploaded, commit_logged = False, False
     try:
         if _background_job_update(job_id, "Adding pre-processing results to session archive..."):
             raise Exception("Operation cancelled")
-
-        results = {'protocols': protocols, 'trials': trial_info, 'units': units,
-                   'session': session_info.session_table_entry(),
-                   'ephys': None if len(units) <= 0 else session_info.ephys_table_entry()}
-        with open(preproc_path, 'wb') as file:
-            pickle.dump(results, file)
+        _write_session_preprocessing_file(preproc_path, session_info, trial_info, protocols, units)
         with zipfile.ZipFile(zip_path, 'a') as f:
             f.write(preproc_path, PREPROC_FNAME)
 
@@ -1966,7 +2322,7 @@ def finish_commit_job(job_id: str) -> bool:
 
         # finally, log the session commit
         res = log_session_commit(session_info.experimenter, session_info.subj_id, str(session_info.session_date),
-                                 session_info.session_suffix)
+                                 session_info.session_sfx)
         if res:
             raise Exception(res)
         commit_logged = True
@@ -2070,7 +2426,7 @@ class _SessionCommitMgr(SessionCommitter):
             neuron['experimenter'] = self.session_info.experimenter
             neuron['subj_id'] = self.session_info.subj_id
             neuron['session_date'] = self.session_info.session_date
-            neuron['session_sfx'] = self.session_info.session_suffix
+            neuron['session_sfx'] = self.session_info.session_sfx
             neuron['unit_id'] = i + 1
             neuron['unit_channel'] = unit.channel
             neuron['unit_type'] = unit.neuron_type
@@ -2095,7 +2451,7 @@ class _SessionCommitMgr(SessionCommitter):
                     protocol_entry['proto_name'] = p.trial.name
                     protocol_entry['proto_set'] = "" if (p.trial.set_name is None) else p.trial.set_name
                     protocol_entry['proto_subset'] = "" if (p.trial.subset_name is None) else p.trial.subset_name
-                    protocol_entry['proto_def'] = pickle.dumps(p)
+                    protocol_entry['proto_def'] = p.to_bytes()
                     self.new_protocol_entries.append(protocol_entry)
         return self.new_protocol_entries
 
@@ -2164,7 +2520,7 @@ class _SessionCommitMgr(SessionCommitter):
                     session_key,
                     trial_idx=(num_inserted + 1),
                     proto_hash=t_info.proto_hash,
-                    trial_header=pickle.dumps(data_file.header),
+                    trial_header=data_file.header.to_bytes(),
                     trial_filename=trial_filename,
                     trial_dur=data_file.header.num_scans_saved - 1,
                     trial_record_start=data_file.trial.record_start,
@@ -2199,7 +2555,7 @@ class _SessionCommitMgr(SessionCommitter):
                         raise Exception(
                             f"Internal inconsistency: Invalid RV ({param}) for trial in {trial_filename}")
                     rv_values.append(rv_value)
-                trial_entry['trial_rvs'] = pickle.dumps(rv_values)
+                trial_entry['trial_rvs'] = json.dumps(rv_values).encode()
 
                 trial_entries.append(trial_entry)
                 num_trials_chunked += 1
@@ -2284,7 +2640,7 @@ def reconstruct_database() -> None:
 
     Obviously, re-committing an experiment session to the database is the single most time-consuming task. The relevant
     session archive must be downloaded from the portal repository on S3 to a staging location in the portal workspace
-    dirctory, and that archive is then "digested" to re-commit the experiment's data. The archive includes a pickle file
+    dirctory, and that archive is then "digested" to re-commit the experiment's data. The archive includes a binary file
     with the original results of pre-processing, so the re-commit is much faster than the original commit. The slowest
     part is likely to be downloading the archive from S3.
 
@@ -2318,7 +2674,7 @@ def reconstruct_database() -> None:
         with open(log_path, 'rb') as file:
             while True:
                 try:
-                    entry = pickle.load(file)
+                    entry = pickle.load(file)   # TODO: Can we eliminate use of pkl for the database log file??
                     num_entries += 1
                     print(f"Processing log entry #{num_entries}: \n    {entry}", file=sys.stdout)
                     if entry['op'] == 'add':
@@ -2368,8 +2724,8 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
     in the format 'YYYY-MM-DD', and <session_sfx> is the integer session suffix.
 
     During the original commit, all pre-processing results -- as well as any information entered manually via user
-    interaction -- are stored in the pickle file "preproc.pickle", which in turn is appended to the session archive ZIP.
-    As a result, re-committing the session requires no user intervention and is significantly faster because it does not
+    interaction -- are stored in the file "preproc.bin", which in turn is appended to the session archive ZIP. As a
+    result, re-committing the session requires no user intervention and is significantly faster because it does not
     require processing of a large PL2 file (which also would have to be extracted from the ZIP file). However, the
     archive ZIP must be downloaded from the repository to a staging directory in the portal workspace before it is
     processed, which could take a while.
@@ -2394,44 +2750,21 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
         if not repo.download_file(key, zip_path, log=False):
             raise Exception("Failed while downloading session archive from repository.")
 
-        # load pre-processing results from pickle file in session archive
+        # load pre-processing results from binary file in session archive
         print(f"  > Loading preprocessed results stored in session archive...")
         preproc_path = Path(recon_dir, PREPROC_FNAME)
         with zipfile.ZipFile(zip_path, 'r') as archive:
             archive.extract(PREPROC_FNAME, path=str(recon_dir.absolute()))
         if not preproc_path.is_file():
             raise Exception("Failed to extract pre-processing results file from session archive")
-        with open(preproc_path, 'rb') as file:
-            results = pickle.load(file)
-        if not (isinstance(results, dict) or
-                all([(k in results) for k in ['protocols', 'trials', 'units', 'session', 'ephys']])):
-            raise Exception("Invalid or incomplete pre-processing results file!")
-        protocols: List[maestro.Protocol] = results['protocols']
-        trial_info: Dict[str, _TrialInfo] = results['trials']
-        units: Optional[List[OmniplexUnit]] = results['units']
-        session_info: Dict[str, Optional[AttributeValue]] = results['session']
-        ephys_info: Optional[Dict[str, Optional[AttributeValue]]] = results['ephys']
-
-        metadata = SessionMetaData(experimenter=session_info['experimenter'], subj_id=session_info['subj_id'],
-                                   session_date=session_info['session_date'],
-                                   session_suffix=session_info['session_sfx'], rig_id=session_info['rig_id'],
-                                   study_id=session_info['study_id'], session_notes=session_info['session_notes'],
-                                   num_units=len(units) if units else 0, num_trials=session_info['num_trials'])
-        if ephys_info:
-            metadata.ephys_src = ephys_info['ephys_src']
-            metadata.probe_type = ephys_info['probe_type']
-            metadata.sampling_rate = ephys_info['sampling_rate']
-            metadata.probe_x = ephys_info['probe_x']
-            metadata.probe_y = ephys_info['probe_y']
-            metadata.probe_depth = ephys_info['probe_depth']
-            metadata.ba_id = ephys_info['ba_id']
+        session_meta, trial_info, protocols, units = _read_session_preprocessing_file(preproc_path)
 
         # here's where it all happens: the database inserts, rollback on failure, progress messages and check for
         # cancellation.
-        session_label = f"{metadata.experimenter}-{metadata.subj_id}-{str(metadata.session_date)}-" \
-                        f"{metadata.session_suffix}"
+        session_label = f"{session_meta.experimenter}-{session_meta.subj_id}-{str(session_meta.session_date)}-" \
+                        f"{session_meta.session_sfx}"
         print(f"   > Reconstructing session [{session_label}] in database...", file=sys.stdout)
-        commit_mgr = _SessionCommitMgr(None, zip_path, metadata, trial_info, protocols, units)
+        commit_mgr = _SessionCommitMgr(None, zip_path, session_meta, trial_info, protocols, units)
         error_msg = commit_mgr.commit()
         if error_msg:
             return error_msg
@@ -2439,10 +2772,129 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
     except Exception as err:
         error_msg = f"Exception while reconstructing experiment session:\n  {str(err)}"
     finally:
-        # dispose of the temporary directory in which the archive and pickle files were stored during reconstruction
+        # dispose of the temporary directory in which the archive and preproc files were stored during reconstruction
         try:
             shutil.rmtree(recon_dir)
         except Exception as e:
             print(f"   > Warning - An exception occured while removing temporary "
                   f"directory {str(recon_dir)}:\n   {str(e)}", file=sys.stdout, flush=True)
     return error_msg
+
+
+_SESSION_PREPROC_VERSION: int = 1
+""" Current version number for the binary session preprocessing results file. """
+
+
+def _write_session_preprocessing_file(file_path: Path, session_meta: SessionMetaData, trial_info: Dict[str, _TrialInfo],
+                                      protocols: List[maestro.Protocol], units: List[OmniplexUnit]) -> None:
+    """
+    Write the results from preprocessing a session archive to a binary file.
+
+    The preprocessing phase of the session commit workflow can take a significant amount of time, especially for a
+    longer experiment in which many trials were presented and many neural units recorded. These results are kept in a
+    file in the staging directory during the review phase (and the content may be modified by user action during that
+    phase); after the session is committed, the preprocessing file is added to the session archive before it is moved
+    to the portal's backup repository.
+
+    Args:
+        file_path: Destination path for session preprocessing file.
+        session_meta: The session metadata.
+        trial_info: Information on each trial rep presented during session, keyed by the Maestro data file name.
+        protocols: The list of distinct Maestro trial protocols (vs individual reps) presented during session.
+        units: The list of neural units recorded during the session. Will be empty list for behavioral session.
+    Raises:
+        Exception if operation fails for any reason.
+    """
+    try:
+        session_meta_raw = session_meta.to_bytes()
+        json_trial_info = dict()
+        for k, tinfo in trial_info.items():
+            json_trial_info[k] = [tinfo.file_index, tinfo.duration, tinfo.header_timestamp, tinfo.omniplex_start,
+                                  tinfo.omniplex_stop, tinfo.proto_index, tinfo.proto_hash]
+        trial_info_raw = json.dumps(json_trial_info).encode()
+        hdr_raw = struct.pack("<5i", _SESSION_PREPROC_VERSION, len(session_meta_raw), len(trial_info_raw),
+                              len(protocols), len(units))
+        with open(file_path, 'wb') as f:
+            f.write(hdr_raw)
+            f.write(session_meta_raw)
+            f.write(trial_info_raw)
+            for p in protocols:
+                proto_raw = p.to_bytes()
+                f.write(struct.pack('<i', len(proto_raw)))
+                f.write(proto_raw)
+            for u in units:
+                unit_raw = u.to_bytes()
+                f.write(struct.pack('<i', len(unit_raw)))
+                f.write(unit_raw)
+    except Exception as e:
+        emsg = f"Failed to write preprocessing file - {str(e)}"
+        raise Exception(emsg)
+
+
+def _read_session_preprocessing_file(file_path: Path) -> \
+        Tuple[SessionMetaData, Dict[str, _TrialInfo], List[maestro.Protocol], List[OmniplexUnit]]:
+    """
+    Read the contents of a file previously written by `_write_sesssion_preprocessing_file()`.
+
+    Args:
+        file_path: Source path for the session preprocessing file.
+    Returns:
+        A 4-tuple: the session metadata object; a dictionary with information on each trial rep presented during
+            session, keyed by the Maestro data file name; the list of distinct Maestro trial protocols (vs individual
+            reps) presented; and the list of neural units recorded during the session (empty for behavioral sessions).
+    Raises:
+        Exception: If operation fails for any reason.
+    """
+    try:
+        with open(file_path, 'rb') as f:
+            hdr_size = struct.calcsize("<5i")
+            hdr_raw = f.read(hdr_size)
+            if (not hdr_raw) or (len(hdr_raw) != hdr_size):
+                raise Exception('Hit EOF unexpectedly while reading file header')
+            v, meta_size, tinfo_size, num_proto, num_units = struct.unpack("<5i", hdr_raw)
+            if v != _SESSION_PREPROC_VERSION:
+                raise Exception('Bad file version')
+            if (meta_size < 0) or (tinfo_size < 0) or (num_proto < 0) or (num_units < 0):
+                raise Exception('Invalid file header')
+
+            meta_raw = f.read(meta_size)
+            if (not meta_raw) or (len(meta_raw) != meta_size):
+                raise Exception('Hit EOF unexpectedly while reading session metadata')
+            session_meta = SessionMetaData.from_bytes(meta_raw)
+
+            trial_info_raw = f.read(tinfo_size)
+            if (not trial_info_raw) or (len(trial_info_raw) != tinfo_size):
+                raise Exception('Hit EOF unexpectedly while reading trial reps info')
+            json_trial_info = json.loads(trial_info_raw.decode())
+            trial_info: Dict[str, _TrialInfo] = dict()
+            for k, v in json_trial_info.items():
+                trial_info[k] = _TrialInfo(file_index=v[0], duration=v[1], header_timestamp=v[2], omniplex_start=v[3],
+                                           omniplex_stop=v[4], proto_index=v[5], proto_hash=v[6])
+
+            int_sz = struct.calcsize("<i")
+            protocols: List[maestro.Protocol] = list()
+            for _ in range(num_proto):
+                sz_raw = f.read(int_sz)
+                if (not sz_raw) or (len(sz_raw) != int_sz):
+                    raise Exception('Hit EOF unexpectedly in trial protocols section')
+                proto_raw_sz, _ = struct.unpack("<i", sz_raw)
+                proto_raw = f.read(proto_raw_sz)
+                if (not proto_raw) or (len(proto_raw) != proto_raw_sz):
+                    raise Exception('Hit EOF unexpectedlyin trial protocols section')
+                protocols.append(maestro.Protocol.from_bytes(proto_raw))
+
+            units: List[OmniplexUnit] = list()
+            for _ in range(num_units):
+                sz_raw = f.read(int_sz)
+                if (not sz_raw) or (len(sz_raw) != int_sz):
+                    raise Exception('Hit EOF unexpectedly in neural units section')
+                unit_raw_sz, _ = struct.unpack("<i", sz_raw)
+                unit_raw = f.read(unit_raw_sz)
+                if (not unit_raw) or (len(unit_raw) != unit_raw_sz):
+                    raise Exception('Hit EOF unexpectedly while reading a trial protocol')
+                units.append(OmniplexUnit.from_bytes(unit_raw))
+
+        return session_meta, trial_info, protocols, units
+    except Exception as e:
+        emsg = f"Failed to read preprocessing file - {str(e)}"
+        raise Exception(emsg)
