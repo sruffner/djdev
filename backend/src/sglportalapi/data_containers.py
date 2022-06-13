@@ -197,7 +197,7 @@ class NeuronInfo:
         unit_rate=float, unit_spikes=int, unit_snr=float, unit_template=np.ndarray, neuron_type=str
     )
     """ 
-    Defines the keys and corresponding value types for the pickled dictionary sent 'over the wire' that contains 
+    Defines the keys and corresponding value types for the serialized dictionary sent 'over the wire' that contains 
     information about a recorded neural unit.
     """
 
@@ -337,7 +337,7 @@ class TrialRep:
         vepos=np.ndarray, hevel=np.ndarray, vevel=np.ndarray, events=dict, spike_trains=dict
     )
     """ 
-    Dictionary defines the keys and corresponding value types for the pickled dictionary sent 'over the wire' that
+    Dictionary defines the keys and corresponding value types for the serializeed dictionary sent 'over the wire' that
     contains the response data and other information for a single trial rep.
     """
 
@@ -581,17 +581,17 @@ class _CustomJSONEncoder(json.JSONEncoder):
     """
     def default(self, obj):
         if isinstance(obj, np.ndarray) and obj.ndim == 1:
-            return {'nparray_b64': base64.b64encode(obj.tobytes()).decode('utf-8')}
+            return {'_nparray_b64': base64.b64encode(obj.tobytes()).decode('utf-8')}
         elif isinstance(obj, Protocol):
-            return {'proto_b64': base64.b64encode(obj.to_bytes()).decode('utf-8')}
+            return {'_proto_b64': base64.b64encode(obj.to_bytes()).decode('utf-8')}
         return super(_CustomJSONEncoder, self).default(obj)
 
     @staticmethod
     def decoder_hook(dict_obj):
-        if isinstance(dict_obj, dict) and (len(dict_obj.keys()) == 1) and ('nparray_b64' in dict_obj):
-            return np.frombuffer(base64.b64decode(dict_obj['nparray_b64']))
-        if isinstance(dict_obj, dict) and (len(dict_obj.keys()) == 1) and ('proto_b64' in dict_obj):
-            return Protocol.from_bytes(base64.b64decode(dict_obj['proto_b64']))
+        if isinstance(dict_obj, dict) and (len(dict_obj.keys()) == 1) and ('_nparray_b64' in dict_obj):
+            return np.frombuffer(base64.b64decode(dict_obj['_nparray_b64']))
+        if isinstance(dict_obj, dict) and (len(dict_obj.keys()) == 1) and ('_proto_b64' in dict_obj):
+            return Protocol.from_bytes(base64.b64decode(dict_obj['_proto_b64']))
         return dict_obj
 
 

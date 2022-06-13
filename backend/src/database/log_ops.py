@@ -16,10 +16,10 @@ The operations log is currently implemented as a single log file that continues 
 may be necessary to divide it into a sequence of log files: database_ops.log.N, where the integer extension indicates
 the order in which the files were written.
 
-**Log entries are serialized using the standard python pickle module.** Since the database log is internal to the
-portal backend and not exposed to external input, this is considered a safe usage of pickle. One issue for the future
-is resilience in the face of changing the format of log entries or adding new kinds of database information to them. The
-current implementation is rather NON-resilient!
+**Each log entry is serialized using a custom JSON encoder to handle data types that cannot be serialized by the
+standard JSON module.** However, since JSON is not a framed protocol, we cannot use json.dump() to append each new log
+entry to the log file. Instead, each JSONified entry is encoded as a byte sequence, and that bytes object is appended to
+the log file, preceded by its length. These low-level details are handled internally within this module.
 
 The database operations log, like the database itself, is a global resource. Since replicas of the portal backend may
 be running simultaneously in the cloud-deployed portal application, it is possible that more than one replica (process)
@@ -30,13 +30,17 @@ access to the operations log file must go through this module.
 @author: sruffner
 @created: 11oct2021
 """
-import pickle
+import base64
+import json
+import struct
 import sys
 import uuid
-from datetime import timedelta
+from datetime import timedelta, date, datetime
 from pathlib import Path
-from typing import Dict, Optional, Set, TextIO
+from typing import Dict, Optional, Set, TextIO, Any, List
 from contextlib import contextmanager
+
+import numpy as np
 from fasteners import InterProcessLock
 from rq import Queue
 
@@ -79,6 +83,42 @@ class WithTimeout(InterProcessLock):
             self.release()
 
 
+class _LogEntryJSONEncoder(json.JSONEncoder):
+    """
+    JSONEncoder subclass customized to jsonify any entry written to the database operations log. It handles the
+    serialization/deserialization of those object types that standard JSON cannot handle but that can appear in a
+    log entry: (1) A DBTable enum; (2) 1D Numpy float array; (3) `datetime.date` or `datetime.datetime` objects; or
+    (4) a `bytes` object.
+    """
+    def default(self, obj):
+        if isinstance(obj, DBTable):
+            return {'_DBTable': DBTable.value}
+        elif isinstance(obj, np.ndarray) and obj.ndim == 1:
+            return {'_nparray_b64': base64.b64encode(obj.tobytes()).decode('utf-8')}
+        elif isinstance(obj, date):
+            return {'_date_iso': obj.isoformat()}
+        elif isinstance(obj, datetime):
+            return {'_datetime_iso': obj.isoformat()}
+        elif isinstance(obj, bytes):
+            return {'_bytes_b64': base64.b64encode(obj).decode('utf-8')}
+        return super(_LogEntryJSONEncoder, self).default(obj)
+
+    @staticmethod
+    def decoder_hook(dict_obj):
+        if isinstance(dict_obj, dict) and (len(dict_obj.keys()) == 1):
+            if '_DBTable' in dict_obj:
+                return DBTable(dict_obj['_DBTable'])
+            elif '_nparray_b64' in dict_obj:
+                return np.frombuffer(base64.b64decode(dict_obj['_nparray_b64']))
+            elif '_date_iso' in dict_obj:
+                return date.fromisoformat(dict_obj['_date_iso'])
+            elif '_datetime_iso' in dict_obj:
+                return datetime.fromisoformat(dict_obj['_datetime_iso'])
+            elif '_bytes_b64' in dict_obj:
+                return base64.b64decode(dict_obj['_bytes_b64'])
+        return dict_obj
+
+
 def _ensure_logs_directory_exists() -> None:
     _LOG_FILE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -86,6 +126,30 @@ def _ensure_logs_directory_exists() -> None:
 def log_file_path() -> Path:
     """ The file system path to the database operations log file in the portal backup repository. """
     return _LOG_FILE_PATH
+
+
+def _append_log_entry(entry: Dict[str, Any]) -> None:
+    """
+    Helper method that appends a new log entry to the database operations log file in the portal workspace. It
+    handles the details of JSONifying the entry, converting the resulting JSON to a byte sequence, acquiring an
+    interprocess lock on the dedicated log file, and then appending the byte sequence -- preceded by its length -- to
+    that file.
+
+    After appending the log entry, it will schedule a backup of the operations log file to portal's backup repository
+    in S3 (if needed).
+
+    Args:
+        entry: The new entry.
+    Raises:
+        Exception: If an error occurs while serializing the entry to the database operations log file.
+    """
+    _ensure_logs_directory_exists()
+    raw_bytes = json.dumps(entry, cls=_LogEntryJSONEncoder).encode()
+    with WithTimeout(_LOG_LOCK_PATH, 1):
+        with open(_LOG_FILE_PATH, 'ab') as f:
+            f.write(struct.pack('<i', len(raw_bytes)))
+            f.write(raw_bytes)
+    schedule_log_backup_if_necessary()
 
 
 def log_add_table_row(table_id: DBTable, row: Dict[str, AttributeValue]) -> Optional[str]:
@@ -100,14 +164,10 @@ def log_add_table_row(table_id: DBTable, row: Dict[str, AttributeValue]) -> Opti
     """
     error_msg: Optional[str] = None
     try:
-        _ensure_logs_directory_exists()
         # NEVER store user's encrypted password in the log!
         if table_id == DBTable.USER:
             row.pop('password', None)
-        with WithTimeout(_LOG_LOCK_PATH, 1):
-            with open(_LOG_FILE_PATH, 'ab') as file:
-                pickle.dump({'op': 'add', 'table': table_id, 'row': row}, file)
-        schedule_log_backup_if_necessary()
+        _append_log_entry(dict(op='add', table=table_id, row=row))
     except Exception as err:
         error_msg = f"Failed to post 'add' entry to database update log: {str(err)}"
         get_application_logger().error(error_msg, exc_info=True)
@@ -126,11 +186,7 @@ def log_delete_from_table(table_id: DBTable, restriction: Optional[Dict[str, Att
     """
     error_msg: Optional[str] = None
     try:
-        _ensure_logs_directory_exists()
-        with WithTimeout(_LOG_LOCK_PATH, 1):
-            with open(_LOG_FILE_PATH, 'ab') as file:
-                pickle.dump({'op': 'delete', 'table': table_id, 'restriction': restriction}, file)
-        schedule_log_backup_if_necessary()
+        _append_log_entry(dict(op='delete', table=table_id, restriction=restriction))
     except Exception as err:
         error_msg = f"Failed to post 'delete' entry to database update log: {str(err)}"
         get_application_logger().error(error_msg, exc_info=True)
@@ -149,16 +205,12 @@ def log_update_table_row(table_id: DBTable, row: Dict[str, AttributeValue]) -> O
     """
     error_msg: Optional[str] = None
     try:
-        _ensure_logs_directory_exists()
         # NEVER store user's encrypted password in the log!
         if table_id == DBTable.USER:
             row.pop('password', None)
             if len(row) == 1:
                 return None
-        with WithTimeout(_LOG_LOCK_PATH, 1):
-            with open(_LOG_FILE_PATH, 'ab') as file:
-                pickle.dump({'op': 'update', 'table': table_id, 'row': row}, file)
-        schedule_log_backup_if_necessary()
+        _append_log_entry(dict(op='update', table=table_id, row=row))
     except Exception as err:
         error_msg = f"Failed to post 'update' entry to database update log: {str(err)}"
         get_application_logger().error(error_msg, exc_info=True)
@@ -179,11 +231,7 @@ def log_mapping_table_update(table_id: DBTable, src_pk_val: int, map_set: Set[in
     """
     error_msg: Optional[str] = None
     try:
-        _ensure_logs_directory_exists()
-        with WithTimeout(_LOG_LOCK_PATH, 1):
-            with open(_LOG_FILE_PATH, 'ab') as file:
-                pickle.dump({'op': 'mapping', 'table': table_id, 'src_pk': src_pk_val, 'dst_pks': map_set}, file)
-        schedule_log_backup_if_necessary()
+        _append_log_entry(dict(op='mapping', table=table_id, src_pk=src_pk_val, dst_pks=[k for k in map_set]))
     except Exception as err:
         error_msg = f"Failed to post 'mapping' entry to database update log: {str(err)}"
         get_application_logger().error(error_msg, exc_info=True)
@@ -206,12 +254,7 @@ def log_session_commit(user: str, subject: str, session_date: str, suffix: int) 
     """
     error_msg: Optional[str] = None
     try:
-        _ensure_logs_directory_exists()
-        with WithTimeout(_LOG_LOCK_PATH, 1):
-            with open(_LOG_FILE_PATH, 'ab') as file:
-                pickle.dump({'op': 'session', 'username': user, 'subj_id': subject, 'date': session_date,
-                             'suffix': suffix}, file)
-        schedule_log_backup_if_necessary()
+        _append_log_entry(dict(op='session', username=user, subj_id=subject, date=session_date, suffix=suffix))
     except Exception as err:
         error_msg = f"Failed to post 'session' entry to database update log: {str(err)}"
         get_application_logger().error(error_msg, exc_info=True)
@@ -290,6 +333,42 @@ def backup_log_to_repo() -> None:
             pass
 
 
+def read_database_operations_log() -> List[Dict[str, Any]]:
+    """
+    Read in all entries in the database operations log file in the portal workspace.
+
+    Never call this method when the portal application is online. The method does NOT acquire an advisory interprocess
+    lock before reading the operations log file.
+
+    Returns:
+        List of all entries read from the log file.
+    Raises:
+        OSError: If log file not found in portal workspace directory, or if any error occurs while reading the file.
+        EOFError: If end-of-file is reached in the middle of a log entry.
+        JSONDecodError: If an error occurs while parsing any entry.
+    """
+    log_path = log_file_path()
+    if not log_path.is_file():
+        raise Exception(f"No database operations log found at {str(log_path)}")
+    entries: List[Dict[str, Any]] = list()
+    int_sz = struct.calcsize('<i')
+    with open(log_path, 'rb') as f:
+        while True:
+            size_bytes = f.read(int_sz)
+            if size_bytes == 0:
+                break
+            if len(size_bytes) != int_sz:
+                raise EOFError('Hit EOF in the middle of a log entry')
+            entry_size, = struct.unpack('<i', size_bytes)
+            raw_entry = f.read(entry_size)
+            if len(raw_entry) != entry_size:
+                raise EOFError('Hit EOF in the middle of a log entry')
+            entry = json.loads(raw_entry, object_hook=_LogEntryJSONEncoder.decoder_hook)
+            entries.append(entry)
+
+    return entries
+
+
 def dump_log(out: Optional[TextIO] = sys.stdout) -> None:
     """
     Dump the entire contents of the database operations log to a text file stream.
@@ -300,24 +379,16 @@ def dump_log(out: Optional[TextIO] = sys.stdout) -> None:
     Args:
         out: The target text stream. Defaults to STDOUT.
     """
-    log_path = log_file_path()
-    if not log_path.is_file():
-        print(f"=====> Error: No log file found at {str(log_path)}", file=out, flush=True)
-        return
-
-    print("\n****** Database operations log history ******\n", file=out, flush=True)
+    entries: List[Dict[str, Any]]
     try:
-        num_entries = 0
-        with open(log_path, 'rb') as file:
-            while True:
-                try:
-                    entry = pickle.load(file)
-                    num_entries += 1
-                    print(f"{num_entries:04}:  {entry}", file=out)
-                except EOFError:
-                    break
+        entries = read_database_operations_log()
     except Exception as e:
         err_msg = f"Error occurred while dumping database operations log: {str(e)}"
         get_application_logger().error(err_msg, exc_info=True)
-        print(f"=====> {err_msg}", file=sys.stdout, flush=True)
+        print(f"=====> {err_msg}", file=out, flush=True)
+        return
+
+    print("\n****** Database operations log history ******\n", file=out, flush=True)
+    for i, entry in enumerate(entries):
+        print(f"{i:04}: {entry}", file=out)
     print("\n****** END Database operations log history ******\n")

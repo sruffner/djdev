@@ -32,10 +32,10 @@ development efforts
             this temporary directory is removed.
         /username1
             All experiment sessions committed by the user 'username1' will be kept in this directory. All required data
-            for a given session will be stored in two files: {subj_name}_{session_date}_{sfx}.zip is the ZIP file
-            uploaded by the user during the original commit, and {subj_name}_{session_date}_{sfx}.pickle is a Python
-            pickle file containing data prepared during pre-processing of the archive or entered manually by the user
-            during the commit process.
+            for a given session will be stored in a single file: {subj_name}_{session_date}_{sfx}.zip is the ZIP file
+            uploaded by the user during the original commit, augmented with an additional binary file containing
+            data generated during pre-processing of the archive or entered manually by the user during the commit
+            workflow.
         /username2
             Similarly for all sessions committed by 'username2'
 

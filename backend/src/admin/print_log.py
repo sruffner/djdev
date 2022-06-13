@@ -1,9 +1,8 @@
 """
 print_log.py: A script that prints a summary of all entries in the database operations log.
 
-For now, a single pickle file in the database backup repository, $REPO_HOME/logs/update_log, contains the entire history
-of operations on the database. The database can be reconstructed from scratch by executing the operations stored in the
-log file. Of course, to execute a session commit job, the requisite files must also be located in the data repository.
+This script is simple wrapper for `:py:func:database.log_ops.dump_log`, printing all entries in the operations log to
+STDOUT.
 
 Usage - when deployed on local development machine using Docker Compose:
     1) docker-compose up  ==> Starts the portal application in the usual manner.

@@ -93,7 +93,7 @@ from config.app_logging import get_application_logger
 from config.config import get_config
 from database import repo
 from sglportalapi import maestro, PL2
-from database.log_ops import log_session_commit, log_file_path
+from database.log_ops import log_session_commit, read_database_operations_log
 from database.table_info import DBTable, AttributeValue, primary_key_of
 from database.table_ops import fetch_attribute_values, fetch_one_row, fetch_rows, check_row, fetch_restrict_proj, \
     SessionCommitter, rollback_session_commit, database_empty, insert_into_table, delete_from_table, update_table_row, \
@@ -2655,53 +2655,50 @@ def reconstruct_database() -> None:
     the operation is NOT logged. So the database operations history does not preserve user password changes. See also
     change_portal_user_password() in user_ops.py.
     """
-    # ensure database update log exists and verify that database is empty
-    log_path: Path = log_file_path()
-    if not log_path.is_file():
-        print(f"=====> ERROR: No database log file found at {str(log_file_path)}\n", file=sys.stdout, flush=True)
-        return
+    print(f"Starting database reconstruction from repository using operations log file in portal workspace...",
+          file=sys.stdout, flush=True)
+
     err_msg = database_empty()
     if err_msg:
         print(f"=====> ERROR: {err_msg}. Database must be empty prior to reconstruction!\n", file=sys.stdout,
               flush=True)
         return
 
-    print(f"Starting database reconstruction from repository using log file at {str(log_file_path)}...",
-          file=sys.stdout, flush=True)
+    entries: List[Dict[str, Any]]
+    try:
+        entries = read_database_operations_log()
+    except Exception as e:
+        err_msg = f"Error occurred while reading database operations log: {str(e)}"
+        get_application_logger().error(err_msg, exc_info=True)
+        print(f"=====> {err_msg}", file=sys.stdout, flush=True)
+        return
 
     try:
-        num_entries = 0
-        with open(log_path, 'rb') as file:
-            while True:
-                try:
-                    entry = pickle.load(file)   # TODO: Can we eliminate use of pkl for the database log file??
-                    num_entries += 1
-                    print(f"Processing log entry #{num_entries}: \n    {entry}", file=sys.stdout)
-                    if entry['op'] == 'add':
-                        # SPECIAL CASE: When adding a user account, we must prompt for an initial password
-                        if entry['table'] == DBTable.USER:
-                            print(f" *** You must specify a valid initial password for each user added to database...",
-                                  file=sys.stdout, flush=True)
-                            password = prompt_for_password(entry['row']['username'])
-                            if password is None:
-                                raise Exception(f"Password not supplied for {entry['row']['username']}. Aborting.")
-                            entry['row']['password'] = generate_password_hash(password, method=PASSWORD_HASH_METHOD)
-                        err_msg = insert_into_table(entry['table'], entry['row'], log=False)
-                    elif entry['op'] == 'delete':
-                        err_msg = delete_from_table(entry['table'], entry['restriction'], log=False)
-                    elif entry['op'] == 'update':
-                        err_msg = update_table_row(entry['table'], entry['row'], log=False)
-                    elif entry['op'] == 'mapping':
-                        err_msg = update_mapping_table(entry['table'], entry['src_pk'], entry['dst_pks'], log=False)
-                    elif entry['op'] == 'session':
-                        err_msg = _reconstruct_session(entry)
-                    else:
-                        err_msg = f"Invalid log entry!"
+        for i, entry in enumerate(entries):
+            print(f"Processing log entry #{i:04}: \n    {entry}", file=sys.stdout)
+            if entry['op'] == 'add':
+                # SPECIAL CASE: When adding a user account, we must prompt for an initial password
+                if entry['table'] == DBTable.USER:
+                    print(f" *** You must specify a valid initial password for each user added to database...",
+                          file=sys.stdout, flush=True)
+                    password = prompt_for_password(entry['row']['username'])
+                    if password is None:
+                        raise Exception(f"Password not supplied for {entry['row']['username']}. Aborting.")
+                    entry['row']['password'] = generate_password_hash(password, method=PASSWORD_HASH_METHOD)
+                err_msg = insert_into_table(entry['table'], entry['row'], log=False)
+            elif entry['op'] == 'delete':
+                err_msg = delete_from_table(entry['table'], entry['restriction'], log=False)
+            elif entry['op'] == 'update':
+                err_msg = update_table_row(entry['table'], entry['row'], log=False)
+            elif entry['op'] == 'mapping':
+                err_msg = update_mapping_table(entry['table'], entry['src_pk'], set(entry['dst_pks']), log=False)
+            elif entry['op'] == 'session':
+                err_msg = _reconstruct_session(entry)
+            else:
+                err_msg = f"Invalid log entry!"
 
-                    if err_msg is not None:
-                        raise Exception(err_msg)
-                except EOFError:
-                    break
+            if err_msg is not None:
+                raise Exception(err_msg)
     except Exception as e:
         print(f"=====> ERROR: Exception while reconstructing portal database: {str(e)}", file=sys.stdout, flush=True)
         print("Manual reconstruction of database content required. Consult this progress log to assist in that"
