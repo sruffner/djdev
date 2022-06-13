@@ -23,21 +23,21 @@ Flask-JWT-Extended library for access token generation and verification.
 
 A companion module, clientside.py, provides Python function calls to access these API endpoints so that lab researchers
 can take advantage of the API with as little "fuss" as possible. Another module, data_containers.py, defines simple
-data containers for the various kinds of information that are retrieved by the API, sent "over the wire" in pickled
+data containers for the various kinds of information that are retrieved by the API, sent "over the wire" in serialized
 form, and reconstituted on the client side.
 
 Author: saruffner
 """
-import pickle
+import json
 from datetime import date
 from typing import Tuple, Optional, List, Dict, Any
 
 from flask import Response, request
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 
-from sglportalapi.data_containers import API_VERSION, SessionInfo, NeuronInfo, ROUTE_AUTHENTICATE, ROUTE_SESSIONINFO, \
+from sglportalapi.data_containers import SessionInfo, NeuronInfo, ROUTE_AUTHENTICATE, ROUTE_SESSIONINFO, \
     ROUTE_SESSION_NEURONS, ROUTE_SESSION_PROTOCOLS, ROUTE_SESSION_TRIAL, TrialRep, ROUTE_SESSION_BLOCK, \
-    ROUTE_PROTOCOL_REPS
+    ROUTE_PROTOCOL_REPS, serialize_api_response
 from app import app
 from config.app_logging import get_application_logger
 from config.config import get_config
@@ -56,9 +56,9 @@ def api_access() -> Tuple[Response, int]:
 
     Returns:
         Tuple with Flask Response object and HTML status code. Upon successful authentication, the status code is 200
-            and the response content is a pickled dictionary with 2 fields: 'token' = <access token string>, and
+            and the response content is a serialized dictionary including fields 'token' = <access token string>, and
             'expires_in' = <token lifetime in seconds>. If user cannot be authenticated, the status code is 400 (bad
-            request) and the dictionary has 1 field: 'error' = <error description string>.
+            request) and the dictionary includes the field 'error' = <error description string>.
     """
     username = request.json.get('username', None)
     password = request.json.get('password', None)
@@ -71,7 +71,7 @@ def api_access() -> Tuple[Response, int]:
                                          expires_in=int(get_config().jwt_access_token_lifetime.total_seconds()))
         else:
             status_code, out = 400, dict(error=f"Access denied - {err_msg}")
-    return Response(pickle.dumps(out)), status_code
+    return Response(serialize_api_response(ROUTE_AUTHENTICATE, kwargs=out)), status_code
 
 
 @app.server.route(ROUTE_SESSIONINFO, methods=['POST'])
@@ -85,25 +85,25 @@ def sessions() -> Tuple[Response, int]:
         * when = None | <date restriction of the form 'op YYYY-MM-DD', where op = '='|'>'|'<'; restrict to sessions
             recorded on, after or before the data specified>.
 
-    If successful, the response is a pickled dictionary with 2 fields: 'version' is the API version number (int), and
-    'sessions' is a list of :py:class:`api.data_containers.SessionInfo` objects, each of which contains summary
-    information on an experiment session.
+    If successful, the 'sessions' key in the response dictionary is a list of
+    :py:class:`api.data_containers.SessionInfo` objects, each of which contains summary information on an experiment
+    session.
 
     Returns:
         Tuple with Flask Response object and HTML status code. On success, the status code is 200 and the response is
             prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
-            and the response body is a pickled dictionary with a single key: error = <error description string>.
+            and the response body is a serialized dictionary including the field 'error' = <error description string>.
     """
     experimenter = request.json.get('experimenter')
     subj_id = request.json.get('subj_id')
     when = request.json.get('when')
     status_code, err_msg, session_list = _retrieve_session_info(experimenter, subj_id, when)
-    out = dict(version=API_VERSION, sessions=session_list) if status_code == 200 else dict(error=err_msg)
+    out = dict(sessions=session_list) if status_code == 200 else dict(error=err_msg)
     if status_code == 200:
         current_user = get_jwt_identity()
         get_application_logger().info(f"{ROUTE_SESSIONINFO}: {current_user} retrieved metadata on "
                                       f"{len(session_list)} sessions")
-    return Response(pickle.dumps(out)), status_code
+    return Response(serialize_api_response(ROUTE_SESSIONINFO, kwargs=out)), status_code
 
 
 def _retrieve_session_info(experimenter: Optional[str], subj_id: Optional[str], when: Optional[str]) -> \
@@ -184,26 +184,26 @@ def session_neurons() -> Tuple[Response, int]:
         * min_spikes = None | <int; restrict to neural units with at least this many total spikes during session>.
         * min_snr = None | <float; restrict to neural units with estimated SNR equal to or greater than this value>.
 
-    If successful, the response is a pickled dictionary with 2 fields: 'version' is the API version number (int), and
-    'neurons' is a list of :py:class:`api.data_containers.NeuronInfo` objects, each of which contains summary info
-    on a recorded neural unit that satisifes the specified constraints.
+    If successful, the response is a serialized dictionary including the field 'neurons', a list of
+    :py:class:`api.data_containers.NeuronInfo` objects, each of which contains summary info on a recorded neural unit
+    that satisifes the specified constraints.
 
     Returns:
         Tuple with Flask Response object and HTML status code. On success, the status code is 200 and the response is
             prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
-            and the response body is a pickled dictionary with a single key: error = <error description string>.
+            and the response body is a serialized dictionary including the field 'error' = <error description string>.
     """
     session_key = request.json.get('session_key')
     min_spikes = request.json.get('min_spikes')
     min_snr = request.json.get('min_snr')
 
     status_code, err_msg, neuron_list = _retrieve_session_neurons(session_key, min_spikes, min_snr)
-    out = dict(version=API_VERSION, neurons=neuron_list) if status_code == 200 else dict(error=err_msg)
+    out = dict(neurons=neuron_list) if status_code == 200 else dict(error=err_msg)
     if status_code == 200:
         current_user = get_jwt_identity()
         get_application_logger().info(f"{ROUTE_SESSION_NEURONS}: {current_user} retrieved metadata on "
                                       f"{len(neuron_list)} neurons from session {session_key}")
-    return Response(pickle.dumps(out)), status_code
+    return Response(serialize_api_response(ROUTE_SESSION_NEURONS, kwargs=out)), status_code
 
 
 def _retrieve_session_neurons(session_key: Dict[str, Any], min_spikes: Optional[int], min_snr: Optional[float]) -> \
@@ -259,23 +259,23 @@ def session_protocols() -> Tuple[Response, int]:
     committed to the portal database. The request body is a JSONified dictionary specifing the primary key of the
     session.
 
-    If successful, the response is a pickled dictionary with 2 fields: 'version' is the API version number (int), and
-    'protocols' is a list of :py:class:`database.maestro.Protocol` objects, each of which defines a Maestro trial
-    protocol presented at least once during the specified experiment.
+    If successful, the response is a serialized dictionary that includes the field 'protocols', which is a list of
+    :py:class:`database.maestro.Protocol` objects, each of which defines a Maestro trial protocol presented at least
+    once during the specified experiment.
 
     Returns:
         Tuple with Flask Response object and HTML status code. On success, the status code is 200 and the response is
             prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
-            and the response body is a pickled dictionary with a single key: error = <error description string>.
+            and the response body is a serialized dictionary including the field 'error' = <error description string>.
     """
     session_key = request.json.get('session_key')
     status_code, err_msg, proto_list = _retrieve_session_protocols(session_key)
-    out = dict(version=API_VERSION, protocols=proto_list) if status_code == 200 else dict(error=err_msg)
+    out = dict(protocols=proto_list) if status_code == 200 else dict(error=err_msg)
     if status_code == 200:
         current_user = get_jwt_identity()
         get_application_logger().info(f"{ROUTE_SESSION_PROTOCOLS}: {current_user} retrieved the {len(proto_list)} "
                                       f"trial protocols presented during session {session_key}")
-    return Response(pickle.dumps(out)), status_code
+    return Response(serialize_api_response(ROUTE_SESSION_PROTOCOLS, kwargs=out)), status_code
 
 
 def _retrieve_session_protocols(session_key: Dict[str, Any]) -> Tuple[int, str, List[Protocol]]:
@@ -287,8 +287,7 @@ def _retrieve_session_protocols(session_key: Dict[str, Any]) -> Tuple[int, str, 
     Returns:
         A 3-tuple: (HTTP response status code, error description string, protocol list). On failure, the status code is
             400 (bad request) or 501 (internal server error), an error description is provided, and the protocol list
-            is empty. On success: (200, '', protocol list). Each element in the list is the pickled representation of
-            a maestro.Protocol object.
+            is empty. On success: (200, '', protocol list). Each element in the list is a protocol definition.
     """
     # retrieve requested information from the database tables
     proto_hashes = trial_protocols_for_session(session_key)
@@ -300,7 +299,7 @@ def _retrieve_session_protocols(session_key: Dict[str, Any]) -> Tuple[int, str, 
     if rows is None:
         return 501, f"A database error occurred while fetching trial protocols for session {session_key}", []
 
-    out = [pickle.loads(r['proto_def']) for r in rows]
+    out = [Protocol.from_bytes(r['proto_def']) for r in rows]
     return 200, '', out
 
 
@@ -316,25 +315,25 @@ def session_trial() -> Tuple[Response, int]:
     up to 5 neural unit IDs. The unit IDs are simply integers in 1..N, where N is the number of neural units that were
     recorded in the session.
 
-    If successful, the response is a pickled dictionary with 2 fields: 'version' is the API version number (int), and
-    'trial' is a :py:class:`api.data_containers.TrialRep` object, the data container for the trial information and
-    recorded responses.
+    If successful, the response is a serialized dictionary including the field 'trial',
+    a :py:class:`api.data_containers.TrialRep` object, the data container for the trial information and recorded
+    response data.
 
     Returns:
         Tuple with Flask Response object and HTML status code. On success, the status code is 200 and the response is
             prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
-            and the response body is a pickled dictionary with a single key: error = <error description string>.
+            and the response body is a serialized dictionary including the field 'error' = <error description string>.
     """
     session_key = request.json.get('session_key')
     trial_index = request.json.get('trial_index')
     unit_ids = request.json.get('unit_ids')
     status_code, err_msg, trial_rep = _retrieve_session_trial(session_key, trial_index, unit_ids)
-    out = dict(version=API_VERSION, trial=trial_rep) if status_code == 200 else dict(error=err_msg)
+    out = dict(trial=trial_rep) if status_code == 200 else dict(error=err_msg)
     if status_code == 200:
         current_user = get_jwt_identity()
         get_application_logger().info(f"{ROUTE_SESSION_TRIAL}: {current_user} retrieved data for trial {trial_index} "
                                       f"from session {session_key}. Units requested = {unit_ids}")
-    return Response(pickle.dumps(out)), status_code
+    return Response(serialize_api_response(ROUTE_SESSION_TRIAL, kwargs=out)), status_code
 
 
 def _retrieve_session_trial(
@@ -379,9 +378,9 @@ def _retrieve_session_trial(
             trial_info[k] = trial_row[k]
         trial_info['session_date'] = trial_pk['session_date']  # want the date as an ISO-formatted string
         trial_info.pop('trial_header', None)  # don't need the trial header object
-        trial_info['protocol'] = pickle.loads(proto_info['proto_def'])  # want the Protocol, not just its MD5 digest
+        trial_info['protocol'] = Protocol.from_bytes(proto_info['proto_def'])  # want the Protocol, not just its hash
         trial_info.pop('proto_hash', None)
-        trial_info['trial_rvs'] = pickle.loads(trial_info['trial_rvs'])  # unpickle the RV values list
+        trial_info['trial_rvs'] = json.loads(trial_info['trial_rvs'].decode())  # deserialize the RV values list
         trial_info['trial_success'] = (trial_info['trial_success'] != 0)   # DJ stores bool as int
         trial_info['trial_rewarded'] = (trial_info['trial_rewarded'] != 0)
 
@@ -427,13 +426,13 @@ def session_block() -> Tuple[Response, int]:
     number of trial reps to retrieve, and a list of up to 5 neural unit IDs. The unit IDs are simply integers in 1..N,
     where N is the number of neural units that were recorded in the session.
 
-    If successful, the response is a pickled dictionary with 2 fields: 'version' is the API version number (int), and
-    'trials' is a list of :py:class:`api.data_containers.TrialRep` objects.
+    If successful, the response is a serialized dictionary including the 'trials' field, which is a list of
+    :py:class:`api.data_containers.TrialRep` objects.
 
     Returns:
         Tuple with Flask Response object and HTML status code. On success, the status code is 200 and the response is
             prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
-            and the response body is a pickled dictionary with a single key: error = <error description string>.
+            and the response body is a serialized dictionary including the field 'error' = <error description string>.
     """
     session_key = request.json.get('session_key')
     start = request.json.get('start')
@@ -441,13 +440,13 @@ def session_block() -> Tuple[Response, int]:
     unit_ids = request.json.get('unit_ids')
     status_code, err_msg, trial_list = _retrieve_session_trial_reps(
         session_key, start=start, end=end, completed=False, unit_ids=unit_ids)
-    out = dict(version=API_VERSION, trials=trial_list) if status_code == 200 else dict(error=err_msg)
+    out = dict(trials=trial_list) if status_code == 200 else dict(error=err_msg)
     if status_code == 200:
         current_user = get_jwt_identity()
         get_application_logger().info(
             f"{ROUTE_SESSION_BLOCK}: {current_user} retrieved data for a {len(trial_list)}-trial block starting at "
             f"index {start} from session {session_key}. Units requested = {unit_ids}")
-    return Response(pickle.dumps(out)), status_code
+    return Response(serialize_api_response(ROUTE_SESSION_BLOCK, kwargs=out)), status_code
 
 
 @app.server.route(ROUTE_PROTOCOL_REPS, methods=['POST'])
@@ -463,13 +462,13 @@ def session_protocol_reps() -> Tuple[Response, int]:
     neural unit IDs. The unit IDs are simply integers in 1..N, where N is the number of neural units that were recorded
     in the session.
 
-    If successful, the response is a pickled dictionary with 2 fields: 'version' is the API version number (int), and
-    'trials' is a list of :py:class:`api.data_containers.TrialRep` objects.
+    If successful, the response is a serialized dictionary including the field 'trials', which is a list of
+    :py:class:`api.data_containers.TrialRep` objects.
 
     Returns:
         Tuple with Flask Response object and HTML status code. On success, the status code is 200 and the response is
             prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
-            and the response body is a pickled dictionary with a single key: error = <error description string>.
+            and the response body is a serialized dictionary including the field 'error' = <error description string>.
     """
     session_key = request.json.get('session_key')
     proto_hash = request.json.get('proto_hash')
@@ -477,13 +476,13 @@ def session_protocol_reps() -> Tuple[Response, int]:
     unit_ids = request.json.get('unit_ids')
     status_code, err_msg, trial_list = _retrieve_session_trial_reps(
         session_key, proto_hash=proto_hash, start=1, end=1, completed=completed, unit_ids=unit_ids)
-    out = dict(version=API_VERSION, trials=trial_list) if status_code == 200 else dict(error=err_msg)
+    out = dict(trials=trial_list) if status_code == 200 else dict(error=err_msg)
     if status_code == 200:
         current_user = get_jwt_identity()
         get_application_logger().info(
             f"{ROUTE_PROTOCOL_REPS}: {current_user} retrieved data for {len(trial_list)} reps of trial protocol "
             f"(md5={proto_hash}) preented during session {session_key}. Units requested = {unit_ids}")
-    return Response(pickle.dumps(out)), status_code
+    return Response(serialize_api_response(ROUTE_PROTOCOL_REPS, kwargs=out)), status_code
 
 
 def _retrieve_session_trial_reps(
@@ -522,7 +521,7 @@ def _retrieve_session_trial_reps(
             proto_row = fetch_one_row(ti.DBTable.TRIAL_PROTOCOL, dict(proto_hash=proto_hash))
             if proto_row is None:
                 return 501, f"Trial protocol (hash={proto_hash}) not found in database!", []
-            proto = pickle.loads(proto_row['proto_def'])
+            proto = Protocol.from_bytes(proto_row['proto_def'])
             trial_restrictions = session_key.copy()
             trial_restrictions['proto_hash'] = proto_hash
             if completed:
@@ -574,7 +573,7 @@ def _retrieve_session_trial_reps(
                 trial_info[k] = trial_row[k]
             trial_info['session_date'] = session_key['session_date']  # want the date as an ISO-formatted string
             trial_info.pop('trial_header', None)  # don't need the trial header object
-            trial_info['trial_rvs'] = pickle.loads(trial_info['trial_rvs'])  # unpickle the RV values list
+            trial_info['trial_rvs'] = json.loads(trial_info['trial_rvs'].decode())  # deserialize the RV values list
             trial_info['trial_success'] = (trial_info['trial_success'] != 0)   # DJ stores bool as int
             trial_info['trial_rewarded'] = (trial_info['trial_rewarded'] != 0)
 
@@ -584,7 +583,7 @@ def _retrieve_session_trial_reps(
                     proto_row = fetch_one_row(ti.DBTable.TRIAL_PROTOCOL, dict(proto_hash=trial_info['proto_hash']))
                     if proto_row is None:
                         return 501, "An internal error occurred while retrieving a trial protocol object", []
-                    protocols[trial_info['proto_hash']] = pickle.loads(proto_row['proto_def'])
+                    protocols[trial_info['proto_hash']] = Protocol.from_bytes(proto_row['proto_def'])
                 trial_info['protocol'] = protocols[trial_info['proto_hash']]
             else:
                 trial_info['protocol'] = proto

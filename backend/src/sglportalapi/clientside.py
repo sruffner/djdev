@@ -18,21 +18,20 @@ manipulate the data returned in their analysis code.
 
 The server-side implementation of the endpoints is found in the companion module endpoints.py. Another module,
 data_containers.py, defines simple data containers for the various kinds of information that are retrieved by the API,
-sent "over the wire" in pickled form, and reconstituted on the client side.
+sent "over the wire" in serialized form, and reconstituted on the client side.
 
 Author: saruffner
 """
-import pickle
 import time
 from datetime import date
 from typing import Optional, Union, List
 
 import requests
-from requests import RequestException, Response
+from requests import RequestException
 
-from sglportalapi.data_containers import API_VERSION, SessionInfo, NeuronInfo, ROUTE_AUTHENTICATE, ROUTE_SESSIONINFO, \
+from sglportalapi.data_containers import SessionInfo, NeuronInfo, ROUTE_AUTHENTICATE, ROUTE_SESSIONINFO, \
     ROUTE_SESSION_NEURONS, ROUTE_SESSION_PROTOCOLS, TrialRep, ROUTE_SESSION_TRIAL, ROUTE_SESSION_BLOCK, \
-    ROUTE_PROTOCOL_REPS
+    ROUTE_PROTOCOL_REPS, deserialize_api_response, APISerializeError
 from sglportalapi.maestro import Protocol
 
 _REQ_TIMEOUT_SECONDS: float = 20
@@ -84,15 +83,15 @@ class PortalAccessor:
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
             if response.status_code == 200 or response.status_code == 400:
                 try:
-                    content = pickle.loads(response.content)
+                    content = deserialize_api_response(ROUTE_AUTHENTICATE, response.content)
                     if response.status_code == 200:
                         self._token = content['token']
                         self._expires = time.time() + content['expires_in'] - 60
                         return None
                     else:
                         return f"Authentication failed on server: [{response.status_code}] {content['error']}"
-                except pickle.PickleError as e:
-                    return f"Authentication failed: Error decoding response bytes - {str(e)}"
+                except APISerializeError as e:
+                    return f"Authentication failed; unable to decode server response: {str(e)}"
             return f"Authentication failed on server: [{response.status_code}] {response.reason}"
         except RequestException as e:
             return f"Authentication request failed on send: {str(e)}"
@@ -127,26 +126,20 @@ class PortalAccessor:
             except Exception:
                 raise ValueError("Arg 'when' must have the format '=|>|< YYYY-mm-dd'")
         req_body = dict(experimenter=experimenter, subj_id=subject, when=when)
-        response: Optional[Response] = None
         try:
             response = requests.post(f"{self._base_url}{ROUTE_SESSIONINFO}",
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = pickle.loads(response.content)
+            content = deserialize_api_response(ROUTE_SESSIONINFO, response.content)
             if response.status_code == 200:
-                if content['version'] != API_VERSION:
-                    return "Client side version mismatch with portal API; please update client side library."
-                else:
-                    return content['sessions']
+                return content['sessions']
             else:
-                return content['error']
-        except ValueError as e:
-            return f"Retrieved session list invalid: {str(e)}"
-        except pickle.PickleError:
-            return f"Request for sessions list failed on server: [{response.status_code}] {response.reason}"
+                return f"Request failed on server [{response.status_code}]: {content['error']}"
+        except APISerializeError as e:
+            return f"Failed to decode server response: {str(e)}"
         except RequestException as e:
-            return f"Request for sessions list failed on send: {str(e)}"
+            return f"Request failed on send: {str(e)}"
 
     def session_neurons(self, session: SessionInfo, min_spikes: Optional[int] = None, min_snr: Optional[float] = None) \
             -> Union[str, List[NeuronInfo]]:
@@ -167,26 +160,20 @@ class PortalAccessor:
         if (out := self.authenticate()) is not None:
             return out
         req_body = dict(session_key=session.primary_key, min_spikes=min_spikes, min_snr=min_snr)
-        response: Optional[Response] = None
         try:
             response = requests.post(f"{self._base_url}{ROUTE_SESSION_NEURONS}",
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = pickle.loads(response.content)
+            content = deserialize_api_response(ROUTE_SESSION_NEURONS, response.content)
             if response.status_code == 200:
-                if content['version'] != API_VERSION:
-                    return "Client side version mismatch with portal API; please update client side library."
-                else:
-                    return content['neurons']
+                return content['neurons']
             else:
-                return content['error']
-        except ValueError as e:
-            return f"Retrieved session neurons list invalid: {str(e)}"
-        except pickle.PickleError:
-            return f"Request for session neurons list failed on server: [{response.status_code}] {response.reason}"
+                return f"Request failed on server [{response.status_code}]: {content['error']}"
+        except APISerializeError as e:
+            return f"Failed to decode server response: {str(e)}"
         except RequestException as e:
-            return f"Request for session neurons list failed on send: {str(e)}"
+            return f"Request failed on send: {str(e)}"
 
     def session_protocols(self, session: SessionInfo) -> Union[str, List[Protocol]]:
         """
@@ -201,26 +188,20 @@ class PortalAccessor:
         if (out := self.authenticate()) is not None:
             return out
         req_body = dict(session_key=session.primary_key)
-        response: Optional[Response] = None
         try:
             response = requests.post(f"{self._base_url}{ROUTE_SESSION_PROTOCOLS}",
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = pickle.loads(response.content)
+            content = deserialize_api_response(ROUTE_SESSION_PROTOCOLS, response.content)
             if response.status_code == 200:
-                if content['version'] != API_VERSION:
-                    return "Client side version mismatch with portal API; please update client side library."
-                else:
-                    return content['protocols']
+                return content['protocols']
             else:
-                return content['error']
-        except ValueError as e:
-            return f"Retrieved session protocols list invalid: {str(e)}"
-        except pickle.PickleError:
-            return f"Request for session protocols list failed on server: [{response.status_code}] {response.reason}"
+                return f"Request failed on server [{response.status_code}]: {content['error']}"
+        except APISerializeError as e:
+            return f"Failed to decode server response: {str(e)}"
         except RequestException as e:
-            return f"Request for session protocols list failed on send: {str(e)}"
+            return f"Request failed on send: {str(e)}"
 
     def session_trial(self, session: SessionInfo, trial_idx: int, unit_ids: Optional[List[int]] = None) -> \
             Union[str, TrialRep]:
@@ -242,26 +223,20 @@ class PortalAccessor:
             return out
         unit_ids = sorted([x for x in set(unit_ids)]) if isinstance(unit_ids, list) else []
         req_body = dict(session_key=session.primary_key, trial_index=trial_idx, unit_ids=unit_ids[0:5])
-        response: Optional[Response] = None
         try:
             response = requests.post(f"{self._base_url}{ROUTE_SESSION_TRIAL}",
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = pickle.loads(response.content)
+            content = deserialize_api_response(ROUTE_SESSION_TRIAL, response.content)
             if response.status_code == 200:
-                if content['version'] != API_VERSION:
-                    return "Client side version mismatch with portal API; please update client side library."
-                else:
-                    return content['trial']
+                return content['trial']
             else:
-                return content['error']
-        except ValueError as e:
-            return f"Retrieved session trial rep invalid: {str(e)}"
-        except pickle.PickleError:
-            return f"Request for a session trial rep failed on server: [{response.status_code}] {response.reason}"
+                return f"Request failed on server [{response.status_code}]: {content['error']}"
+        except APISerializeError as e:
+            return f"Failed to decode server response: {str(e)}"
         except RequestException as e:
-            return f"Request for a session trial rep failed on send: {str(e)}"
+            return f"Request failed on send: {str(e)}"
 
     def session_trial_block(self, session: SessionInfo, start: int, end: int, unit_ids: Optional[List[int]] = None) -> \
             Union[str, List[TrialRep]]:
@@ -285,26 +260,20 @@ class PortalAccessor:
             return out
         unit_ids = sorted([x for x in set(unit_ids)]) if isinstance(unit_ids, list) else []
         req_body = dict(session_key=session.primary_key, start=start, end=end, unit_ids=unit_ids[0:5])
-        response: Optional[Response] = None
         try:
             response = requests.post(f"{self._base_url}{ROUTE_SESSION_BLOCK}",
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = pickle.loads(response.content)
+            content = deserialize_api_response(ROUTE_SESSION_BLOCK, response.content)
             if response.status_code == 200:
-                if content['version'] != API_VERSION:
-                    return "Client side version mismatch with portal API; please update client side library."
-                else:
-                    return content['trials']
+                return content['trials']
             else:
-                return content['error']
-        except ValueError as e:
-            return f"Request for a trial block failed: {str(e)}"
-        except pickle.PickleError:
-            return f"Request for a trial block failed on server: [{response.status_code}] {response.reason}"
+                return f"Request failed on server [{response.status_code}]: {content['error']}"
+        except APISerializeError as e:
+            return f"Failed to decode server response: {str(e)}"
         except RequestException as e:
-            return f"Request for a trial block failed on send: {str(e)}"
+            return f"Request failed on send: {str(e)}"
 
     def session_protocol_reps(self, session: SessionInfo, proto: Protocol, completed: bool = False,
                               unit_ids: Optional[List[int]] = None) -> Union[str, List[TrialRep]]:
@@ -329,23 +298,17 @@ class PortalAccessor:
         unit_ids = sorted([x for x in set(unit_ids)]) if isinstance(unit_ids, list) else []
         req_body = dict(session_key=session.primary_key, proto_hash=proto.md5_digest, completed=completed,
                         unit_ids=unit_ids[0:5])
-        response: Optional[Response] = None
         try:
             response = requests.post(f"{self._base_url}{ROUTE_PROTOCOL_REPS}",
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = pickle.loads(response.content)
+            content = deserialize_api_response(ROUTE_PROTOCOL_REPS, response.content)
             if response.status_code == 200:
-                if content['version'] != API_VERSION:
-                    return "Client side version mismatch with portal API; please update client side library."
-                else:
-                    return content['trials']
+                return content['trials']
             else:
-                return content['error']
-        except ValueError as e:
-            return f"Request for trial protocol reps failed: {str(e)}"
-        except pickle.PickleError:
-            return f"Request for trial protocol reps failed on server: [{response.status_code}] {response.reason}"
+                return f"Request failed on server [{response.status_code}]: {content['error']}"
+        except APISerializeError as e:
+            return f"Failed to decode server response: {str(e)}"
         except RequestException as e:
-            return f"Request for trial protocol reps failed on send: {str(e)}"
+            return f"Request failed on send: {str(e)}"
