@@ -116,8 +116,8 @@ def get_all_portal_user_records() -> Union[str, List[Dict[str, str]]]:
     return user_records
 
 
-def register_new_portal_user(username: str, password: str, access: str, full_name: str,
-                             contact_email: str) -> Optional[str]:
+def register_new_portal_user(username: str, password: str, access: str, full_name: str, contact_email: str,
+                             title: Optional[str] = None, org: Optional[str] = None) -> Optional[str]:
     """
     Create a new user account authorized for restricted access to the Lisberger lab data portal.
 
@@ -128,6 +128,8 @@ def register_new_portal_user(username: str, password: str, access: str, full_nam
         access: Access level assigned to user. Must be one of 'admin' > 'curate' > 'contribute' > 'readonly'.
         full_name: The user's full name. Must be 5-50 characters long, but otherwise unchecked for format.
         contact_email: The user's email address. Up to 80 characters long and checked for valid format.
+        title: The user's title or position description; 0-50 chars long. Default = None.
+        org: The user's organization name; 0-50 chars long. Default = None.
     Returns:
         None if successful, else a brief error description.
     """
@@ -136,6 +138,10 @@ def register_new_portal_user(username: str, password: str, access: str, full_nam
         now = datetime.now().isoformat(sep=' ', timespec='seconds')
         row = dict(username=username, password=generate_password_hash(password, method=PASSWORD_HASH_METHOD),
                    access=access, full_name=full_name, contact_email=contact_email, registered=now, pwd_changed=now)
+        if title:
+            row['title'] = title
+        if org:
+            row['organization'] = org
         error_msg = insert_into_table(DBTable.USER, row)
     if error_msg is None:
         get_application_logger().info(f"Registered new user {username} with access level {access}.")
@@ -254,16 +260,18 @@ def remove_portal_user(username: str) -> Optional[str]:
     return delete_from_table(DBTable.USER, dict(username=username))
 
 
-def update_portal_user_profile(username: str, full_name: str, email: str, title: str, org: str) -> Optional[str]:
+def update_portal_user_profile(username: str, full_name: Optional[str] = None, email: Optional[str] = None,
+                               title: Optional[str] = None, org: Optional[str] = None) -> Optional[str]:
     """
     Update the profile for an existing user account on the Lisberger lab data portal.
 
     Args:
-        username: Username of the account.
-        full_name: The user's full name. Must be 5-50 chars long.
-        email: The user's email address. Must be a valid email address up to 80 chars long.
-        title: The user's title or position description; 0-50 chars long.
-        org: The user's organization name; 0-50 chars long.
+        username: Username of the account. Required.
+        full_name: The user's full name. Must be 5-50 chars long. If None, full name is unchanged. Default = None.
+        email: The user's email address. Must be a valid email address up to 80 chars long. If None, email address is
+            unchanged. Default = None.
+        title: The user's title or position description; 0-50 chars long. If None, title is unchanged. Default = None.
+        org: The user's organization name; 0-50 chars long. If None, organization name is unchanged. Default = None.
     Returns:
         None if successful, else a brief error message.
     """

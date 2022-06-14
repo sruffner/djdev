@@ -3,7 +3,7 @@
 Access datasets in the Lisberger lab's portal database.
 
 ## Background
-The Lisberger lab data portal ('sglportal') is a distributed used to archive experimental
+The Lisberger lab data portal ('sglportal') is a distributed application used to archive experimental
 data recorded in the lab in an underlying MySQL-esque MariaDB database, add or update 
 metadata that helps describe and organize that data, explore and visualize trial response
 data from any archived experiment, and download datasets for derivative studies. A test 

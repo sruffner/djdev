@@ -176,7 +176,7 @@ class Publication(dj.Manual):
     pub_id: int auto_increment          # Opaque ID# for brevity (not intended for display)
     ---
     citation : varchar(500)             # Formal citation of research article
-    doi : varchar(100)                  # Digital Object Identifier for the publication. Must be unique.
+    doi : varchar(200)                  # Digital Object Identifier for the publication. Must be unique.
     unique index (doi)
     """
 
