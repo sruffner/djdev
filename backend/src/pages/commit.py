@@ -698,7 +698,7 @@ def display_trial_protocol_definition(proto: Protocol) -> List[Any]:
                 (SegParam(SegParamType.TGT_PAT_VEL_H, i, tgt_idx) in proto.random_variables),
                 (SegParam(SegParamType.TGT_PAT_VEL_V, i, tgt_idx) in proto.random_variables))
             pt.set_coords(seg.tgt_pat_acc(tgt_idx))
-            tgt_pat_acc_out = proto.trial.segments[i].tgt_pat_acc[tgt_idx].as_string_with_wildcard(
+            tgt_pat_acc_out = pt.as_string_with_wildcard(
                 (SegParam(SegParamType.TGT_PAT_ACC_H, i, tgt_idx) in proto.random_variables),
                 (SegParam(SegParamType.TGT_PAT_ACC_V, i, tgt_idx) in proto.random_variables))
             tgt_pat[tgt_idx][seg_id] = f"{tgt_pat_vel_out}  {tgt_pat_acc_out}"
@@ -1131,7 +1131,8 @@ def update_proto(*args):
 @callback(
     [Output(_UNIT_DIV_ID, 'children'), Output(_UNIT_ALERT_DIV, 'children'), Output(_UNIT_SELECT_ID, 'value')],
     [Input(_UNIT_SELECT_ID, 'value'), Input(_UNIT_TYPE_SELECT_ID, "value"), Input(_UNIT_TYPE_APPLY_ALL_ID, "n_clicks")],
-    [State(_UNIT_TYPE_SELECT_ID, 'value'), State(_UNIT_SELECT_ID, 'value'), State(_REVIEW_TITLE_ID, "children")]
+    [State(_UNIT_TYPE_SELECT_ID, 'value'), State(_UNIT_SELECT_ID, 'value'), State(_UNIT_SELECT_ID, 'options'),
+     State(_REVIEW_TITLE_ID, "children")]
 )
 def update_unit(*args):
     ctx = callback_context
@@ -1148,17 +1149,19 @@ def update_unit(*args):
         else:
             return no_update, "danger-An error occurred while retrieving neural unit metrics from server", no_update
     elif (trigger == _UNIT_TYPE_SELECT_ID) or (trigger == _UNIT_TYPE_APPLY_ALL_ID):
-        unit_idx = -1 if (trigger == _UNIT_TYPE_APPLY_ALL_ID) else int(args[-2])
-        nt_id = int(args[1] if trigger == _UNIT_TYPE_SELECT_ID else args[-3])
+        unit_idx = -1 if (trigger == _UNIT_TYPE_APPLY_ALL_ID) else int(args[-3])
+        nt_id = int(args[1] if trigger == _UNIT_TYPE_SELECT_ID else args[-4])
         ok = set_unit_type(job_id, unit_idx, nt_id)
         if ok:
             ok, ready, msg = ready_to_commit(job_id)
             msg = f"{'danger' if not ok else ('success' if ready else 'warning')}-{msg}"
             if ok and trigger == _UNIT_TYPE_SELECT_ID:
                 # Automatically move forward to the next unit in list, if there is one
-                unit: OmniplexUnit = metrics_for_neural_unit(job_id, unit_idx+1)
-                if unit is not None:
-                    return _layout_unit_div(unit), no_update, str(unit_idx+1)
+                num_units = len(args[-2]) if isinstance(args[-2], list) else 0
+                if (unit_idx + 1) < num_units:
+                    unit: OmniplexUnit = metrics_for_neural_unit(job_id, unit_idx+1)
+                    if unit is not None:
+                        return _layout_unit_div(unit), no_update, str(unit_idx+1)
         else:
             msg = "danger-An error occurred while updating neural unit type on server"
         return no_update, msg, no_update

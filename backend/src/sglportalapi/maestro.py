@@ -3522,12 +3522,12 @@ class Trial:
                 name has the form "set/trial".
         """
 
-        if self.set_name is None:
+        if (self.set_name is None) or (len(self.set_name) == 0):
             return self.name
-        elif len(self.subset_name) > 0:
-            return "/".join([self.set_name, self.subset_name, self.name])
-        else:
+        elif (self.subset_name is None) or (len(self.subset_name) == 0):
             return "/".join([self.set_name, self.name])
+        else:
+            return "/".join([self.set_name, self.subset_name, self.name])
 
     @property
     def uses_xy_scope(self) -> bool:
@@ -3666,6 +3666,10 @@ class Trial:
         The elapsed trial time at which recording o behavioral responses and events began, in milliseconds since trial
         start. Normally, this is 0. However, if the trial's record segment index is NOT the first segment, then it is
         the sum of the segment durations prior to the record segment.
+
+        NOTE: If the trial is one rep of a trial protocol containing at least one random segment duration, then this
+        will not be the elapsed start time for every possible rep if there is at least one random-duration segment
+        prior to the record segment.
         """
         segs: List[Segment] = self._definition['segments']
         return sum(segs[i].dur for i in range(self.record_seg))
@@ -3954,14 +3958,16 @@ class Protocol:
             for i, rv in enumerate(self._rvs):
                 rv_map[rv] = trial_rvs[i]
 
-        dur = self.trial.duration
+        # careful! duration of a particular trial rep will vary if there are any random segment durations
+        dur = self.duration_of_rep(trial_rvs)
+
         num_tgts = self.trial.num_targets
         trajectories: List[np.ndarray] = [np.zeros((dur, 2)) for _ in range(num_tgts)]
         current_pos: List[Point2D] = [Point2D(0, 0) for _ in range(num_tgts)]
         current_vel: List[Point2D] = [Point2D(0, 0) for _ in range(num_tgts)]
 
         # enable velocity stabilization compensation if all restrictions met
-        t_record = self.trial.record_start
+        t_record = self.record_start_of_rep(trial_rvs)
         do_vstab = self.trial.uses_vstab and (hgpos is not None) and (vepos is not None) and \
             (len(hgpos) == len(vepos)) and (len(hgpos) >= (dur - t_record))
         vstab_win_len = 1 if (not isinstance(vstab_win_len, int)) else max(min(20, vstab_win_len), 1)
@@ -4066,25 +4072,28 @@ class Protocol:
         """
         segments: Tuple[Segment] = self.trial.segments
         trial_dur = self.duration_of_rep(trial_rvs)
+        seg_durs_for_rep = self.segment_durations_for_rep(trial_rvs)
         tgt_pos_trajectories: List[np.ndarray] = self.target_trajectories(trial_rvs, hgpos, vepos, vstab_win_len)
         fix1: Optional[np.ndarray] = None
         if self.trial.uses_fix1:
             fix1 = np.empty((trial_dur, 2))
             fix1[:] = np.nan
             t = 0
-            for seg in segments:
+            for i, seg in enumerate(segments):
+                seg_dur = seg_durs_for_rep[i]
                 if seg.fix1 >= 0:
-                    fix1[t:t + seg.dur, :] = tgt_pos_trajectories[seg.fix1][t:t + seg.dur, :].copy()
-                t += seg.dur
+                    fix1[t:t + seg_dur, :] = tgt_pos_trajectories[seg.fix1][t:t + seg_dur, :].copy()
+                t += seg_dur
         fix2: Optional[np.ndarray] = None
         if self.trial.uses_fix2:
             fix2 = np.empty((trial_dur, 2))
             fix2[:] = np.nan
             t = 0
-            for seg in segments:
+            for i, seg in enumerate(segments):
+                seg_dur = seg_durs_for_rep[i]
                 if seg.fix2 >= 0:
-                    fix2[t:t + seg.dur, :] = tgt_pos_trajectories[seg.fix2][t:t + seg.dur, :].copy()
-                t += seg.dur
+                    fix2[t:t + seg_dur, :] = tgt_pos_trajectories[seg.fix2][t:t + seg_dur, :].copy()
+                t += seg_dur
 
         return fix1, fix2
 
@@ -4176,6 +4185,71 @@ class Protocol:
             seg_dur = rv_map[param] if (param in rv_map) else seg.dur
             dur += seg_dur
         return dur
+
+    def segment_durations_for_rep(self, trial_rvs: List[Union[int, float]]) -> List[int]:
+        """
+        Get the segment durations for a particular instance of this trial protocol. If a random variable controls the
+        duration of any segment, that segment's duration will be different for each trial rep.
+
+        Args:
+            trial_rvs: Values to assign to protocol's random variables for the particular trial instance (if any).
+        Returns:
+            List of segment durations, in chronological order. If the protocol lacks any random-duration segments, the
+                returned list is always the same.
+        Raises:
+            ValueError: If the number of supplied RV values does not match the number of RVs defined on the protocol.
+        """
+        if len(self._rvs) == 0:
+            return [seg.dur for seg in self.trial.segments]
+
+        rv_map: Dict[SegParam, Union[int, float]] = dict()
+        if len(self._rvs) > 0:
+            if len(self._rvs) != len(trial_rvs):
+                raise ValueError("Random-variable value list does not match trial protocol definition!")
+            for i, rv in enumerate(self._rvs):
+                rv_map[rv] = trial_rvs[i]
+
+        out: List[int] = list()
+        segments: Tuple[Segment] = self.trial.segments
+        for i, seg in enumerate(segments):
+            param = SegParam(SegParamType.DURATION, i)
+            seg_dur = rv_map[param] if (param in rv_map) else seg.dur
+            out.append(seg_dur)
+        return out
+
+    def record_start_of_rep(self, trial_rvs: List[Union[int, float]]) -> int:
+        """
+        Get the elapsed trial time at which recording began for a particular instance of this trial protocol. If the
+        protocol lacks any random-duration segments, then all reps will have the same record start time. (Of course, the
+        record start time is always 0 if recording starts at the first segment.)
+
+        Args:
+            trial_rvs: Values to assign to protocol's random variables for the particular trial instance (if any).
+        Returns:
+            The record start time for the trial rep given the durations -- specified in trial_rvs -- of any
+                random-duration segments in the protocol. In milliseconds.
+        Raises:
+            ValueError: If the number of supplied RV values does not match the number of RVs defined on the protocol.
+        """
+        if self.trial.record_seg <= 0:
+            return 0
+        elif len(self._rvs) == 0:
+            return self.trial.record_start
+
+        rv_map: Dict[SegParam, Union[int, float]] = dict()
+        if len(self._rvs) > 0:
+            if len(self._rvs) != len(trial_rvs):
+                raise ValueError("Random-variable value list does not match trial protocol definition!")
+            for i, rv in enumerate(self._rvs):
+                rv_map[rv] = trial_rvs[i]
+
+        t_start = 0
+        segments: Tuple[Segment] = self.trial.segments
+        for i in range(self.trial.record_seg):
+            param = SegParam(SegParamType.DURATION, i)
+            seg_dur = rv_map[param] if (param in rv_map) else segments[i].dur
+            t_start += seg_dur
+        return t_start
 
     @staticmethod
     def extract_protocols_from_session_data(archive: zipfile.ZipFile, proto_set: Set[str]) -> \

@@ -154,9 +154,9 @@ def single_trial_response_figure(session: Dict[str, Any], trial_idx: int, unit_i
 
     # segment spans defined by alternating blue and gray bars along top of top plot, with segment label.
     t = 0
-    for i, seg in enumerate(trial_data.protocol.trial.segments):
+    for i, seg_dur in enumerate(trial_data.protocol.segment_durations_for_rep(trial_data.trial_rvs)):
         fig.add_shape(
-            type='rect', x0=t, x1=t+seg.dur, xref='x', y0=0, y1=28, yanchor=1.01, yref='y domain', ysizemode='pixel',
+            type='rect', x0=t, x1=t+seg_dur, xref='x', y0=0, y1=28, yanchor=1.01, yref='y domain', ysizemode='pixel',
             fillcolor='lightsteelblue' if (i % 2) == 0 else 'whitesmoke', line=dict(width=0),
             row=1, col=1, secondary_y=False
         )
@@ -165,7 +165,7 @@ def single_trial_response_figure(session: Dict[str, Any], trial_idx: int, unit_i
             xanchor='left', yanchor='middle',
             row=1, col=1, secondary_y=False
         )
-        t += seg.dur
+        t += seg_dur
 
     # Note top margin is larger to accommodate the segment labels rendered along the top plot.
     fig.update_layout(

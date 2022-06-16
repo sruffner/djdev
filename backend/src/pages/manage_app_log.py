@@ -59,16 +59,17 @@ def serve_layout() -> html.Div:
         dbc.Select(
             id=_SELECT_ID,
             options=[{'label': name, 'value': name} for name in log_names],
-            value=None
+            value=log_names[0] if len(log_names) > 0 else None
         )
     ])
+    initial_log = app_logging.get_message_log_contents(log_names[0]) if len(log_names) > 0 else ""
 
     remove_btn = dbc.Button("Delete permanently", id=_DELETE_ID, disabled=True, n_clicks=0, class_name='me-2')
     control_row = dbc.Row([
         dbc.Col(dbc.Row([dbc.Col(select_grp, width='auto')], class_name='g-0'), width='auto', class_name='me-4'),
         dbc.Col([remove_btn], width='auto')
     ], justify='between', class_name='mb-3')
-    content_area = dbc.Textarea(id=_CONTENT_AREA_ID, rows=20, size='sm', readonly=True, wrap=False, value="")
+    content_area = dbc.Textarea(id=_CONTENT_AREA_ID, rows=20, size='sm', readonly=True, wrap=False, value=initial_log)
     loading_content = dcc.Loading(id=_CONTENT_LOADING_ID, children=content_area, type='circle')
     return html.Div([control_row, loading_content])
 

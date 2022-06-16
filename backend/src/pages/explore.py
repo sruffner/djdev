@@ -1000,7 +1000,8 @@ def _generate_trial_data_view(
             trial_idx = int(disp_sel) if isinstance(disp_sel, str) else -1
             if trial_idx >= 0:
                 out = single_trial_response_figure(session, trial_idx, unit_id if (unit_id and (unit_id > 0)) else None)
-        except Exception:
+        except Exception as e:
+            get_application_logger().error(str(e), exc_info=True)
             pass
     if out is None:
         out = html.Div("No data available.", className='mt-5 mb-5')

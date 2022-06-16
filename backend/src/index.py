@@ -237,6 +237,7 @@ def display_page(pathname, n_intervals, current_href):
             redirect = not is_logged_in
         elif pathname == '/manage':
             layout = manage.serve_layout() if is_admin else None
+            redirect = not is_admin
         elif pathname == '/downloads':
             layout = download_history.serve_layout() if can_commit else None
             redirect = not can_commit

@@ -92,7 +92,7 @@ class _LogEntryJSONEncoder(json.JSONEncoder):
     """
     def default(self, obj):
         if isinstance(obj, DBTable):
-            return {'_DBTable': DBTable.value}
+            return {'_DBTable': obj.value}
         elif isinstance(obj, np.ndarray) and obj.ndim == 1:
             return {'_nparray_b64': base64.b64encode(obj.tobytes()).decode('utf-8')}
         elif isinstance(obj, date):
@@ -355,9 +355,9 @@ def read_database_operations_log() -> List[Dict[str, Any]]:
     with open(log_path, 'rb') as f:
         while True:
             size_bytes = f.read(int_sz)
-            if size_bytes == 0:
+            if len(size_bytes) == 0:
                 break
-            if len(size_bytes) != int_sz:
+            elif len(size_bytes) != int_sz:
                 raise EOFError('Hit EOF in the middle of a log entry')
             entry_size, = struct.unpack('<i', size_bytes)
             raw_entry = f.read(entry_size)

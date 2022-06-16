@@ -380,7 +380,7 @@ class OmniplexUnit:
         self._definition['source_file'] = src
         self._definition['channel'] = ch
         self._definition['spike_times'] = spikes
-        self._definition['num_spikes'] = len(spikes) if spikes else num_spikes
+        self._definition['num_spikes'] = num_spikes if (spikes is None) else len(spikes)
         self._definition['firing_rate'] = rate
         self._definition['snr'] = snr
         self._definition['template'] = template
@@ -504,7 +504,7 @@ class SessionMetaData:
     behavioral only and the Session.EPhys attributes do not apply.
     """
     __REQUIRED_TYPES: Dict[str, type] = dict(
-        experimenter=str, subj_id=str, session_date=date, session_sfx=int, rig_id=int, study_id=int, session_notes=str,
+        experimenter=str, subj_id=str, session_date=date, session_sfx=int, rig_id=str, study_id=int, session_notes=str,
         num_units=int, num_trials=int
     )
     __EPHYS_TYPES: Dict[str, type] = dict(
@@ -562,7 +562,7 @@ class SessionMetaData:
         return self._definition['session_sfx']
 
     @property
-    def rig_id(self) -> int:
+    def rig_id(self) -> str:
         """ ID of the experiment rig (primary key into Rig table). """
         return self._definition['rig_id']
 
@@ -1157,7 +1157,7 @@ def preprocess_commit_job(job_id: str) -> bool:
                 return False
     except Exception as err:
         error_msg = f"Error during preprocessing: {str(err)}"
-        _logger.error(error_msg)
+        _logger.error(error_msg, exc_info=True)
         _background_job_update(job_id, error_msg, CommitStateEnum.FAIL)
         return False
 
@@ -1698,7 +1698,7 @@ def _initialize_session_metadata(
     if recent_session is None:
         rig_ids = fetch_attribute_values(DBTable.RIG, 'rig_id')
         study_ids = fetch_attribute_values(DBTable.STUDY, 'study_id')
-        default_rig_id = rig_ids and (len(rig_ids) > 0) and int(rig_ids[0])
+        default_rig_id = rig_ids and (len(rig_ids) > 0) and rig_ids[0]
         default_study_id = study_ids and (len(study_ids) > 0) and int(study_ids[0])   # fetch returns np.int64 !!
     default_ba_id = recent_ephys and recent_ephys['ba_id']
     if recent_ephys is None:
@@ -1960,8 +1960,7 @@ def metrics_for_neural_unit(job_id: str, index: int) -> Optional[OmniplexUnit]:
         if (raw_unit is None) or (raw_type is None):
             raise Exception(f"Missing unit metrics or neuron type in Redis cache at index {index}")
         unit = OmniplexUnit.from_bytes(raw_unit)
-        type_id: int = int(raw_type.decode('utf-8'))
-        unit.neuron_type = None if type_id == -1 else type_id
+        unit.neuron_type = int(raw_type.decode('utf-8'))
         return unit
     except Exception as e:
         _logger.error(f"Error while retrieving neural unit metrics for commit job {job_id}: {str(e)}",
@@ -2250,7 +2249,7 @@ def finish_commit_job(job_id: str) -> bool:
                 _logger.debug(f"Commit job {job_id} failed: {msg}")
                 _background_job_update(job_id, msg, CommitStateEnum.FAIL)
                 return False
-        unit_types: List[int] = [raw.decode('utf-8') for raw in res[2]] if num_units > 0 else list()
+        unit_types: List[int] = [int(raw.decode('utf-8')) for raw in res[2]] if num_units > 0 else list()
         if len(unit_types) != num_units:
             msg = f"Error: Number of cached units inconsistent with job status info!"
             _logger.debug(f"Commit job {job_id} failed: {msg}")
@@ -2874,7 +2873,7 @@ def _read_session_preprocessing_file(file_path: Path) -> \
                 sz_raw = f.read(int_sz)
                 if (not sz_raw) or (len(sz_raw) != int_sz):
                     raise Exception('Hit EOF unexpectedly in trial protocols section')
-                proto_raw_sz, _ = struct.unpack("<i", sz_raw)
+                proto_raw_sz, = struct.unpack("<i", sz_raw)
                 proto_raw = f.read(proto_raw_sz)
                 if (not proto_raw) or (len(proto_raw) != proto_raw_sz):
                     raise Exception('Hit EOF unexpectedlyin trial protocols section')
@@ -2885,7 +2884,7 @@ def _read_session_preprocessing_file(file_path: Path) -> \
                 sz_raw = f.read(int_sz)
                 if (not sz_raw) or (len(sz_raw) != int_sz):
                     raise Exception('Hit EOF unexpectedly in neural units section')
-                unit_raw_sz, _ = struct.unpack("<i", sz_raw)
+                unit_raw_sz, = struct.unpack("<i", sz_raw)
                 unit_raw = f.read(unit_raw_sz)
                 if (not unit_raw) or (len(unit_raw) != unit_raw_sz):
                     raise Exception('Hit EOF unexpectedly while reading a trial protocol')
