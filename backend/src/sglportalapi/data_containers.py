@@ -19,6 +19,7 @@ from __future__ import annotations  # Needed in Python 3.7y to type-hint a metho
 import base64
 import json
 import struct
+import sys
 from datetime import date
 from typing import Dict, Any, Optional, Tuple, List, Union
 

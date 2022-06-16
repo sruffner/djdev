@@ -71,7 +71,7 @@ def api_access() -> Tuple[Response, int]:
                                          expires_in=int(get_config().jwt_access_token_lifetime.total_seconds()))
         else:
             status_code, out = 400, dict(error=f"Access denied - {err_msg}")
-    return Response(serialize_api_response(ROUTE_AUTHENTICATE, kwargs=out)), status_code
+    return Response(serialize_api_response(ROUTE_AUTHENTICATE, **out)), status_code
 
 
 @app.server.route(ROUTE_SESSIONINFO, methods=['POST'])
@@ -103,7 +103,7 @@ def sessions() -> Tuple[Response, int]:
         current_user = get_jwt_identity()
         get_application_logger().info(f"{ROUTE_SESSIONINFO}: {current_user} retrieved metadata on "
                                       f"{len(session_list)} sessions")
-    return Response(serialize_api_response(ROUTE_SESSIONINFO, kwargs=out)), status_code
+    return Response(serialize_api_response(ROUTE_SESSIONINFO, **out)), status_code
 
 
 def _retrieve_session_info(experimenter: Optional[str], subj_id: Optional[str], when: Optional[str]) -> \
@@ -203,7 +203,7 @@ def session_neurons() -> Tuple[Response, int]:
         current_user = get_jwt_identity()
         get_application_logger().info(f"{ROUTE_SESSION_NEURONS}: {current_user} retrieved metadata on "
                                       f"{len(neuron_list)} neurons from session {session_key}")
-    return Response(serialize_api_response(ROUTE_SESSION_NEURONS, kwargs=out)), status_code
+    return Response(serialize_api_response(ROUTE_SESSION_NEURONS, **out)), status_code
 
 
 def _retrieve_session_neurons(session_key: Dict[str, Any], min_spikes: Optional[int], min_snr: Optional[float]) -> \
@@ -275,7 +275,7 @@ def session_protocols() -> Tuple[Response, int]:
         current_user = get_jwt_identity()
         get_application_logger().info(f"{ROUTE_SESSION_PROTOCOLS}: {current_user} retrieved the {len(proto_list)} "
                                       f"trial protocols presented during session {session_key}")
-    return Response(serialize_api_response(ROUTE_SESSION_PROTOCOLS, kwargs=out)), status_code
+    return Response(serialize_api_response(ROUTE_SESSION_PROTOCOLS, **out)), status_code
 
 
 def _retrieve_session_protocols(session_key: Dict[str, Any]) -> Tuple[int, str, List[Protocol]]:
@@ -333,7 +333,7 @@ def session_trial() -> Tuple[Response, int]:
         current_user = get_jwt_identity()
         get_application_logger().info(f"{ROUTE_SESSION_TRIAL}: {current_user} retrieved data for trial {trial_index} "
                                       f"from session {session_key}. Units requested = {unit_ids}")
-    return Response(serialize_api_response(ROUTE_SESSION_TRIAL, kwargs=out)), status_code
+    return Response(serialize_api_response(ROUTE_SESSION_TRIAL, **out)), status_code
 
 
 def _retrieve_session_trial(
@@ -446,7 +446,7 @@ def session_block() -> Tuple[Response, int]:
         get_application_logger().info(
             f"{ROUTE_SESSION_BLOCK}: {current_user} retrieved data for a {len(trial_list)}-trial block starting at "
             f"index {start} from session {session_key}. Units requested = {unit_ids}")
-    return Response(serialize_api_response(ROUTE_SESSION_BLOCK, kwargs=out)), status_code
+    return Response(serialize_api_response(ROUTE_SESSION_BLOCK, **out)), status_code
 
 
 @app.server.route(ROUTE_PROTOCOL_REPS, methods=['POST'])
@@ -482,7 +482,7 @@ def session_protocol_reps() -> Tuple[Response, int]:
         get_application_logger().info(
             f"{ROUTE_PROTOCOL_REPS}: {current_user} retrieved data for {len(trial_list)} reps of trial protocol "
             f"(md5={proto_hash}) preented during session {session_key}. Units requested = {unit_ids}")
-    return Response(serialize_api_response(ROUTE_PROTOCOL_REPS, kwargs=out)), status_code
+    return Response(serialize_api_response(ROUTE_PROTOCOL_REPS, **out)), status_code
 
 
 def _retrieve_session_trial_reps(
