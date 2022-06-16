@@ -20,8 +20,7 @@ import dash_bootstrap_components as dbc
 
 from config.app_logging import get_application_logger
 from database.download_ops import MAX_UNITS_PER_DOWNLOAD, DOWNLOAD_FORMATS, request_data_download, \
-    pending_download_request_status, DOWNLOAD_PREPPING, DOWNLOAD_READY, cancel_pending_download_request, \
-    get_data_download_url
+    pending_download_request_status, DOWNLOAD_PREPPING, DOWNLOAD_READY, cancel_pending_download_request
 from database.table_info import AttributeValue, primary_key_of, DBTable
 from database.table_ops import fetch_restrict_proj, fetch_rows
 
@@ -258,14 +257,13 @@ def on_submit_cancel_or_update_progress(*args):
         out[0:12] = "", dict(display='none'), True, 0, "0%", "info", False, "", None, _ACTION_SUBMIT, None, False
     elif (trigger_id == _DOWNLOAD_ACTION) and (action_label == _ACTION_DOWNLOAD):
         # record that user has initiated file download, then reset form
-        # TODO: IMPLEMENT
         out[0:12] = "", dict(display='none'), True, 0, "0%", "info", False, "", None, _ACTION_SUBMIT, None, False
     elif trigger_id == _DOWNLOAD_MODAL_CLOSE_ID:
         # if there's a pending download request, let it continue. Reset all widgets to start a new request.
         out[0:12] = "", dict(display='none'), True, 0, "0%", "info", False, "", None, _ACTION_SUBMIT, None, False
     elif trigger_id == _DOWNLOAD_PROG_INTV:
         # get status update for an in-progress request and update widgets accordingly
-        req_status = pending_download_request_status(req_id)
+        req_status = pending_download_request_status(requester, req_id)
         if req_status is None:
             # an error occurred while retrieving status update
             status = [html.I(className="bi bi-x-octagon-fill me-2"),
@@ -274,21 +272,16 @@ def on_submit_cancel_or_update_progress(*args):
                 None, False
         elif req_status.state == DOWNLOAD_PREPPING:
             out[3:5] = req_status.pct_complete, f"{req_status.pct_complete}%"
-            out[7] = [html.I(className="bi bi-info-circle-fill me-2"), req_status.msg]
+            out[7] = [html.I(className="bi bi-info-circle-fill me-2"), req_status.message]
         elif req_status.state == DOWNLOAD_READY:
             # file is ready for download. Embed URL in action button so that clicking it again triggers the download.
-            # We disable the modal's close button to emphasize that the user needs complete the download -- once the URL
-            # is retrieved from the server, the requester "owns" the download.
-            ok, url = get_data_download_url(requester, req_id)
-            if ok:
-                status = [html.I(className="bi bi-check-circle-fill me-2"), req_status.msg]
-            else:
-                status = [html.I(className="bi bi-x-octagon-fill me-2"), url]
-            out[2:12] = True, 100, "100%", "success" if ok else "danger", False, status, \
-                'text-success' if ok else 'text-danger', _ACTION_DOWNLOAD if ok else _ACTION_RESET, \
-                url if ok else None, ok
+            # We disable the modal's close button to emphasize that the user needs to complete the download -- once the
+            # file has been generated, the requester "owns" the download.
+            status = [html.I(className="bi bi-check-circle-fill me-2"), req_status.message]
+            out[2:12] = True, 100, "100%", "success", False, status, 'text-success', _ACTION_DOWNLOAD, \
+                req_status.presigned_url, True
         else:  # DOWNLOAD_FAIL
-            status = [html.I(className="bi bi-x-octagon-fill me-2"), req_status.msg]
+            status = [html.I(className="bi bi-x-octagon-fill me-2"), req_status.message]
             out[0:12] = "", no_update, True, 100, "FAILED", "danger", False, status, 'text-danger',  _ACTION_RESET, \
                 None, False
 

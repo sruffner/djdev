@@ -13,22 +13,25 @@ stateful workflow. The workflow has the following stages:
       response data, the format of the download file, and a few other specifics. See explore.py.
     - Generation of the download file. The per-trial response data, along with some descriptive metadata, are retrieved
       from the portal database and written to the data file IAW the download request. This happens in a background
-      process, not in the Dash/Flask backend. The file is stored in a temporary location in the portal repository.
+      process, not in the Dash/Flask backend. The file is then uploaded to the portal's backup repository on S3 and a
+      presigned URL generated so that the requester can later download the file directly from S3. At this point, the
+      download request is considered to be "fulfilled", and the final task of the background job is to log the request
+      in a dedicated table in the portal's MySQL/MariaDB database -- recording information on what data was requested
+      and by whom. The intent here is to safeguard data provenance by maintaing a record of who is downloading data.
     - Back on the frontend, the logged-in user can monitor the progress of the pending download. Once the data file is
-      ready, the user can initiate the actual download. Download requests may fail for whatever reason. They also
-      expire after a set period of time; upon expiration, the data file is removed permanently from the backup
-      repository, and the request is marked as "expired".
+      ready, the frontend client enables a link button tied to the presigned URL; the user clicks on the button to
+      iniitate the actual download.
 
-To safeguard data provenance, it is important to maintain a record of all *FULFILLED* data download requests. For this
-reason, each completed download is logged to a dedicated table in the portal's MySQL/MariaDB database -- recording info
-on what was downloaded and by whom. However, while the download request is being prepared in the background and before
-the client receives the download URL, information about the download request is cached on the Redis server under the
-following keys.
+The data file prepared in response to a download request is removed from the S3 repository after 24 hours, and the
+presigned URL expires after only 1 hour. Hence the frontend UI should be designed to start the actual download shortly
+after the background process has fulfilled the request.
+
+While the download request is being prepared in the background, information about the download request is cached on the
+Redis server under the following keys.
     - DOWNLOAD_KEY : Redis LIST of all currently pending donwload requests. Each element is a string "<usr>-<req_id>",
       where <usr> is the portal username of the request originator, while <req_id> is the download request ID,
       a 32-char hex string.
-    - DOWNLOAD_INFO_NS:<req_id> : A STRING key holding a description of the request <req_id>.
-    - DOWNLOAD_STATUS_NS:<req_id> : A STRING key holding status information for the request <req_id>.
+    - DOWNLOAD_INFO_NS:<req_id> : A STRING key holding a description and status information for the request <req_id>.
 
 The Redis server does double-duty, since we use Redis Queue (RQ) workers to handle the work of preparing the data file
 and storing it in the backup repository.
@@ -78,13 +81,7 @@ the request ID (a 32-bit hex string).
 _DOWNLOAD_INFO_NS: str = 'downloadinfo:'
 """
 Redis key namespace for cached information on pending data download requests. Append the request ID to access defining
-parameters for a particular request. The STRING key is a serialized DownloadRequest object and does not change once it
-is created.
-"""
-_DOWNLOAD_STATUS_NS: str = 'downloadstatus:'
-"""
-Redis key namespace for status information on pending data download requests. Append the request ID to access status
-information for a particular request. The STRING key is a serialized DownloadRequestStatus object.
+parameters for a particular request. The STRING key is a serialized _DownloadRequest object.
 """
 
 DOWNLOAD_PREPPING: int = 0
@@ -98,7 +95,10 @@ _DOWNLOAD_SUBFOLDER = 'downloads'
 
 
 @dataclass()
-class DownloadRequest:
+class _DownloadRequest:
+    """
+    Parameters and status information for a pending or recently fulfilled data download request.
+    """
     id: str
     """ The request ID, a 32-character hex string representing the randomly generated UUID of the request. """
     requester: str
@@ -115,51 +115,71 @@ class DownloadRequest:
     """ Desired format for the response data file downloaded: 'npz', or 'mat'. """
     requested: float
     """ Timestamp (seconds since the Epoch) when download request was submitted. """
-
-    def to_bytes(self) -> bytes:
-        """ Serialize this object. """
-        fields = [self.id, self.requester, self.session_key['experimenter'], self.session_key['subj_id'],
-                  self.session_key['session_date'].isoformat(), self.session_key['session_sfx'], self.selected_units,
-                  self.remove_saccades, self.complete_reps, self.output_fmt, self.requested]
-        return json.dumps(fields).encode()
-
-    @staticmethod
-    def from_bytes(raw: bytes) -> DownloadRequest:
-        """ Reconstruct a DownloadRequest object from a byte sequence generated by `to_bytes()`."""
-        v = json.loads(raw.decode())
-        session_key = dict(experimenter=v[2], subj_id=v[3], session_date=date.fromisoformat(v[4]), session_sfx=v[5])
-        return DownloadRequest(id=v[0], requester=v[1], session_key=session_key, selected_units=v[6],
-                               remove_saccades=v[7], complete_reps=v[8], output_fmt=v[9], requested=v[10])
-
-
-@dataclass()
-class DownloadRequestStatus:
     state: int
     """ The state of the pending download request (index into _DOWNLOAD_STATES). """
     msg: str
     """ The most recent status/progress message posted. On failure, this is a brief error description. """
     pct_complete: int
     """ Completion percentage for background task fulfilling the download request (0 to 100). """
-    updated: float
-    """ Timestamp (seconds since the Epoch) when the request's status was last updated. """
+    download_url: str
+    """ Presigned URL to download prepared data file from S3. Will be an empty string until download is ready. """
 
     def to_bytes(self) -> bytes:
         """ Serialize this object. """
-        return json.dumps([self.state, self.msg, self.pct_complete, self.updated]).encode()
+        fields = [self.id, self.requester, self.session_key['experimenter'], self.session_key['subj_id'],
+                  self.session_key['session_date'].isoformat(), self.session_key['session_sfx'], self.selected_units,
+                  self.remove_saccades, self.complete_reps, self.output_fmt, self.requested, self.state, self.msg,
+                  self.pct_complete, self.download_url]
+        return json.dumps(fields).encode()
 
     @staticmethod
-    def from_bytes(raw: bytes) -> DownloadRequestStatus:
-        """ Reconstruct a DownloadRequestStatus object from a byte sequence generated by `to_bytes()`."""
+    def from_bytes(raw: bytes) -> _DownloadRequest:
+        """ Reconstruct a _DownloadRequest object from a byte sequence generated by `to_bytes()`."""
         v = json.loads(raw.decode())
-        return DownloadRequestStatus(state=v[0], msg=v[1], pct_complete=v[2], updated=v[3])
+        session_key = dict(experimenter=v[2], subj_id=v[3], session_date=date.fromisoformat(v[4]), session_sfx=v[5])
+        return _DownloadRequest(id=v[0], requester=v[1], session_key=session_key, selected_units=v[6],
+                                remove_saccades=v[7], complete_reps=v[8], output_fmt=v[9], requested=v[10],
+                                state=v[11], msg=v[12], pct_complete=v[13], download_url=v[14])
 
 
-def get_data_downloads_directory() -> Path:
+class DownloadRequestStatus:
+    """
+    Status of a pending data download request. Once the data file is generated and ready for download, it includes a
+    URL to initiate the download.
+    """
+    def __init__(self, state: int, msg: str, pct_complete: int, download_url: str):
+        self._state = state
+        self._msg = msg
+        self._pct_complete = pct_complete
+        self._download_url = download_url
+
+    @property
+    def state(self) -> int:
+        """ The state of the pending download request (one of DOWNLOAD_PREPPING, _READY, or _FAIL). """
+        return self._state
+
+    @property
+    def message(self) -> str:
+        """ The most recent status/progress message posted. On failure, this is a brief error description. """
+        return self._msg
+
+    @property
+    def pct_complete(self) -> int:
+        """ Completion percentage for background task fulfilling the download request (0 to 100). """
+        return self._pct_complete
+
+    @property
+    def presigned_url(self) -> str:
+        """ URL to download prepared data file from portal. Will be an empty string until download is ready. """
+        return self._download_url
+
+
+def _get_data_downloads_directory() -> Path:
     """ Construct file system path where data download files are temporarily stored in the portal's workspace. """
     return Path(get_config().workspace_dir, _DOWNLOAD_SUBFOLDER)
 
 
-def get_data_download_file_path(req_info: DownloadRequest) -> Path:
+def _get_data_download_file_path(req_info: _DownloadRequest) -> Path:
     """ Construct path where the data file for a download request is temporarily stored in portal's workspace. """
     return Path(get_config().workspace_dir, _DOWNLOAD_SUBFOLDER,
                 f"{req_info.requester}-{req_info.id}.{req_info.output_fmt}")
@@ -171,7 +191,7 @@ def request_data_download(
     """
     Submit a request to download trial-aligned behavioral and neural response data recorded during the specified
     experiment session. The method generates a unique request ID and queues a background task to fulfill the request.
-    The client must supply the request ID in all future queries involving the download request.
+    The client must supply the request ID and requester's username in all future queries involving the download request.
 
     Args:
         requester: The username of the registered portal user requesting the download. The method only verifies that the
@@ -213,52 +233,72 @@ def request_data_download(
 
     req_id = uuid.uuid4().hex
     now = time.time()
-    req_info = DownloadRequest(
+    req_info = _DownloadRequest(
         id=req_id, requester=requester, session_key=session_pk, selected_units=clean_unit_ids,
         remove_saccades=remove_sacc, complete_reps=complete_reps,
-        output_fmt=output_fmt if (output_fmt in DOWNLOAD_FORMATS.keys()) else 'npz', requested=now)
-    req_status = DownloadRequestStatus(
-        state=DOWNLOAD_PREPPING, msg="Queueing download request to a background process", pct_complete=0, updated=now)
+        output_fmt=output_fmt if (output_fmt in DOWNLOAD_FORMATS.keys()) else 'npz', requested=now,
+        state=DOWNLOAD_PREPPING, msg="Queueing download request to a background process", pct_complete=0,
+        download_url="")
 
     try:
         info_key = f"{_DOWNLOAD_INFO_NS}{req_id}"
-        status_key = f"{_DOWNLOAD_STATUS_NS}{req_id}"
         conn = get_config().redis_conn
         with conn.pipeline() as pipe:
             pipe.lpush(_DOWNLOAD_KEY, f"{requester}-{req_id}")
             pipe.set(info_key, req_info.to_bytes())
-            pipe.set(status_key, req_status.to_bytes())
             pipe.execute()
 
         job_queue.enqueue(fulfill_pending_download_request, req_id, job_id=f"download-{req_id}", job_timeout='60m')
-
         return True, req_id
     except Exception as e:
         get_application_logger().error(f"Error while submitting a new download request: {str(e)}", exc_info=True)
         return False, "An internal error occurred on server while submitting the download request"
 
 
-def pending_download_request_status(req_id: str) -> Optional[DownloadRequestStatus]:
+def pending_download_request_status(requester: str, req_id: str) -> Optional[DownloadRequestStatus]:
     """
     Get the current status of a pending data download request.
 
+    NOTE: The first time this method is called AFTER the data file is ready for download, the download request is
+    removed from the portal's set of pending requests and the returned status information includes the URL at which the
+    prepared data file can be downloaded.
+
     Args:
+        requester: The username of the registered portal user that originally requested the download.
         req_id: The download request identifier.
     Returns:
-        The download request's current status, or None if pending download request not found on server.
+        The download request's current status, or None if pending download request not found on server, or if the
+            requester username does not match that of the user that originated the download request.
     """
+    clear = False
+    info_key = f"{_DOWNLOAD_INFO_NS}{req_id}"
     try:
-        status_key = f"{_DOWNLOAD_STATUS_NS}{req_id}"
+
         conn = get_config().redis_conn
-        status_blob = conn.get(status_key)
-        if status_blob is None:
+        info_blob = conn.get(info_key)
+        if info_blob is None:
             get_application_logger().debug(f"Pending download request ID={req_id} not found on Redis server")
             return None
-        req_status: DownloadRequestStatus = DownloadRequestStatus.from_bytes(status_blob)
-        return req_status
+        req_info: _DownloadRequest = _DownloadRequest.from_bytes(info_blob)
+        if requester != req_info.requester:
+            get_application_logger().debug(f"Requester does not match original requester!")
+            return None
+        clear = (req_info.state == DOWNLOAD_READY)
+        return DownloadRequestStatus(state=req_info.state, msg=req_info.msg, pct_complete=req_info.pct_complete,
+                                     download_url=req_info.download_url)
     except Exception as e:
         get_application_logger().error(f"Error retrieve pending download request status: {str(e)}", exc_info=True)
         return None
+    finally:
+        if clear:
+            try:
+                conn = get_config().redis_conn
+                with conn.pipeline() as pipe:
+                    pipe.lrem(_DOWNLOAD_KEY, 0, f"{requester}-{req_id}")
+                    pipe.delete(info_key)
+                    pipe.execute()
+            except Exception:
+                pass
 
 
 def cancel_pending_download_request(requester: str, req_id: str) -> bool:
@@ -273,11 +313,10 @@ def cancel_pending_download_request(requester: str, req_id: str) -> bool:
     """
     try:
         info_key = f"{_DOWNLOAD_INFO_NS}{req_id}"
-        status_key = f"{_DOWNLOAD_STATUS_NS}{req_id}"
         conn = get_config().redis_conn
         with conn.pipeline() as pipe:
             pipe.lrem(_DOWNLOAD_KEY, 0, f"{requester}-{req_id}")
-            pipe.delete(info_key, status_key)
+            pipe.delete(info_key)
             pipe.execute()
         return True
     except Exception as e:
@@ -297,12 +336,16 @@ def fulfill_pending_download_request(req_id: str) -> bool:
     file (.npz) or a Matlab file (.mat). That file is stored in the portal's respository at /downloads/<req_id>.<ext>,
     where <req_id> is the unique identifier assigned to the original download request.
 
-    Depending on the length and number of trials, it could take a minute or more to prepare the download, so progress
-    is updated regularly in the _DOWNLOAD_STATUS_NS<req_id> key. The request status has 3 possible states - 'in
-    progress', 'ready for download', and 'failed'.
+    Depending on the length and number of trials, it could take a minute or more to prepare the download. The file is
+    then uploaded to S3 and a presigned URL generated so that the client can download the generated file directly from
+    S3. Finally, the download request is logged in a dedicated download history in the portal database, in order to
+    track data provenance.
 
-    Once submitted, a download request cannot be cancelled, but it can be deleted. This method will abort if it
-    detects that the request it's working on has been removed from Redis.
+    The download request info/status object is updated periodically in the _DOWNLOAD_INFO_NS<req_id> key. The request
+    status has 3 possible states: DOWNLOAD_PREPPING, DOWNLOAD_READY, and DOWNLOAD_FAIL.
+
+    Once submitted, a download request can be cancelled by simply removing the corresponding info/status object from
+    Redis. This method will abort if it detects that the request it's working no longer exists in Redis.
 
     Args:
         req_id: The download request identifier, assigned when the request was initially submitted to the backend.
@@ -311,13 +354,15 @@ def fulfill_pending_download_request(req_id: str) -> bool:
     """
 
     get_application_logger().debug(f"Generating data file for pending download request {req_id}")
+    tmp_file_path: Optional[Path] = None
+    req_info: Optional[_DownloadRequest] = None
+    info_key = f"{_DOWNLOAD_INFO_NS}{req_id}"
     try:
         conn = get_config().redis_conn
-        info_key = f"{_DOWNLOAD_INFO_NS}{req_id}"
         raw = conn.get(info_key)
         if raw is None:
             raise Exception("No pending download request found")
-        req_info: DownloadRequest = DownloadRequest.from_bytes(raw)
+        req_info = _DownloadRequest.from_bytes(raw)
         session_info = fetch_one_row(DBTable.SESSION, req_info.session_key)
         if session_info is None:
             raise Exception("Session not found, or database error while retrieving session metadata")
@@ -335,42 +380,88 @@ def fulfill_pending_download_request(req_id: str) -> bool:
                 raise Exception(f"Failed to retrive trial block between indices {idx_start} and {idx_end}")
             trial_data.extend(block)
             idx_start = idx_end + 1
-            if _request_status_update(req_id, f"Retrieved response data for {idx_start-1} of {n_trials} trials",
-                                      int(50 * (idx_start - 1) / n_trials)):
+
+            # check for cancel and update progress
+            if conn.get(info_key) is None:
                 return False
+            req_info.msg = f"Retrieved response data for {idx_start-1} of {n_trials} trials"
+            req_info.pct_complete = int(50 * (idx_start - 1) / n_trials)
+            conn.set(info_key, req_info.to_bytes())
 
         # make sure the downloads/ folder exists in the portal workspace
-        downloads_dir = get_data_downloads_directory()
+        downloads_dir = _get_data_downloads_directory()
         if not downloads_dir.is_dir():
             get_application_logger().debug("Creating downloads/ folder in portal workspace")
             downloads_dir.mkdir(parents=True, exist_ok=False)
 
-        # write data file
-        file_path = get_data_download_file_path(req_info)
-        if _request_status_update(req_id, f"Writing trial data to {file_path.name}. This will take a while...", 55):
+        # check for cancel, then update progress and start writing data to file
+        tmp_file_path = _get_data_download_file_path(req_info)
+        if conn.get(info_key) is None:
             return False
-        _save_trial_data_to_file(file_path, trial_data)
+        req_info.msg = f"Writing trial data to {tmp_file_path.name}. This will take a while..."
+        req_info.pct_complete = 55
+        conn.set(info_key, req_info.to_bytes())
+        _save_trial_data_to_file(tmp_file_path, trial_data)
 
-        # ... then upload it to temporary storage in the portal repository (it will be auto-deleted after 1 day)
-        if _request_status_update(req_id, f"Pushing {file_path.name} to portal repository", 90):
-            file_path.unlink(missing_ok=True)
+        # check for cancel, update progress, and upload data file to S3 repo (it will be auto-deleted after 1 day)
+        if conn.get(info_key) is None:
             return False
-
-        if not repo.upload_file(file_path, f"/{_DOWNLOAD_SUBFOLDER}/{file_path.name}"):
+        req_info.msg = f"Pushing {tmp_file_path.name} to portal repository"
+        req_info.pct_complete = 90
+        conn.set(info_key, req_info.to_bytes())
+        if not repo.upload_file(tmp_file_path, f"/{_DOWNLOAD_SUBFOLDER}/{tmp_file_path.name}"):
             raise Exception("An error occurred while uploading data file to portal repository")
 
-        # remove the data file from local storage -- we're done with it.
-        file_path.unlink(missing_ok=True)
-
-        if _request_status_update(req_id, f"DONE!", 100, DOWNLOAD_READY):
+        # check for cancel and update progress
+        if conn.get(info_key) is None:
             return False
+        req_info.msg = f"Finishing up..."
+        req_info.pct_complete = 99
+        conn.set(info_key, req_info.to_bytes())
+
+        # get presigned URL
+        file_key = f"/{_DOWNLOAD_SUBFOLDER}/{_get_data_download_file_path(req_info).name}"
+        url = repo.download_url_for(file_key)
+        if url is None:
+            raise Exception("Unable to generate download URL for the data file")
+
+        # push a record of the fulfilled download request into the portal database. If this fails, do not consider it
+        # catastrophic, but log the issue
+        download_entry = dict(
+            request_id=req_info.id, requester=req_info.requester, experimenter=req_info.session_key['experimenter'],
+            subj_id=req_info.session_key['subj_id'], session_date=req_info.session_key['session_date'],
+            session_sfx=req_info.session_key['session_sfx'], complete_reps=req_info.complete_reps,
+            remove_sacc=req_info.remove_saccades, out_format=req_info.output_fmt,
+            selected_units=" ".join([str(i) for i in sorted(req_info.selected_units)]),
+            downloaded=datetime.now().isoformat(sep=' ', timespec='seconds')
+        )
+        err_msg = insert_into_table(DBTable.DATA_DOWNLOAD, download_entry)
+        if err_msg is not None:
+            get_application_logger().error(f"Failed to record completed data download in database: {err_msg}")
+
+        req_info.state = DOWNLOAD_READY
+        req_info.msg = "DONE!"
+        req_info.pct_complete = 100
+        req_info.download_url = url
+        conn.set(info_key, req_info.to_bytes())
+
         get_application_logger().debug(f"Successfully generated data file for download request {req_id}")
         return True
     except Exception as err:
-        error_msg = f"ERROR while preparing download archive for request {req_id}: {str(err)}"
+        error_msg = f"ERROR while preparing download file for request {req_id}: {str(err)}"
         get_application_logger().error(error_msg, exc_info=True)
-        _request_status_update(req_id, error_msg, 100, DOWNLOAD_FAIL)
+        try:
+            req_info.state = DOWNLOAD_FAIL
+            req_info.msg = error_msg
+            req_info.pct_complete = 100
+            get_config().redis_conn.set(info_key, req_info.to_bytes())
+        except Exception:
+            pass
         return False
+    finally:
+        # remove the data file from local storage if it's there.
+        if isinstance(tmp_file_path, Path):
+            tmp_file_path.unlink(missing_ok=True)
 
 
 _DOWNLOAD_FILE_CONTENT_INFO: str = \
@@ -459,119 +550,3 @@ def _save_trial_data_to_file(file_path: Path, trial_data: List[TrialData]) -> No
         np.savez(str(file_path), **trials_dict)
     else:
         raise Exception(f'Unsupported output format: {file_path.name}')
-
-
-def _request_status_update(req_id: str, msg: str, pct: int, next_state: Optional[int] = None) -> bool:
-    """
-    Helper method used to update progress and, optionally, the state of a pending download request. Intended for use
-    ONLY within the background worker that prepares the data file requested for download. While the request cannot be
-    cancelled, it can be removed while the download file is being prepared.
-
-    Args:
-        req_id: The download request identifier, assigned when the request was initially submitted to the backend.
-        msg: The new status/progress message to post. If job failed, this should be an error description.
-        pct: Estimated task progress as 'percent completed', to nearest 1%.
-        next_state: If not None, transition the job to this state. Default is None.
-
-    Returns:
-        True if the download request no longer exists, in which case an ongoing background task to fulfill the request
-            will abort. False otherwise.
-    Raises:
-        Exception: If an error occurs while reading or writing download request status cache in Redis.
-    """
-    status_key = f"{_DOWNLOAD_STATUS_NS}{req_id}"
-
-    conn = get_config().redis_conn
-    status_blob = conn.get(status_key)
-    if status_blob is None:
-        return True
-    req_status: DownloadRequestStatus = DownloadRequestStatus.from_bytes(status_blob)
-    if isinstance(next_state, int):
-        req_status.state = next_state
-    req_status.msg = msg
-    req_status.pct_complete = int(min(max(0, pct), 100))
-    req_status.updated = time.time()
-
-    # TODO: Issue - The key could disappear between the previous read and this write.
-    conn.set(status_key, req_status.to_bytes())
-    return False
-
-
-def get_data_download_url(requester: str, req_id: str) -> Tuple[bool, str]:
-    """
-    Get the presigned URL by which a data file -- previously prepared in response to a data download request -- can be
-    downloaded from the portal repository.
-
-    Once a data download request is fulfilled, the prepared data file is available for download from the repository,
-    implemented in an AWS S3 bucket. By design, the data file will "expire" (ie, it is deleted permanently) about 24
-    hours after it is uploaded. Since all files in the S3 bucket are private, a presigned URL must be supplied to
-    download any given file.
-
-    Only one presigned URL will be supplied per download request. The URL should be accessed immediately, as it is set
-    to expire in one hour. After preparing the URL, this method removes the completed download request from the Redis
-    cache and stores a permanent record of the download in the portal database as a data provenance measure.
-
-    Args:
-        requester: The username of the registered portal user that originally requested the download.
-        req_id: The download request identifier.
-    Returns:
-        A 2-tuple: (False, error message) if an error occurs; (True, url-string) otherwise.
-    """
-    clear = False  # if set, clear the download request from Redis cache
-    info_key = f"{_DOWNLOAD_INFO_NS}{req_id}"
-    status_key = f"{_DOWNLOAD_STATUS_NS}{req_id}"
-    try:
-        # get download request info and status from Redis
-        conn = get_config().redis_conn
-        with conn.pipeline() as pipe:
-            pipe.get(info_key)
-            pipe.get(status_key)
-            res = pipe.execute()
-        req_info = None if res[0] is None else DownloadRequest.from_bytes(res[0])
-        req_status = None if res[1] is None else DownloadRequestStatus.from_bytes(res[1])
-        if (req_info is None) or (req_status is None):
-            clear = True
-            return False, f"Download request {req_id} not found on server."
-
-        # verify requester and check that file has not expired.
-        if req_info.requester != requester:
-            return False, f"You did not request download {req_id}. Permission denied."
-        elif time.time() - req_info.requested > 24 * 3600:
-            clear = True
-            return False, f"The prepared data file has expired and is no longer available for download."
-
-        # generate presigned URL
-        file_key = f"/{_DOWNLOAD_SUBFOLDER}/{get_data_download_file_path(req_info).name}"
-        url = repo.download_url_for(file_key)
-        if url is None:
-            return False, "Unable to generate download URL for the data file."
-
-        # push a record of the completed download into the portal database. If this fails, do not consider it
-        # catastrophic, but log the issue
-        download_entry = dict(
-            request_id=req_info.id, requester=req_info.requester, experimenter=req_info.session_key['experimenter'],
-            subj_id=req_info.session_key['subj_id'], session_date=req_info.session_key['session_date'],
-            session_sfx=req_info.session_key['session_sfx'], complete_reps=req_info.complete_reps,
-            remove_sacc=req_info.remove_saccades, out_format=req_info.output_fmt,
-            selected_units=" ".join([str(i) for i in sorted(req_info.selected_units)]),
-            downloaded=datetime.now().isoformat(sep=' ', timespec='seconds')
-        )
-        err_msg = insert_into_table(DBTable.DATA_DOWNLOAD, download_entry)
-        if err_msg is not None:
-            get_application_logger().error(f"Failed to record completed data download in database: {err_msg}")
-
-        clear = True
-        return True, url
-    except Exception as e:
-        get_application_logger().error(f"Failed to get download URL for request {req_id}: {str(e)}", exc_info=True)
-        return False, f"Internal error while trying to generate URL for data file download."
-    finally:
-        if clear:
-            try:
-                conn = get_config().redis_conn
-                with conn.pipeline() as pipe:
-                    pipe.lrem(_DOWNLOAD_KEY, 0, f"{requester}-{req_id}")
-                    pipe.delete(info_key, status_key)
-                    pipe.execute()
-            except Exception:
-                pass
