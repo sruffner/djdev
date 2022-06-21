@@ -13,7 +13,9 @@ Usage - when deployed on local development machine using Docker Compose:
     2) docker-compose stop backend  ==> Stop the Dash/Flask backend server.
     3) docker-compose run backend python -m admin.reset  ==> Run this script to ensure database is reset and empty.
     4) docker-compose run backend python -m admin.reconstruct  ==> Run this script to perform the reconstruction.
-    4) docker-compose restart backend  ==> To resume normal operation.
+    5) docker-compose down, docker-compose up ==> Bring everything down, then resume normal operation. DO NOT just do
+       docker-compose restart backend, as this will restart the unnamed docker containers created by steps (3) and (4),
+       and that will mess everything up!
 
 @author: sruffner
 @created: 19may2021
