@@ -4,10 +4,19 @@ Access datasets in the Lisberger lab's portal database.
 
 ## Background
 The Lisberger lab data portal ('sglportal') is a distributed application used to archive experimental
-data recorded in the lab in an underlying MySQL-esque MariaDB database, add or update 
-metadata that helps describe and organize that data, explore and visualize trial response
-data from any archived experiment, and download datasets for derivative studies. A test 
-version of the portal is now live [on the Duke OpenShift cluster](https://braincerebellumdata-test.ocp.dhe.duke.edu/explore).
+data recorded in the lab in an underlying MySQL-esque MariaDB database, along with "metadata" that
+help describe and organize the experimental data (behavioral and neuronal responses to visual stimuli).
+
+Any anonymous user to the portal website can freely explore lab datasets on the home page. Filter datasets
+by session, neural unit, research study, or recording date; view response plots for individual trials of the
+selected session or -- under certain circumstances --, aggregate responses across repeated presentations of a
+particular trial protocol. Registered users with 'download'-level access can selectively download datasets from
+any experiment session for derivate studies. Those with 'commit'-level access can also upload experimental sessions
+to the database, while 'admin'-level users can add/modify metadata tables, perform user management, and examine the
+contents of the portal's backup repository (hosted in an AWS S3 bucket provided by Duke IT Services).
+
+A test version of the portal is now live [on the Duke OpenShift cluster](https://braincerebellumdata-test.ocp.dhe.duke.edu/explore).
+[You must be inside the Duke firewall or on the VPN to access the site.]
 
 When an experiment session is committed to the portal database, the Maestro trial files
 and Omniplex PL2 file(s) in the session archive are preprocessed, and the behavioral and 
