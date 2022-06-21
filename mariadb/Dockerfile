@@ -1,4 +1,4 @@
-FROM bitnami/mariadb:10.6.4-debian-10-r16
+FROM bitnami/mariadb:10.6.8-debian-10-r14
 
 # will this disable the vulnerability scan in DHE Gitlab?
 LABEL twistexc=twistlockbypass
