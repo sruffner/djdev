@@ -501,7 +501,10 @@ def _save_trial_data_to_file(file_path: Path, trial_reps: List[TrialRep], remove
     trials = list()
     while len(trial_reps) > 0:
         rep = trial_reps.pop(0)
-        hevel, vevel = rep.eye_velocity_saccades_removed() if remove_saccades else rep.hevel, rep.vevel
+        if remove_saccades:
+            hevel, vevel = rep.eye_velocity_saccades_removed()
+        else:
+            hevel, vevel = rep.hevel, rep.vevel
         curr_trial = dict(
             index=rep.index,
             protocol_name=rep.protocol.trial.path_name,
@@ -518,7 +521,7 @@ def _save_trial_data_to_file(file_path: Path, trial_reps: List[TrialRep], remove
             fix2_hpos=rep.fix2_pos[:, 0],
             fix2_vpos=rep.fix2_pos[:, 1]
         )
-        for unit_id, spiketimes in rep.spike_trains:
+        for unit_id, spiketimes in rep.spike_trains.items():
             curr_trial[f"unit_{unit_id}"] = np.nan if (spiketimes is None) else spiketimes
         trials.append(curr_trial)
 
