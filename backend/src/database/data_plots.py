@@ -19,8 +19,8 @@ import dash_bootstrap_components as dbc
 
 from sglportalapi import stats
 from sglportalapi.maestro import Protocol, SegParamType
-from database.trial_data_ops import data_for_trial, retrieve_trial_reps_for_session, retrieve_trial_reps_for_neuron
-
+from database.trial_data_ops import retrieve_trial_reps_for_neuron, retrieve_session_trial_rep, \
+    retrieve_session_trial_reps
 
 _BEHAVIOR_TRACE_STYLE_MAP = {
     'HEPOS': dict(color='royalblue'),
@@ -61,38 +61,32 @@ def single_trial_response_figure(session: Dict[str, Any], trial_idx: int, unit_i
         A Dash Graph component containing the Plotly figure of trial response data, as described above. If an error
             occurs while retrieving response data, the method instead returns an HTML Div with an error message.
     """
-    trial_pk = {'experimenter': session['experimenter'], 'subj_id': session['subj_id'],
-                'session_date': session['session_date'], 'session_sfx': session['session_sfx'],
-                'trial_idx': trial_idx}
-    trial_data = data_for_trial(trial_pk, unit_ids=None if (unit_id is None) else [unit_id])
-    if trial_data is None:
-        return html.Div(dbc.Alert(f"Failed to retrieve trial data for trial index {trial_idx}", is_open=True))
+    trial_rep = retrieve_session_trial_rep(session_key=session, trial_index=trial_idx,
+                                           unit_ids=None if (unit_id is None) else [unit_id])
+    if isinstance(trial_rep, str):
+        return html.Div(dbc.Alert(f"Failed to retrieve data for trial {trial_idx} [{trial_rep}]", is_open=True))
 
     fig = make_subplots(rows=1, cols=1, specs=[[{"secondary_y": True}]]) if (unit_id is None) \
         else make_subplots(rows=2, cols=1, specs=[[{"secondary_y": True}], [{"secondary_y": True}]],
                            shared_xaxes=True, vertical_spacing=0.04)
 
-    hevel, vevel = trial_data.eye_velocity_saccades_removed()
-    for response_id, trace in trial_data.behavior.items():
-        adj_trace = hevel if response_id == 'HEVEL' else (vevel if response_id == 'VEVEL' else trace)
-        fig.add_trace(
-            go.Scatter(x=[i for i in range(len(adj_trace))], y=adj_trace, name=response_id, mode='lines',
-                       line=_BEHAVIOR_TRACE_STYLE_MAP[response_id], connectgaps=False,
-                       yaxis='y2' if response_id.find('VEL') > -1 else None),
-            row=1, col=1, secondary_y=(response_id.find('VEL') > -1)
-        )
+    hevel, vevel = trial_rep.eye_velocity_saccades_removed()
+    behavior = dict(HEPOS=trial_rep.hgpos, VEPOS=trial_rep.vepos, HEVEL=trial_rep.hevel, VEVEL=trial_rep.vevel)
+    for k, trace in behavior.items():
+        if not (trace is None):
+            trace = hevel if k == 'HEVEL' else (vevel if k == 'VEVEL' else trace)
+            fig.add_trace(
+                go.Scatter(x=[i for i in range(len(trace))], y=trace, name=k, mode='lines',
+                           line=_BEHAVIOR_TRACE_STYLE_MAP[k], connectgaps=False,
+                           yaxis='y2' if k.find('VEL') > -1 else None), row=1, col=1, secondary_y=(k.find('VEL') > -1)
+            )
 
     # plot fixation target #1 H,V trajectories, if defined. Also use a thin translucent horizontal bar to highlight the
     # ON epochs for the fixation target #1, and label with the text annotation "Fix1 ON"
-    duration_ms = trial_data.protocol.duration_of_rep(trial_data.trial_rvs)
-    fix1_pos, fix2_pos = trial_data.protocol.compute_fixation_target_trajectories(
-        trial_data.trial_rvs,
-        trial_data.behavior['HEPOS'] if 'HEPOS' in trial_data.behavior else None,
-        trial_data.behavior['VEPOS'] if 'VEPOS' in trial_data.behavior else None,
-        trial_data.vstab_win_len_ms
-    )
-    fix1_on, fix2_on = trial_data.protocol.compute_fixation_target_on_epochs(trial_data.trial_rvs)
-    if fix1_pos is not None:
+    duration_ms = trial_rep.duration
+    fix1_pos, fix2_pos = trial_rep.fix1_pos, trial_rep.fix2_pos
+    fix1_on, fix2_on = trial_rep.fix1_on_epochs, trial_rep.fix2_on_epochs
+    if len(fix1_pos) > 0:
         fig.add_trace(
             go.Scatter(x=[i for i in range(duration_ms)], y=fix1_pos[:, 0], name='FIX1_HPOS', mode='lines',
                        line=_BEHAVIOR_TRACE_STYLE_MAP['FIX1_HPOS'], connectgaps=False),
@@ -112,7 +106,7 @@ def single_trial_response_figure(session: Dict[str, Any], trial_idx: int, unit_i
                                    ax=0, ay=0, xanchor="left", yanchor="middle", row=1, col=1)
 
     # and analogously for fixation target #2...
-    if fix2_pos is not None:
+    if len(fix2_pos) > 0:
         fig.add_trace(
             go.Scatter(x=[i for i in range(duration_ms)], y=fix2_pos[:, 0], name='FIX2_HPOS', mode='lines',
                        line=_BEHAVIOR_TRACE_STYLE_MAP['FIX2_HPOS'], connectgaps=False),
@@ -134,7 +128,7 @@ def single_trial_response_figure(session: Dict[str, Any], trial_idx: int, unit_i
     # if neural unit was specified, plot both its "spike train" and instantaneous firing rate in the bottom plot. Else,
     # the bottom plot is omitted.
     if unit_id is not None:
-        firing_rate_trace = trial_data.instantaneous_firing_rate(unit_id, smooth=True)
+        firing_rate_trace = trial_rep.instantaneous_firing_rate(unit_id, smooth=True)
         fig.add_trace(
             go.Scatter(x=[i for i in range(len(firing_rate_trace))], y=firing_rate_trace, name=f"Unit #{unit_id}",
                        mode='lines', connectgaps=False, line=dict(color='black', width=2), yaxis='y3'),
@@ -143,9 +137,10 @@ def single_trial_response_figure(session: Dict[str, Any], trial_idx: int, unit_i
 
         x_spikes = list()
         y_spikes = list()
-        for t in trial_data.neuronal[unit_id]:
-            x_spikes.extend([t * 1000, t * 1000, None])
-            y_spikes.extend([9, 10, None])
+        if isinstance(trial_rep.spike_trains[unit_id], np.ndarray):
+            for t in trial_rep.spike_trains[unit_id]:
+                x_spikes.extend([t * 1000, t * 1000, None])
+                y_spikes.extend([9, 10, None])
         fig.add_trace(
             go.Scatter(x=x_spikes, y=y_spikes, name=f"Unit #{unit_id} spikes", mode='lines', connectgaps=False,
                        line=dict(color='blue', width=2), yaxis='y4'),
@@ -154,7 +149,7 @@ def single_trial_response_figure(session: Dict[str, Any], trial_idx: int, unit_i
 
     # segment spans defined by alternating blue and gray bars along top of top plot, with segment label.
     t = 0
-    for i, seg_dur in enumerate(trial_data.protocol.segment_durations_for_rep(trial_data.trial_rvs)):
+    for i, seg_dur in enumerate(trial_rep.segment_durations):
         fig.add_shape(
             type='rect', x0=t, x1=t+seg_dur, xref='x', y0=0, y1=28, yanchor=1.01, yref='y domain', ysizemode='pixel',
             fillcolor='lightsteelblue' if (i % 2) == 0 else 'whitesmoke', line=dict(width=0),
@@ -183,7 +178,7 @@ def single_trial_response_figure(session: Dict[str, Any], trial_idx: int, unit_i
     # prematurely. Also, if a neural response is displayed in the bottom plot, that plot will only span the recorded
     # duration, rather than the expected duration of the trial. SO we force the lower plot to the same x-axis range as
     # the upper plot
-    if not trial_data.success:
+    if not trial_rep.success:
         fig.add_annotation(x=0, y=1, yref='y domain', text='<b>** TRIAL NOT COMPLETED **</b>', showarrow=False,
                            ax=0, ay=0, xanchor="left", yanchor="top", row=1, col=1)
         if unit_id is not None:
@@ -224,32 +219,31 @@ def average_response_figure(session: Dict[str, Any], proto_hash: str, unit_id: O
     """
     # retrieve trial data for all relevant trials recorded during session
     if unit_id is None:
-        trial_data = retrieve_trial_reps_for_session(session, proto_hash)
+        trial_reps = retrieve_session_trial_reps(session, proto_hash=proto_hash)
     else:
         unit_key = session.copy()
         unit_key['unit_id'] = unit_id
-        trial_data = retrieve_trial_reps_for_neuron(unit_key, proto_hash)
+        trial_reps = retrieve_trial_reps_for_neuron(unit_key, proto_hash=proto_hash)
 
-    if trial_data is None:
-        return html.Div(dbc.Alert(f"Failed to retrieve trial data (internal error).", is_open=True))
-    elif len(trial_data) < 3:
-        return html.Div(dbc.Alert(f"Fewer than 3 successful trial reps ({len(trial_data)}) found for selected protocol",
-                                  is_open=True))
-    elif not trial_data[0].protocol.can_aggregate_responses:
+    if isinstance(trial_reps, str):
+        return html.Div(dbc.Alert(f"Failed to retrieve trial data [{trial_reps}].", is_open=True))
+    elif len(trial_reps) < 3:
+        return html.Div(dbc.Alert("Fewer than 3 successful trial reps found for selected protocol", is_open=True))
+    elif not trial_reps[0].protocol.can_aggregate_responses:
         return html.Div(dbc.Alert("Selected protocol is not conducive to averaging across trial reps", is_open=True))
 
-    protocol = trial_data[0].protocol
+    protocol = trial_reps[0].protocol
     min_dur = 0
     vary_dur_seg = -1
     hevel_list = list()
     vevel_list = list()
-    for td in trial_data:
-        h, v = td.eye_velocity_saccades_removed()
+    for rep in trial_reps:
+        h, v = rep.eye_velocity_saccades_removed()
         hevel_list.append(h)
         vevel_list.append(v)
 
     firing_rate_list: Optional[List[np.ndarray]] = \
-        None if (unit_id is None) else [td.instantaneous_firing_rate(unit_id, smooth=True) for td in trial_data]
+        None if (unit_id is None) else [rep.instantaneous_firing_rate(unit_id, smooth=True) for rep in trial_reps]
     firing_rate = None
     sem_fr = None
     if len(protocol.random_variables) == 0:
@@ -266,24 +260,26 @@ def average_response_figure(session: Dict[str, Any], proto_hash: str, unit_id: O
         # only average over the last T ms of that segment, where T is the minimum observed duration across trial reps.
         # This implies a "discontinuity" in the mean response traces.
         vary_dur_seg = protocol.random_variables[0].seg_idx
-        min_dur = int(min([td.trial_rvs[0] for td in trial_data]) + 0.5)
+        min_dur = int(min([rep.rv_values[0] for rep in trial_reps]) + 0.5)
         prelude = sum([protocol.trial.segments[i].dur for i in range(vary_dur_seg)])
 
         hevel = np.concatenate(
-            (np.nanmean([hevel_list[i][0:prelude] for i in range(len(trial_data))], axis=0),
-             np.nanmean([hevel_list[i][prelude+td.trial_rvs[0]-min_dur:] for i, td in enumerate(trial_data)], axis=0)),
+            (np.nanmean([hevel_list[i][0:prelude] for i in range(len(trial_reps))], axis=0),
+             np.nanmean([hevel_list[i][prelude+rep.rv_values[0]-min_dur:] for i, rep in enumerate(trial_reps)],
+                        axis=0)),
             axis=0
         )
         vevel = np.concatenate(
-            (np.nanmean([vevel_list[i][0:prelude] for i in range(len(trial_data))], axis=0),
-             np.nanmean([vevel_list[i][prelude+td.trial_rvs[0]-min_dur:] for i, td in enumerate(trial_data)], axis=0)),
+            (np.nanmean([vevel_list[i][0:prelude] for i in range(len(trial_reps))], axis=0),
+             np.nanmean([vevel_list[i][prelude+rep.rv_values[0]-min_dur:] for i, rep in enumerate(trial_reps)],
+                        axis=0)),
             axis=0
         )
 
         if firing_rate_list:
-            firing_rate_pre = [firing_rate_list[i][0:prelude] for i in range(len(trial_data))]
+            firing_rate_pre = [firing_rate_list[i][0:prelude] for i in range(len(trial_reps))]
             firing_rate_post = \
-                [firing_rate_list[i][prelude+td.trial_rvs[0]-min_dur:] for i, td in enumerate(trial_data)]
+                [firing_rate_list[i][prelude+rep.rv_values[0]-min_dur:] for i, rep in enumerate(trial_reps)]
             firing_rate = np.concatenate(
                 (np.nanmean(firing_rate_pre, axis=0), np.nanmean(firing_rate_post, axis=0)),
                 axis=0
@@ -393,7 +389,7 @@ def average_response_figure(session: Dict[str, Any], proto_hash: str, unit_id: O
 
     # indicate the number of trial reps aggregated to produce this figure
     fig.add_annotation(
-        x=0, y=1, yref='y domain', text=f"<b>N = {len(trial_data)} reps</b>", showarrow=False,
+        x=0, y=1, yref='y domain', text=f"<b>N = {len(trial_reps)} reps</b>", showarrow=False,
         xanchor='left', yanchor='top', row=1, col=1, secondary_y=False, font=dict(size=16)
     )
 
@@ -444,18 +440,18 @@ def discharge_statistics_figure(session: Dict[str, Any], proto_hash: str, unit_i
     try:
         unit_key = session.copy()
         unit_key['unit_id'] = unit_id
-        trial_data = retrieve_trial_reps_for_neuron(unit_key, proto_hash)
-        if trial_data is None:
-            raise Exception("Failed to retrieve data")
-        protocol = trial_data[0].protocol
+        trial_reps = retrieve_trial_reps_for_neuron(unit_key, proto_hash)
+        if isinstance(trial_reps, str):
+            raise Exception(f"Retrieval failed")
+        protocol = trial_reps[0].protocol
         num_segs = len(protocol.trial.segments)
         rand_dur_seg = -1 if len(protocol.random_variables) == 0 else protocol.random_variables[0].seg_idx
         seg_durations = [seg.dur for seg in protocol.trial.segments]
-        for td in trial_data:
-            spike_times = td.neuronal[unit_id]
+        for rep in trial_reps:
+            spike_times = rep.spike_trains[unit_id]
             if (seg_range is not None) and ((seg_range[1] - seg_range[0]) < num_segs):
                 if rand_dur_seg > -1:
-                    seg_durations[rand_dur_seg] = td.trial_rvs[0]
+                    seg_durations[rand_dur_seg] = rep.rv_values[0]
                 start = sum([seg_durations[i] for i in range(seg_range[0])])
                 stop = sum([seg_durations[i] for i in range(seg_range[1])])
                 spike_times = spike_times[np.logical_and(spike_times >= 1e-3*start, spike_times < 1e-3*stop)]

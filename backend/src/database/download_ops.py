@@ -61,8 +61,8 @@ from config.config import get_config
 from database import repo
 from database.table_info import AttributeValue, DBTable, primary_key_of
 from database.table_ops import row_exists, fetch_attribute_values, fetch_one_row, insert_into_table
-from database.trial_data_ops import TrialData, retrieve_trial_block
-
+from database.trial_data_ops import retrieve_session_trial_reps
+from sglportalapi.data_containers import TrialRep
 
 job_queue = Queue(connection=get_config().redis_conn)
 """ Background jobs queue. """
@@ -369,16 +369,14 @@ def fulfill_pending_download_request(req_id: str) -> bool:
 
         idx_start = 1
         n_trials = session_info['num_trials']
-        trial_data: List[TrialData] = list()
+        trial_reps: List[TrialRep] = list()
         while idx_start < n_trials:
             idx_end = int(min(n_trials - idx_start + 1, 50)) + idx_start - 1
-            block = retrieve_trial_block(
-                req_info.session_key, idx_start, idx_end, unit_ids=req_info.selected_units,
-                completed_only=req_info.complete_reps, remove_saccades=req_info.remove_saccades, include_fixtgts=True
-            )
-            if block is None:
-                raise Exception(f"Failed to retrive trial block between indices {idx_start} and {idx_end}")
-            trial_data.extend(block)
+            block = retrieve_session_trial_reps(req_info.session_key, start=idx_start, end=idx_end,
+                                                unit_ids=req_info.selected_units, completed=req_info.complete_reps)
+            if isinstance(block, str):
+                raise Exception(f"Failed to retrive trial block between indices {idx_start} and {idx_end} [{block}]")
+            trial_reps.extend(block)
             idx_start = idx_end + 1
 
             # check for cancel and update progress
@@ -401,7 +399,7 @@ def fulfill_pending_download_request(req_id: str) -> bool:
         req_info.msg = f"Writing trial data to {tmp_file_path.name}. This will take a while..."
         req_info.pct_complete = 55
         conn.set(info_key, req_info.to_bytes())
-        _save_trial_data_to_file(tmp_file_path, trial_data)
+        _save_trial_data_to_file(tmp_file_path, trial_reps, req_info.remove_saccades)
 
         # check for cancel, update progress, and upload data file to S3 repo (it will be auto-deleted after 1 day)
         if conn.get(info_key) is None:
@@ -487,37 +485,40 @@ _DOWNLOAD_FILE_CONTENT_INFO: str = \
     "           recorded during the trial but no spikes occurred, this field is set to NaN. \r\n"
 
 
-def _save_trial_data_to_file(file_path: Path, trial_data: List[TrialData]) -> None:
+def _save_trial_data_to_file(file_path: Path, trial_reps: List[TrialRep], remove_saccades: bool) -> None:
     """
     Helper method that saves trial response data to a Matlab MAT file or a Numpy NPZ file.
 
     Args:
         file_path: The target file. The file extension indicates the output format requested.
-        trial_data: The collected trial response data. The list is emptied as it is consumed, since it could eat up
+        trial_reps: The collected trial response data. The list is emptied as it is consumed, since it could eat up
             significant memory depending on the total number of trials, units, and trial durations.
+        remove_saccades: If True, the horizontal and vertical eye velocity traces are modified: any baseline offset is
+            removed, and detected saccade epochs are replaced with NaN.
     Raises:
         Exception: If an error occurs while writing the file or preparing the data for the output format requested.
     """
     trials = list()
-    while len(trial_data) > 0:
-        td = trial_data.pop(0)
+    while len(trial_reps) > 0:
+        rep = trial_reps.pop(0)
+        hevel, vevel = rep.eye_velocity_saccades_removed() if remove_saccades else rep.hevel, rep.vevel
         curr_trial = dict(
-            index=td.trial_idx,
-            protocol_name=td.protocol.trial.path_name,
-            duration_ms=td.duration_ms,
-            record_start_ms=td.record_start_ms,
-            success=td.success,
-            timestamp_sec=td.timestamp_sec,
-            hgpos=td.behavior['HEPOS'] if 'HEPOS' in td.behavior else np.array([], dtype=np.float32),
-            vepos=td.behavior['VEPOS'] if 'VEPOS' in td.behavior else np.array([], dtype=np.float32),
-            hevel=td.behavior['HEVEL'] if 'HEVEL' in td.behavior else np.array([], dtype=np.float32),
-            vevel=td.behavior['VEVEL'] if 'VEVEL' in td.behavior else np.array([], dtype=np.float32),
-            fix1_hpos=np.array([], dtype=np.float32) if (td.fix1_pos is None) else td.fix1_pos[:, 0],
-            fix1_vpos=np.array([], dtype=np.float32) if (td.fix1_pos is None) else td.fix1_pos[:, 1],
-            fix2_hpos=np.array([], dtype=np.float32) if (td.fix2_pos is None) else td.fix2_pos[:, 0],
-            fix2_vpos=np.array([], dtype=np.float32) if (td.fix2_pos is None) else td.fix2_pos[:, 1]
+            index=rep.index,
+            protocol_name=rep.protocol.trial.path_name,
+            duration_ms=rep.duration,
+            record_start_ms=rep.record_start,
+            success=rep.success,
+            timestamp_sec=rep.timestamp,
+            hgpos=rep.hgpos if isinstance(rep.hgpos, np.ndarray) else np.array([], dtype=np.float32),
+            vepos=rep.vepos if isinstance(rep.vepos, np.ndarray) else np.array([], dtype=np.float32),
+            hevel=hevel if isinstance(rep.hevel, np.ndarray) else np.array([], dtype=np.float32),
+            vevel=vevel if isinstance(rep.vevel, np.ndarray) else np.array([], dtype=np.float32),
+            fix1_hpos=rep.fix1_pos[:, 0],
+            fix1_vpos=rep.fix1_pos[:, 1],
+            fix2_hpos=rep.fix2_pos[:, 0],
+            fix2_vpos=rep.fix2_pos[:, 1]
         )
-        for unit_id, spiketimes in td.neuronal.items():
+        for unit_id, spiketimes in rep.spike_trains:
             curr_trial[f"unit_{unit_id}"] = np.nan if (spiketimes is None) else spiketimes
         trials.append(curr_trial)
 

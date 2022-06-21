@@ -28,7 +28,6 @@ form, and reconstituted on the client side.
 
 Author: saruffner
 """
-import json
 from datetime import date
 from typing import Tuple, Optional, List, Dict, Any
 
@@ -36,15 +35,15 @@ from flask import Response, request
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 
 from sglportalapi.data_containers import SessionInfo, NeuronInfo, ROUTE_AUTHENTICATE, ROUTE_SESSIONINFO, \
-    ROUTE_SESSION_NEURONS, ROUTE_SESSION_PROTOCOLS, ROUTE_SESSION_TRIAL, TrialRep, ROUTE_SESSION_BLOCK, \
+    ROUTE_SESSION_NEURONS, ROUTE_SESSION_PROTOCOLS, ROUTE_SESSION_TRIAL, ROUTE_SESSION_BLOCK, \
     ROUTE_PROTOCOL_REPS, serialize_api_response
 from app import app
 from config.app_logging import get_application_logger
 from config.config import get_config
 from sglportalapi.maestro import Protocol
-from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_any_proj, fetch_one_row
+from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_any_proj
 import database.table_info as ti
-from database.trial_data_ops import trial_protocols_for_session
+from database.trial_data_ops import trial_protocols_for_session, retrieve_session_trial_rep, retrieve_session_trial_reps
 from database.user_ops import authenticate_portal_user
 
 
@@ -327,91 +326,21 @@ def session_trial() -> Tuple[Response, int]:
     session_key = request.json.get('session_key')
     trial_index = request.json.get('trial_index')
     unit_ids = request.json.get('unit_ids')
-    status_code, err_msg, trial_rep = _retrieve_session_trial(session_key, trial_index, unit_ids)
+
+    status_code, err_msg, trial_rep = 200, '', None
+    if len(unit_ids) > 5:
+        status_code, err_msg = 400, "Too many neural units requested (max is 5)"
+    else:
+        trial_rep = retrieve_session_trial_rep(session_key, trial_index, unit_ids)
+        if isinstance(trial_rep, str):
+            status_code, err_msg = 501, trial_rep
     out = dict(trial=trial_rep) if status_code == 200 else dict(error=err_msg)
+
     if status_code == 200:
         current_user = get_jwt_identity()
         get_application_logger().info(f"{ROUTE_SESSION_TRIAL}: {current_user} retrieved data for trial {trial_index} "
                                       f"from session {session_key}. Units requested = {unit_ids}")
     return Response(serialize_api_response(ROUTE_SESSION_TRIAL, **out)), status_code
-
-
-def _retrieve_session_trial(
-        session_key: Dict[str, Any], trial_index: int, unit_ids: List[int]) -> Tuple[int, str, Optional[TrialRep]]:
-    """
-    Helper method for session_trial(). The behavioral and neuronal responses, along with other metadata about the
-    specified trial rep, are packaged in a :py:class:`api.data_containers.TrialRep` object.
-
-    Args:
-        session_key: The primary key identifying an experiment session in the database. The session date is a string
-            in ISO format.
-        trial_index: Index of the trial rep to be retrieved.
-        unit_ids: List of IDs of up to 5 neural units for which response data (ie, spike trains) is requested.
-    Returns:
-        A 3-tuple: (HTTP response status code, error description string, trial rep). On failure, the status code is
-            400 (bad request) or 501 (internal server error), an error description is provided, and the trial rep is
-            None. On success: (200, '', trial rep).
-    """
-    if len(unit_ids) > 5:
-        return 400, "Too many neural units requested (max is 5)", None
-    try:
-        trial_pk = session_key.copy()
-        trial_pk['trial_idx'] = trial_index
-        trial_row = fetch_one_row(ti.DBTable.TRIAL, trial_pk)
-        if trial_row is None:
-            get_application_logger().error(f"Trial ({trial_pk}) not found in database!")
-            return 501, "Requested trial rep not found, or database error", None
-        proto_info = fetch_one_row(ti.DBTable.TRIAL_PROTOCOL, dict(proto_hash=trial_row['proto_hash']))
-        if proto_info is None:
-            get_application_logger().error(f"Trial protocol (hash={trial_row['proto_hash']}) not found in database!")
-            return 501, "Protocol for trial rep not found, or database error", None
-        behavioral_responses = fetch_rows(ti.DBTable.TRIAL_BEHAVIORAL, trial_pk)
-        neuronal_responses = fetch_rows(ti.DBTable.TRIAL_NEURONAL, trial_pk)
-        events = fetch_rows(ti.DBTable.TRIAL_EVENT, trial_pk)
-        if (behavioral_responses is None) or (neuronal_responses is None) or (events is None):
-            get_application_logger().error(f"DB error occurred while retrieving response data for trial {trial_pk}")
-            return 501, "An internal database error occured", None
-
-        # fix the fields of trial_info to match what is expected for the TrialRep container
-        trial_info: Dict[str, Any] = dict()
-        for k in trial_row.keys():
-            trial_info[k] = trial_row[k]
-        trial_info['session_date'] = trial_pk['session_date']  # want the date as an ISO-formatted string
-        trial_info.pop('trial_header', None)  # don't need the trial header object
-        trial_info['protocol'] = Protocol.from_bytes(proto_info['proto_def'])  # want the Protocol, not just its hash
-        trial_info.pop('proto_hash', None)
-        trial_info['trial_rvs'] = json.loads(trial_info['trial_rvs'].decode())  # deserialize the RV values list
-        trial_info['trial_success'] = (trial_info['trial_success'] != 0)   # DJ stores bool as int
-        trial_info['trial_rewarded'] = (trial_info['trial_rewarded'] != 0)
-
-        trial_info['hgpos'], trial_info['vepos'], trial_info['hevel'], trial_info['vevel'] = None, None, None, None
-        for response in behavioral_responses:
-            if response['response_id'] == 'HEPOS':
-                trial_info['hgpos'] = response['response_trace']
-            elif response['response_id'] == 'VEPOS':
-                trial_info['vepos'] = response['response_trace']
-            elif response['response_id'] == 'HEVEL':
-                trial_info['hevel'] = response['response_trace']
-            elif response['response_id'] == 'VEVEL':
-                trial_info['vevel'] = response['response_trace']
-
-        trial_info['spike_trains'] = dict()
-        if len(unit_ids) > 0:
-            # for any unit requested that was not recorded during trial, spike times array must be None!
-            for i in unit_ids:
-                trial_info['spike_trains'][i] = None
-            for response in neuronal_responses:
-                if response['unit_id'] in unit_ids:
-                    trial_info['spike_trains'][response['unit_id']] = response['spike_times']
-
-        trial_info['events'] = dict()
-        for event_row in events:
-            trial_info['events'][event_row['event_ch']] = event_row['event_times']
-
-        return 200, '', TrialRep(trial_info)
-    except Exception as e:
-        get_application_logger().error(str(e), exc_info=True)
-        return 501, f"An internal database error occured [{str(e)}]", None
 
 
 @app.server.route(ROUTE_SESSION_BLOCK, methods=['POST'])
@@ -438,9 +367,16 @@ def session_block() -> Tuple[Response, int]:
     start = request.json.get('start')
     end = request.json.get('end')
     unit_ids = request.json.get('unit_ids')
-    status_code, err_msg, trial_list = _retrieve_session_trial_reps(
-        session_key, start=start, end=end, completed=False, unit_ids=unit_ids)
+
+    status_code, err_msg, trial_list = 200, '', None
+    if len(unit_ids) > 5:
+        status_code, err_msg = 400, "Too many neural units requested (max is 5)"
+    else:
+        trial_list = retrieve_session_trial_reps(session_key, start=start, end=end, completed=False, unit_ids=unit_ids)
+        if isinstance(trial_list, str):
+            status_code, err_msg = 501, trial_list
     out = dict(trials=trial_list) if status_code == 200 else dict(error=err_msg)
+
     if status_code == 200:
         current_user = get_jwt_identity()
         get_application_logger().info(
@@ -474,152 +410,20 @@ def session_protocol_reps() -> Tuple[Response, int]:
     proto_hash = request.json.get('proto_hash')
     completed = request.json.get('completed')
     unit_ids = request.json.get('unit_ids')
-    status_code, err_msg, trial_list = _retrieve_session_trial_reps(
-        session_key, proto_hash=proto_hash, start=1, end=1, completed=completed, unit_ids=unit_ids)
+
+    status_code, err_msg, trial_list = 200, '', None
+    if len(unit_ids) > 5:
+        status_code, err_msg = 400, "Too many neural units requested (max is 5)"
+    else:
+        trial_list = retrieve_session_trial_reps(session_key, proto_hash=proto_hash, completed=completed,
+                                                 unit_ids=unit_ids)
+        if isinstance(trial_list, str):
+            status_code, err_msg = 501, trial_list
     out = dict(trials=trial_list) if status_code == 200 else dict(error=err_msg)
+
     if status_code == 200:
         current_user = get_jwt_identity()
         get_application_logger().info(
             f"{ROUTE_PROTOCOL_REPS}: {current_user} retrieved data for {len(trial_list)} reps of trial protocol "
             f"(md5={proto_hash}) preented during session {session_key}. Units requested = {unit_ids}")
     return Response(serialize_api_response(ROUTE_PROTOCOL_REPS, **out)), status_code
-
-
-def _retrieve_session_trial_reps(
-        session_key: Dict[str, Any], proto_hash: Optional[str] = None, start: int = 1, end: int = -1,
-        completed: bool = True, unit_ids: Optional[List[int]] = None) -> Tuple[int, str, List[TrialRep]]:
-    """
-    Helper method for session_block() and session_protocol_reps(). The behavioral/neuronal responses and metadata for
-    each rep of the specified trial block -- OR belonging to the specified protocol -- are packaged in a
-    :py:class:`api.data_containers.TrialRep` object.
-
-    Args:
-        session_key: The primary key identifying an experiment session in the database. The session date is a string
-            in ISO format.
-        proto_hash: If not None, restrict trial list to all reps of the trial protocol identified by this MD5 hash. In
-            this case, the arguments defining a sequential block of trials are ignored. Default = None.
-        start: Index of first trial in a sequential trial block. Ignored if 'proto_hash' is specified.
-        end: Index of last trial in a sequential trial block. Ignored if 'proto_hash' is specified.
-        completed: If true, only successfully completed trial reps are included in the results. Default = True.
-        unit_ids: List of IDs of up to 5 neural units for which response data (ie, spike trains) is requested, or None.
-            Default = None (no neural unit response data requested).
-    Returns:
-        A 3-tuple: (HTTP response status code, error description string, list of trial reps). On failure, the status
-            code is 400 (bad request) or 501 (internal server error), an error description is provided, and the list is
-            empty. On success, the status code is 200 and the error string is empty.
-    """
-    if isinstance(unit_ids, list) and len(unit_ids) > 5:
-        return 400, "Too many neural units requested (max is 5)", []
-    try:
-        session_info = fetch_one_row(ti.DBTable.SESSION, session_key)
-        if session_info is None:
-            raise ValueError("Session not found, or internal database error")
-
-        # we're either getting all reps of a single protocol, or all reps in a sequential block
-        proto: Optional[Protocol] = None
-        if proto_hash is not None:
-            proto_row = fetch_one_row(ti.DBTable.TRIAL_PROTOCOL, dict(proto_hash=proto_hash))
-            if proto_row is None:
-                return 501, f"Trial protocol (hash={proto_hash}) not found in database!", []
-            proto = Protocol.from_bytes(proto_row['proto_def'])
-            trial_restrictions = session_key.copy()
-            trial_restrictions['proto_hash'] = proto_hash
-            if completed:
-                trial_restrictions['trial_success'] = True
-        else:
-            if (start < 1) or (start > session_info['num_trials']) or (start > end):
-                return 400, f"Bad trial block range: [{start} .. {end}]", []
-            trial_restrictions = [
-                f'experimenter = "{session_key["experimenter"]}"',
-                f'subj_id = "{session_key["subj_id"]}"',
-                f'session_date = "{str(session_key["session_date"])}"',
-                f'session_sfx = {session_key["session_sfx"]}',
-                f'trial_idx >= {start}', f"trial_idx <= {min(end, session_info['num_trials'])}"
-            ]
-
-        relevant_trials = fetch_restrict_proj([ti.DBTable.TRIAL], [trial_restrictions], [])
-        if relevant_trials is None:
-            return 501, "An internal error occurred while retrieving trial reps", []
-        relevant_trials.sort(key=lambda x: x['trial_idx'], reverse=True)
-        behavioral_responses = \
-            fetch_restrict_proj([ti.DBTable.TRIAL_BEHAVIORAL, ti.DBTable.TRIAL], [None, trial_restrictions], [])
-        if behavioral_responses is None:
-            return 501, "An internal error occurred while retrieving behavioral responses for trial reps", []
-        behavioral_responses.sort(key=lambda x: x['trial_idx'], reverse=True)
-        events = \
-            fetch_restrict_proj([ti.DBTable.TRIAL_EVENT, ti.DBTable.TRIAL], [None, trial_restrictions], [])
-        if events is None:
-            return 501, "An internal error occurred while retrieving marker events for trial reps", []
-        events.sort(key=lambda x: x['trial_idx'], reverse=True)
-
-        units: Dict[int, List[Dict[str, Any]]] = dict()
-        if isinstance(unit_ids, list) and (len(unit_ids) > 0):
-            neuron_pk = session_key.copy()
-            for unit_id in unit_ids:
-                neuron_pk['unit_id'] = unit_id
-                res = fetch_restrict_proj([ti.DBTable.TRIAL_NEURONAL, ti.DBTable.TRIAL],
-                                          [neuron_pk, trial_restrictions], [])
-                if res is None:
-                    return 501, "An internal error occurred while retrieving neural response data for trial reps", []
-                res.sort(key=lambda x: x['trial_idx'], reverse=True)
-                units[unit_id] = res
-
-        protocols: Dict[str, Protocol] = dict()
-        trial_reps: List[TrialRep] = list()
-        while len(relevant_trials) > 0:
-            trial_row = relevant_trials.pop()
-            trial_info: Dict[str, Any] = dict()
-            for k in trial_row.keys():
-                trial_info[k] = trial_row[k]
-            trial_info['session_date'] = session_key['session_date']  # want the date as an ISO-formatted string
-            trial_info.pop('trial_header', None)  # don't need the trial header object
-            trial_info['trial_rvs'] = json.loads(trial_info['trial_rvs'].decode())  # deserialize the RV values list
-            trial_info['trial_success'] = (trial_info['trial_success'] != 0)   # DJ stores bool as int
-            trial_info['trial_rewarded'] = (trial_info['trial_rewarded'] != 0)
-
-            # when retrieving a sequential block of trials, the protocol will typically be different for each rep
-            if proto is None:
-                if not (trial_info['proto_hash'] in protocols):
-                    proto_row = fetch_one_row(ti.DBTable.TRIAL_PROTOCOL, dict(proto_hash=trial_info['proto_hash']))
-                    if proto_row is None:
-                        return 501, "An internal error occurred while retrieving a trial protocol object", []
-                    protocols[trial_info['proto_hash']] = Protocol.from_bytes(proto_row['proto_def'])
-                trial_info['protocol'] = protocols[trial_info['proto_hash']]
-            else:
-                trial_info['protocol'] = proto
-            trial_info.pop('proto_hash', None)
-
-            trial_info['hgpos'], trial_info['vepos'], trial_info['hevel'], trial_info['vevel'] = None, None, None, None
-            while (len(behavioral_responses) > 0) and \
-                    (behavioral_responses[-1]['trial_idx'] == trial_info['trial_idx']):
-                response = behavioral_responses.pop()
-                if response['response_id'] == 'HEPOS':
-                    trial_info['hgpos'] = response['response_trace']
-                elif response['response_id'] == 'VEPOS':
-                    trial_info['vepos'] = response['response_trace']
-                elif response['response_id'] == 'HEVEL':
-                    trial_info['hevel'] = response['response_trace']
-                elif response['response_id'] == 'VEVEL':
-                    trial_info['vevel'] = response['response_trace']
-
-            trial_info['events'] = dict()
-            while (len(events) > 0) and (events[-1]['trial_idx'] == trial_info['trial_idx']):
-                event_row = events.pop()
-                trial_info['events'][event_row['event_ch']] = event_row['event_times']
-
-            trial_info['spike_trains'] = dict()
-            for unit_id in (unit_ids if isinstance(unit_ids, list) else []):
-                u = units[unit_id]
-                # IMPORTANT: A given unit may not have been recorded during a given trial.
-                if (len(u) > 0) and u[-1]['trial_idx'] == trial_info['trial_idx']:
-                    spike_times = u.pop()['spike_times']
-                else:
-                    spike_times = None
-                trial_info['spike_trains'][unit_id] = spike_times
-
-            trial_reps.append(TrialRep(trial_info))
-
-        return 200, '', trial_reps
-    except Exception as e:
-        get_application_logger().error(str(e), exc_info=True)
-        return 501, f"An internal error occured [{str(e)}]", []

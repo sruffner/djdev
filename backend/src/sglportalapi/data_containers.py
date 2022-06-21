@@ -17,13 +17,14 @@ Author: saruffner
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
 import base64
+import functools
 import json
 import struct
-import sys
 from datetime import date
 from typing import Dict, Any, Optional, Tuple, List, Union
 
 import numpy as np
+from numpy.lib import stride_tricks
 
 from sglportalapi.maestro import Protocol
 
@@ -384,6 +385,11 @@ class TrialRep:
         """
         TrialRep._validate_init_arg(info)
         self._info = info
+        # these 'computed' data are only prepared when requested. They are never serialized.
+        self._fix1_pos: Optional[np.ndarray] = None
+        self._fix2_pos: Optional[np.ndarray] = None
+        self._fix1_on_epochs: Optional[List[int]] = None
+        self._fix2_on_epochs: Optional[List[int]] = None
 
     def __str__(self):
         # customize string rep to prettify output a bit and not show all of Numpy arrays
@@ -470,6 +476,14 @@ class TrialRep:
     def duration(self) -> int:
         """ Recorded duration of this trial, in milliseconds. """
         return self._info['trial_dur']
+
+    @property
+    def segment_durations(self) -> List[int]:
+        """
+        The segment durations for this particular trial rep, in milliseconds. A segment's duration will vary from one
+        trial presentation to the next if its duration is controlled by a random variable.
+        """
+        return self.protocol.segment_durations_for_rep(self.rv_values)
 
     @property
     def record_start(self) -> int:
@@ -565,6 +579,61 @@ class TrialRep:
         """
         return self._info['spike_trains']
 
+    @property
+    def fix1_pos(self) -> np.ndarray:
+        """
+        Computed position trajectory of fixation target #1 during this trial rep, as Nx2 Numpy array -- with horizontal
+        position in column 0 and vertical position in column 1, in degrees subtended at eye. If fixation target #1 was
+        not used at all, returns a zero-length Numpy array. Otherwise, during any portion of the trial in which fixation
+        target #1 is undefined, its position is (NaN, NaN).
+        """
+        if self._fix1_pos is None:
+            self._init_fixation_target_trajectories()
+        return self._fix1_pos
+
+    @property
+    def fix2_pos(self) -> np.ndarray:
+        """
+        Computed position trajectory of fixation target #2 during this trial rep, as Nx2 Numpy array -- with horizontal
+        position in column 0 and vertical position in column 1, in degrees subtended at eye. If fixation target #2 was
+        not used at all, returns a zero-length Numpy array. Otherwise, during any portion of the trial in which fixation
+        target #2 is undefined, its position is (NaN, NaN).
+        """
+        if self._fix2_pos is None:
+            self._init_fixation_target_trajectories()
+        return self._fix2_pos
+
+    def _init_fixation_target_trajectories(self) -> None:
+        fix1, fix2 = self.protocol.compute_fixation_target_trajectories(self.rv_values, self.hgpos, self.vepos,
+                                                                        self.vstab_window_length)
+        self._fix1_pos = np.zeros(shape=(0, 2), dtype=np.float32) if fix1 is None else fix1
+        self._fix2_pos = np.zeros(shape=(0, 2), dtype=np.float32) if fix2 is None else fix2
+
+    @property
+    def fix1_on_epochs(self) -> List[int]:
+        """
+        Computed epochs during which designated fixation target #1 is ON over the course of this trial rep. The returned
+        list of 2*N elapsed times (ms since trial start) [S1, E1, S2, E2, ..., SN, EN] specify the N non-overlapping ON
+        epochs, in chronological order. If the target was not used or never turned on, the list is empty.
+        """
+        if self._fix1_on_epochs is None:
+            self._init_fixation_target_on_epochs()
+        return self._fix1_on_epochs.copy()
+
+    @property
+    def fix2_on_epochs(self) -> List[int]:
+        """
+        Computed epochs during which designated fixation target #2 is ON over the course of this trial rep. The returned
+        list of 2*N elapsed times (ms since trial start) [S1, E1, S2, E2, ..., SN, EN] specify the N non-overlapping ON
+        epochs, in chronological order. If the target was not used or never turned on, the list is empty.
+        """
+        if self._fix2_on_epochs is None:
+            self._init_fixation_target_on_epochs()
+        return self._fix2_on_epochs.copy()
+
+    def _init_fixation_target_on_epochs(self) -> None:
+        self._fix1_on_epochs, self._fix2_on_epochs = self.protocol.compute_fixation_target_on_epochs(self.rv_values)
+
     def to_bytes(self) -> bytes:
         """ Serialize this object to a byte sequence. """
         return json.dumps(self._info, cls=_CustomJSONEncoder).encode()
@@ -573,6 +642,163 @@ class TrialRep:
     def from_bytes(raw: bytes) -> TrialRep:
         """ Reconstruct TrialRep from a byte sequence previously generated by `to_bytes()`. """
         return TrialRep(json.loads(raw.decode(), object_hook=_CustomJSONEncoder.decoder_hook))
+
+    def instantaneous_firing_rate(self, unit_id: int, smooth: bool = False) -> np.ndarray:
+        """
+        Compute the instantaneous firing rate for a specified neural unit over the course of the trial timeline,
+        optionally smoothed with a Gaussian kernel.
+
+        Firing rate R is computed as the reciprocal of inter-spike interval following Lisberger & Pavelko (1986). Let
+        the spike times during the trial be [T(1) .. T(N)]. For each t (delta = 1ms) in the interval [T(i)..T(i+1)],
+        R(t) = 1/(T(i) - T(i-1)) if t - T(i) < T(i) - T(i-1); else R(t) = 1/(T(i+1) - T(i)). For t < T(1), R(t) = 0.
+        For t in [T(N), T(N) + T(N) - T(N-1)], R = 1/(T(N) - T(N-1)). For t > 2*T(N) - T(N-1), R = 0.
+
+        The firing rate trace is optionally smoothed by convolving it with a Gaussian kernel with a width of 2.5ms.
+
+        Args:
+            unit_id: Neural unit ID
+            smooth: If True, the instantaneous firing rate is smoothed (default = False).
+        Returns:
+            Instantaneous firing rate per millisecond during trial, in Hz.
+        Raises:
+            KeyError: If the unit ID is invalid.
+        """
+        # spike times in seconds, and converted to integer milliseconds (trial timeline DT is 1ms)
+        spike_times = self.spike_trains[unit_id]
+        firing_rate = np.zeros(self.duration)
+        if (spike_times is None) or len(spike_times) < 2:
+            return firing_rate  # not enough information to compute firing rate
+
+        spikes_ms = np.floor(spike_times*1000.0).astype(int)
+        num_spikes = len(spike_times)
+
+        for i in range(num_spikes):
+            t = spikes_ms[i]
+            if i == 0:
+                t_plus = spikes_ms[i+1]
+                firing_rate[t:t_plus] = 1.0 / (spike_times[i+1] - spike_times[i])
+            elif i == num_spikes - 1:
+                t_minus = spikes_ms[i-1]
+                t_last = min(2*t - t_minus, self.duration - 1)
+                firing_rate[t:t_last+1] = 1.0 / (spike_times[i] - spike_times[i-1])
+            else:
+                t_minus = spikes_ms[i-1]
+                t_plus = spikes_ms[i+1]
+                firing_rate[t:t_plus] = 1.0 / (spike_times[i] - spike_times[i-1])
+                if 2*t - t_minus < t_plus:
+                    firing_rate[2*t - t_minus:t_plus] = 1.0 / (spike_times[i+1] - spike_times[i])
+
+        if smooth:
+            width = 2.5  # in milliseconds  -- could make this a parameter to method
+            x = np.arange(-10 * width, 10 * width)
+            kernel = np.exp(-x**2/2.0) / (width * np.sqrt(2*np.pi))
+            kernel = kernel / sum(kernel)
+            firing_rate = np.convolve(firing_rate, kernel, mode='same')
+
+        return firing_rate
+
+    def eye_velocity_saccades_removed(
+            self, offset: bool = True, t_vel: float = 20, t_vel_max: float = 50, t_acc: float = 1250,
+            t_acc_max: float = 2000, pre_ticks: int = 2, post_ticks: int = 5) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Return the horizontal and vertical eye velocity traces for this trial rep with any saccade epochs replaced by
+        NaN samples. This method ASSUMES a sampling rate of 1KHz!
+
+        Args:
+            offset: If True, the eye velocity traces are adjusted for DC offset, if possible. Default = True.
+            t_vel: Velocity threshold for a saccade. Default = 20 deg/sec
+            t_vel_max: Max velocity threshold for a saccade regardless the current acceleration. Default = 50 deg/sec.
+            t_acc: Acceleration threshold for a saccade. Default = 1250 deg/sec^2
+            t_acc_max: Max acceleration threshold for a saccade regardless the current velocity. Default = 2000.
+            pre_ticks: Number of samples before a detected saccade epoch that are included in that epoch. Default = 2.
+            post_ticks: # of samples after a detected saccade epoch that are included in that epoch. Default = 5.
+        Returns:
+            A 2-tuple (H, V) -- COPIES of the horizontal and vertical eye velocity traces in which any samples falling
+                within a detected saccade epoch are replaced with NaN. If either velocity trace was not recorded, it is
+                assumed to be 0 for the entire duration of the trial.
+        """
+        # handle edge cases: only H, only V, or no eye velocity trace available
+        if (self.hevel is None) and (self.vevel is None):
+            return np.zeros(self.duration, dtype=np.float32), np.zeros(self.duration, dtype=np.float32)
+        if self.hevel is None:
+            hevel = np.zeros(self.duration, dtype=np.float32)
+        else:
+            hevel = np.copy(self.hevel)
+            if offset:
+                hevel = hevel - self.estimate_velocity_baseline_offset(horiz=True)
+        if self.vevel is None:
+            vevel = np.zeros(self.duration, dtype=np.float32)
+        else:
+            vevel = np.copy(self.vevel)
+            if offset:
+                vevel = vevel - self.estimate_velocity_baseline_offset(horiz=False)
+
+        speed = np.sqrt(hevel ** 2 + vevel ** 2)
+        acceleration = np.diff(speed) / 0.001   # sampling rate = 1KHz!!
+        acceleration = np.append(acceleration, np.nan)
+        acceleration = np.abs(acceleration)
+
+        in_saccade = np.intersect1d(np.where(speed > t_vel)[0], np.where(acceleration > t_acc)[0])
+        in_saccade = functools.reduce(
+            np.union1d, (in_saccade, np.where(speed > t_vel_max)[0], np.where(acceleration > t_acc_max)[0]))
+
+        saccading = False
+        onset_indices = []
+        offset_indices = []
+        for i in range(1, len(in_saccade)):
+            if in_saccade[i] == in_saccade[i-1] + 1:
+                if not saccading:
+                    onset_indices.append(max(0, in_saccade[i-1]-pre_ticks))
+                    saccading = True
+            elif saccading and (in_saccade[i] >= in_saccade[i-1]+post_ticks):
+                offset_indices.append(in_saccade[i-1] + post_ticks)
+                saccading = False
+        if saccading:
+            offset_indices.append(min(len(speed), in_saccade[-1]+post_ticks))
+
+        for i in range(len(offset_indices)):
+            hevel[onset_indices[i]:offset_indices[i]] = np.nan
+            vevel[onset_indices[i]:offset_indices[i]] = np.nan
+
+        return hevel, vevel
+
+    def estimate_velocity_baseline_offset(self, horiz: bool) -> float:
+        """
+        Estimate the baseline offset for an eye velocity trace from this trial. This method examines the corresponding
+        position traces and looks for a contiguous segment spanning 100 samples (100ms) in which the position varies
+        by 0.1 degrees or less AND the velocity varies by 2 deg/s or less -- in which case eye velocity should be close
+        to 0 (and not in the tail of a saccade!). If it finds such a segment, the baseline offset in the velocity trace
+        is the mean value over the same segment in the original eye velocity trace.
+
+        Args:
+            horiz: True/False to compute baseline offset for horizontal/vertical eye velocity trace.
+
+        Returns:
+            Estimated baseline offset in the specified behavioral trace. Returns 0 if the offset cannot be estimated for
+                whatever reason (missing velocity or position signal, signal trace is less than 200ms, or cannot find
+                a 100-ms contiguous segment meeting requirements stated above).
+        """
+        pos = self.hgpos if horiz else self.vepos
+        vel = self.hevel if horiz else self.vevel
+        if (pos is None) or (len(pos) < 200) or (vel is None) or (len(vel) < 200):
+            return 0
+
+        pos_chunks_ok = np.where(
+            np.apply_along_axis(lambda x: np.nanmax(x)-np.nanmin(x) < 0.1, 1,
+                                stride_tricks.sliding_window_view(pos, window_shape=100)))[0]
+        if len(pos_chunks_ok) == 0:
+            return 0
+        vel_chunks_ok = np.where(
+            np.apply_along_axis(lambda x: np.nanmax(x)-np.nanmin(x) < 2, 1,
+                                stride_tricks.sliding_window_view(vel, window_shape=100)))[0]
+        if len(vel_chunks_ok) == 0:
+            return 0
+        chunks_ok = np.intersect1d(pos_chunks_ok, vel_chunks_ok)
+        if len(chunks_ok) == 0:
+            return 0
+        start = chunks_ok[0]
+        # noinspection PyTypeChecker
+        return np.nanmean(vel[start:start+100])
 
 
 class _CustomJSONEncoder(json.JSONEncoder):
