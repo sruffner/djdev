@@ -24,7 +24,6 @@ from datetime import date
 from typing import Dict, Any, Optional, Tuple, List, Union
 
 import numpy as np
-from numpy.lib import stride_tricks
 
 from sglportalapi.maestro import Protocol
 
@@ -698,14 +697,13 @@ class TrialRep:
         return firing_rate
 
     def eye_velocity_saccades_removed(
-            self, offset: bool = True, t_vel: float = 20, t_vel_max: float = 50, t_acc: float = 1250,
+            self, t_vel: float = 20, t_vel_max: float = 50, t_acc: float = 1250,
             t_acc_max: float = 2000, pre_ticks: int = 2, post_ticks: int = 5) -> Tuple[np.ndarray, np.ndarray]:
         """
         Return the horizontal and vertical eye velocity traces for this trial rep with any saccade epochs replaced by
         NaN samples. This method ASSUMES a sampling rate of 1KHz!
 
         Args:
-            offset: If True, the eye velocity traces are adjusted for DC offset, if possible. Default = True.
             t_vel: Velocity threshold for a saccade. Default = 20 deg/sec
             t_vel_max: Max velocity threshold for a saccade regardless the current acceleration. Default = 50 deg/sec.
             t_acc: Acceleration threshold for a saccade. Default = 1250 deg/sec^2
@@ -724,14 +722,10 @@ class TrialRep:
             hevel = np.zeros(self.duration, dtype=np.float32)
         else:
             hevel = np.copy(self.hevel)
-            if offset:
-                hevel = hevel - self.estimate_velocity_baseline_offset(horiz=True)
         if self.vevel is None:
             vevel = np.zeros(self.duration, dtype=np.float32)
         else:
             vevel = np.copy(self.vevel)
-            if offset:
-                vevel = vevel - self.estimate_velocity_baseline_offset(horiz=False)
 
         speed = np.sqrt(hevel ** 2 + vevel ** 2)
         acceleration = np.diff(speed) / 0.001   # sampling rate = 1KHz!!
@@ -761,44 +755,6 @@ class TrialRep:
             vevel[onset_indices[i]:offset_indices[i]] = np.nan
 
         return hevel, vevel
-
-    def estimate_velocity_baseline_offset(self, horiz: bool) -> float:
-        """
-        Estimate the baseline offset for an eye velocity trace from this trial. This method examines the corresponding
-        position traces and looks for a contiguous segment spanning 100 samples (100ms) in which the position varies
-        by 0.1 degrees or less AND the velocity varies by 2 deg/s or less -- in which case eye velocity should be close
-        to 0 (and not in the tail of a saccade!). If it finds such a segment, the baseline offset in the velocity trace
-        is the mean value over the same segment in the original eye velocity trace.
-
-        Args:
-            horiz: True/False to compute baseline offset for horizontal/vertical eye velocity trace.
-
-        Returns:
-            Estimated baseline offset in the specified behavioral trace. Returns 0 if the offset cannot be estimated for
-                whatever reason (missing velocity or position signal, signal trace is less than 200ms, or cannot find
-                a 100-ms contiguous segment meeting requirements stated above).
-        """
-        pos = self.hgpos if horiz else self.vepos
-        vel = self.hevel if horiz else self.vevel
-        if (pos is None) or (len(pos) < 200) or (vel is None) or (len(vel) < 200):
-            return 0
-
-        pos_chunks_ok = np.where(
-            np.apply_along_axis(lambda x: np.nanmax(x)-np.nanmin(x) < 0.1, 1,
-                                stride_tricks.sliding_window_view(pos, window_shape=100)))[0]
-        if len(pos_chunks_ok) == 0:
-            return 0
-        vel_chunks_ok = np.where(
-            np.apply_along_axis(lambda x: np.nanmax(x)-np.nanmin(x) < 2, 1,
-                                stride_tricks.sliding_window_view(vel, window_shape=100)))[0]
-        if len(vel_chunks_ok) == 0:
-            return 0
-        chunks_ok = np.intersect1d(pos_chunks_ok, vel_chunks_ok)
-        if len(chunks_ok) == 0:
-            return 0
-        start = chunks_ok[0]
-        # noinspection PyTypeChecker
-        return np.nanmean(vel[start:start+100])
 
 
 class _CustomJSONEncoder(json.JSONEncoder):

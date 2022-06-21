@@ -442,7 +442,8 @@ def retrieve_trial_reps_for_neuron(neuron_key: Dict[str, AttributeValue], proto_
                                                    [None, trial_restriction, neuron_pk], [])
         if behavioral_responses is None:
             return "An internal error occurred while retrieving behavioral response data for trials"
-        events = fetch_restrict_proj([DBTable.TRIAL_EVENT, DBTable.TRIAL], [None, trial_restriction], [])
+        events = fetch_restrict_proj([DBTable.TRIAL_EVENT, DBTable.TRIAL, DBTable.TRIAL_NEURONAL],
+                                     [None, trial_restriction, neuron_pk], [])
         if events is None:
             return "An internal error occurred while retrieving event marker timestamps for trials"
 
