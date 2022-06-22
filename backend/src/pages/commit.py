@@ -1161,7 +1161,7 @@ def update_unit(*args):
                 if (unit_idx + 1) < num_units:
                     unit: OmniplexUnit = metrics_for_neural_unit(job_id, unit_idx+1)
                     if unit is not None:
-                        return _layout_unit_div(unit), no_update, str(unit_idx+1)
+                        return _layout_unit_div(unit), msg, str(unit_idx+1)
         else:
             msg = "danger-An error occurred while updating neural unit type on server"
         return no_update, msg, no_update
