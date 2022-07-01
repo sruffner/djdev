@@ -8,9 +8,7 @@ it also handles login/authentication of a user.
 @created: 11oct2021
 """
 import re
-import sys
 from datetime import datetime
-from getpass import getpass
 from typing import Optional, Union, Dict, List
 
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -342,33 +340,3 @@ def change_portal_user_access_level(username: str, access: str) -> Optional[str]
     get_application_logger().info(f"Changed {username}'s access level to {access}." if (error_msg is None) else
                                   f"Access level change failed for {username}: {error_msg}")
     return error_msg
-
-
-def prompt_for_password(username: str) -> Optional[str]:
-    """
-    Request a password -- from STDIN -- for a portal user account to be added to the laboratory database. The method
-    will prompt for the password twice to guard against accidental typos and verify that it meets requirements. If not,
-    it will prompt again until an acceptable password is entered. It also gives the user the option to abort the
-    request entirely by entering 'q' after the password prompt.
-
-    NOTE: THIS IS A UTILITY METHOD INTENDED FOR USE IN SCRIPTS RUNNING IN A PYTHON CONSOLE. It uses getpass.getpass()
-    to get the password input.
-
-    Args:
-        username: The username for the new account.
-    Returns:
-        A valid password for the account, or None if the user elected to abort the script.
-    """
-    while True:
-        new_password = getpass(f"Enter the password for user '{username}', or 'q' to abort > ")
-        if new_password == 'q':
-            return None
-        confirm_new = getpass('Reenter password to confirm > ')
-        if confirm_new != new_password:
-            print("   Password mismatch... Try again.", file=sys.stdout, flush=True)
-        else:
-            res = validate_password(new_password)
-            if res is None:
-                return new_password
-            else:
-                print(f"   {str(res)}... Try again.", file=sys.stdout, flush=True)

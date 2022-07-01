@@ -98,7 +98,7 @@ from database.table_info import DBTable, AttributeValue, primary_key_of
 from database.table_ops import fetch_attribute_values, fetch_one_row, fetch_rows, check_row, fetch_restrict_proj, \
     SessionCommitter, rollback_session_commit, database_empty, insert_into_table, delete_from_table, update_table_row, \
     update_mapping_table
-from database.user_ops import validate_username, PASSWORD_HASH_METHOD, prompt_for_password
+from database.user_ops import validate_username, PASSWORD_HASH_METHOD, validate_password
 from sglportalapi.util import DocEnum
 
 _logger = get_application_logger()
@@ -2622,7 +2622,7 @@ class _SessionCommitMgr(SessionCommitter):
                     t0 = time.time()
 
 
-def reconstruct_database() -> None:
+def reconstruct_database(initial_pwd: str) -> None:
     """
     Reconstruct the contents of the portal database by processing all entries in the database operations log.
 
@@ -2644,23 +2644,33 @@ def reconstruct_database() -> None:
     part is likely to be downloading the archive from S3.
 
     NOTE: THIS IS AN ADMINISTRATIVE FUNCTION FOR USE ONLY WHEN THE PORTAL APPLICATION IS DOWN. It must be run in a
-    python console script. During reconstruction, progress messages are written to STDOUT. Very little user intervention
-    is required, as the operations log and the portal backing repository store everything that is needed to repopulate
-    the database. There is one exception, however: User passwords are, for security reasons, NEVER included in the
-    database operations log entries. Therefore, in order to process a log entry that registers a new user on the portal,
-    the function will prompt for an initial password for that user's account.
+    python console script. During reconstruction, progress messages are written to STDOUT. No user intervention is
+    required, as the operations log and the portal backing repository store everything that is needed to repopulate
+    the database. The supplied password serves as the default password for all users added to the database. A default
+    user password is required because no password information is stored in the database operations log.
 
     NOTE2: When a registered user changes their password, the User table in the database is updated accordingly, but
     the operation is NOT logged. So the database operations history does not preserve user password changes. See also
     change_portal_user_password() in user_ops.py.
+
+    Args:
+        initial_pwd: Serves as the initial password for all portal users added to the database during reconstruction.
+            Must be a valid password, else reconstruction fails.
     """
     print(f"Starting database reconstruction from repository using operations log file in portal workspace...",
           file=sys.stdout, flush=True)
+    get_application_logger().info("Starting database reconstruction")
 
     err_msg = database_empty()
     if err_msg:
         print(f"=====> ERROR: {err_msg}. Database must be empty prior to reconstruction!\n", file=sys.stdout,
               flush=True)
+        get_application_logger().error("Reconstruction failed -- database was not empty.")
+        return
+
+    err_msg = validate_password(initial_pwd)
+    if err_msg:
+        print(f"=====> ERROR: Initial user password invalid - {err_msg}\n", file=sys.stdout, flush=True)
         return
 
     entries: List[Dict[str, Any]]
@@ -2676,14 +2686,9 @@ def reconstruct_database() -> None:
         for i, entry in enumerate(entries):
             print(f"Processing log entry #{i:04}: \n    {entry}", file=sys.stdout)
             if entry['op'] == 'add':
-                # SPECIAL CASE: When adding a user account, we must prompt for an initial password
+                # SPECIAL CASE: When adding a user, we must prompt for a password unless a common one is supplied
                 if entry['table'] == DBTable.USER:
-                    print(f" *** You must specify a valid initial password for each user added to database...",
-                          file=sys.stdout, flush=True)
-                    password = prompt_for_password(entry['row']['username'])
-                    if password is None:
-                        raise Exception(f"Password not supplied for {entry['row']['username']}. Aborting.")
-                    entry['row']['password'] = generate_password_hash(password, method=PASSWORD_HASH_METHOD)
+                    entry['row']['password'] = generate_password_hash(initial_pwd, method=PASSWORD_HASH_METHOD)
                 err_msg = insert_into_table(entry['table'], entry['row'], log=False)
             elif entry['op'] == 'delete':
                 err_msg = delete_from_table(entry['table'], entry['restriction'], log=False)
@@ -2700,11 +2705,13 @@ def reconstruct_database() -> None:
                 raise Exception(err_msg)
     except Exception as e:
         print(f"=====> ERROR: Exception while reconstructing portal database: {str(e)}", file=sys.stdout, flush=True)
+        get_application_logger().error(f"Reconstruction failed [{str(e)}].", exc_info=True)
         print("Manual reconstruction of database content required. Consult this progress log to assist in that"
               "reconstruction.", file=sys.stdout, flush=True)
         return
 
     print("Reconstruction completed successfully!", file=sys.stdout, flush=True)
+    get_application_logger().info("Reconstruction completed successfully!")
 
 
 def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]:
