@@ -15,11 +15,11 @@ given experiment session, it is imperative to identify "similar" trials that are
 trial protocol, so that we can "average" behavioral and neuronal responses across those repetitions.
 
 Limitations:
-    * Only supports Trial-mode data files with file version >= 21. Cannot process Continuous-mode data files!
-    * Does not process JMWork/XWork action edit codes, but does parse out sorted spike train channel data.
-    * The Trial class does not extract all available information in the trial codes. Notable omissions include info on
-      special operations, a failsafe segment, staircase sequencer-related parameters (rarely if ever used), and any
-      mid-trial rewards.
+ - Only supports Trial-mode data files with file version >= 21. Cannot process Continuous-mode data files!
+ - Does not process JMWork/XWork action edit codes, but does parse out sorted spike train channel data.
+ - The Trial class does not extract all available information in the trial codes. Notable omissions include info on
+   special operations, a failsafe segment, staircase sequencer-related parameters (rarely if ever used), and any
+   mid-trial rewards.
 
 SAMPLE USAGE::
 
@@ -130,6 +130,20 @@ BEHAVIOR_TO_CHANNEL = {'HEPOS': 0, 'VEPOS': 1, 'HEVEL': 2, 'VEVEL': 3, 'HDVEL': 
 class DataFile(NamedTuple):
     """
     Parsed content of a single Maestro data file.
+
+    This namedtuple class contains the following fields:
+     - ``file_name`` (str): The Maestro data file name (eg, 'basename.0001').
+     - ``header`` (DataFileHeader): The file header contents (first 1KB of file).
+     - ``ai_data`` (dict): The recorded 1KHz analog data traces, keyeed by AI channel index, decompressed in raw ADC
+       units.
+     - ``spike_wave`` (dict or None): The decompressed high-resolution spike waveform. None if not saved in file.
+     - ``trial`` (Trial): The definition of the particular Maestro trial presented when data file was recorded.
+     - ``events`` (dict or None): Marker pulse event times in milliseconds since trial start, keyed by DI channel index.
+       None if no events were recorded.
+     - ``blinks`` (list or None): Eyelink-recorded blink epochs in milliseconds since trial start (start1, end1, start2,
+       end2, ....).
+     - ``sorted_spikes`` (dict or None): Spike occurrence times in milliseconds since trial start, keyed by the sorted
+       spike train channel index.
     """
     file_name: str
     """ The Maestro data file name, eg 'basename.0001'. """
@@ -2296,6 +2310,12 @@ MAX_TRIALTARGS = 25
 
 
 class TrialCode(NamedTuple):
+    """
+    A single trial code as culled from a trial code record in a Maestro data file. Each trial code is a pair of
+    integers, the meaning of which varies depending on the code group. Consult the Maestro application code for details.
+
+    This namedtuple class is intended only for internal use when parsing the contents of a Maestro data file.
+    """
     code: int
     time: int
 
@@ -2330,7 +2350,15 @@ class TrialCode(NamedTuple):
 
 
 class Point2D:
+    """ Utility class used to represent position, velocity or acceleration coordinates in two dimensions. """
     def __init__(self, x: Optional[float] = 0.0, y: Optional[float] = 0.0):
+        """
+        Create a 2D point.
+
+        Args:
+            x: The X-coordinate value. Default = 0.0.
+            y: The Y-coordinate value. Default = 0.0.
+        """
         self.x: float = float(x)   # need to make sure these are floats, not ints
         self.y: float = float(y)
 
@@ -2355,27 +2383,67 @@ class Point2D:
         return f"({str_x}, {str_y})"
 
     def set_point(self, p: Point2D) -> None:
+        """
+        Set the coordinates of this point to match the specified point.
+        """
         self.x = p.x
         self.y = p.y
 
     def set(self, x: float, y: float) -> None:
+        """
+        Set the coordinates of this point.
+
+        Args:
+            x: The new X-coordinate value.
+            y: The new Y-coordinate value.
+        """
         self.x = float(x)   # want to make SURE these are floats
         self.y = float(y)
 
     def set_coords(self, coords: Tuple[float]) -> None:
+        """
+        Set the coordinates of this point.
+
+        Args:
+            coords: The new coordinates. Must be a tuple of at least length 2. The first element is taken as the
+                X-coordinate value; the second as the Y-coordinate.
+        """
         self.x = float(coords[0])
         self.y = float(coords[1])
 
     def offset_by(self, x_ofs: float, y_ofs: float) -> None:
+        """
+        Offset this point's coordinates.
+
+        Args:
+            x_ofs: Offset applied to X-coordinate.
+            y_ofs: Offset applied to Y-coordinate.
+        """
         self.x += x_ofs
         self.y += y_ofs
 
     def distance_from(self, x_ref: float, y_ref: float) -> float:
+        """
+        Calculate the distance separating this point from a reference point.
+
+        Args:
+            x_ref: X-coordinate of reference point.
+            y_ref: Y-coordinate of reference point.
+
+        Returns:
+            The distance.
+        """
         x_ref -= self.x
         y_ref -= self.y
         return math.sqrt(x_ref*x_ref + y_ref*y_ref)
 
     def is_origin(self) -> bool:
+        """
+        Is this point at -- or close enough to -- the origin (0,0)?
+
+        Returns:
+            True if both coordinates are close enough to 0 IAW the Python function `math.isclose()`.
+        """
         return math.isclose(self.x, 0) and math.isclose(self.y, 0)
 
 
@@ -2615,7 +2683,15 @@ class Segment:
         if not (-1 <= self.fix2 < num_targets):
             raise DataFileError(f"Invalid target index for fixation target #2 ({self.fix2})")
 
-    def check_equality_test(self, other: Segment) -> bool:
+    def _check_equality_test(self, other: Segment) -> bool:
+        """
+        Checks whether or not this segment exactly matches another segment object.
+
+        Args:
+            other: The other segment.
+        Returns:
+            True if this segment equals the segment specified. '==' used to compare floating-point values!
+        """
         match = (self.num_targets == other.num_targets) and (self.dur == other.dur) and \
                 (self.pulse_ch == other.pulse_ch) and (self.fix1 == other.fix1) and (self.fix2 == other.fix2) and \
                 (self.grace == other.grace) and (self.xy_update_intv == other.xy_update_intv) and \
@@ -2946,9 +3022,10 @@ class Trial:
     trial properties.
 
     Do not use the constructor directly to create a `Trial` instance; instead, use the static methods:
-        - `prepare_trial()`: To recreate the trial from the defining trial codes, participating target list, and any
-          tagged sections culled from the original Maestro data file, along with the file's header record.
-        - `from_bytes()`: To recreate the trial from an encoded byte sequence prepared by `to_bytes()`.
+
+    - `prepare_trial()`: To recreate the trial from the defining trial codes, participating target list, and any
+      tagged sections culled from the original Maestro data file, along with the file's header record.
+    - `from_bytes()`: To recreate the trial from an encoded byte sequence prepared by `to_bytes()`.
     """
     _PARAM_DICT: Dict[str, type] = {
         'name': str, 'set_name': (str, type(None)), 'subset_name': (str, type(None)), 'segments': tuple,
@@ -3678,6 +3755,28 @@ class Trial:
 class SegParamType(DocEnum):
     """
     An enumeration of (most of) the parameter types that define a segment within a Maestro trial.
+
+     - DURATION: Segment duration in milliseconds.
+     - MARKER: DI channel on which marker pulse is delivered at segment start (if any).
+     - FIX_TGT1: Zero-based index position of target designated at the first fixation target (if any).
+     - FIX_TGT2: Zero-based index position of target designated at the second fixation target (if any).
+     - FIXACC_H: Horizontal fixation accuracy in visual degrees (if enforced).
+     - FIXACC_V: Vertical fixation accuracy in visual degrees (if enforced).
+     - GRACE_PER: Grace period for segment (milliseconds; 0 = no grace period).
+     - XY_UPDATE_INTV: XYScope update interval during segment (milliseconds).
+     - TGT_ON_OFF: Target on/off state.
+     - TGT_REL: Target position change relative or absolute
+     - TGT_VSTAB: Target velocity stabilization state
+     - TGT_POS_H: Horizontal target position change at segment start (degrees)
+     - TGT_POS_V: Vertical target position change at segment start (degrees)
+     - TGT_VEL_H: Horizontal target velocity during segment (deg/sec)
+     - TGT_VEL_V: Vertical target velocity during segment (deg/sec)
+     - TGT_ACC_H: Horizontal target acceleration during segment (deg/sec^2)
+     - TGT_ACC_V: Vertical target acceleration during segment (deg/sec^2)
+     - TGT_PAT_VEL_H: Horizontal target pattern velocity during segment (deg/sec)
+     - TGT_PAT_VEL_V: Vertical target pattern velocity during segment (deg/sec)
+     - TGT_PAT_ACC_H: Horizontal target pattern acceleration during segment (deg/sec^2)
+     - TGT_PAT_ACC_V: Vertical target pattern acceleration during segment (deg/sec^2)
     """
     DURATION = 1, "Segment duration (milliseconds)"
     MARKER = 2, "Channel on which marker pulse is delivered at segment start (if any)"
@@ -3796,16 +3895,18 @@ class Protocol:
 
     For these reasons, we distinguish a protocol "candidate" from a confirmed trial protocol. Protocol candidates are
     extracted while processing the trial data files, then validated as actual protocols in one of several ways:
-        - If only one trial rep was processed, user validation is required.
 
-        - If two trial reps were processed, user validation is required unless there is an existing (ie, stored in the
-          lab database) matching the candidate protocol.
+    - If only one trial rep was processed, user validation is required.
 
-        - If 3+ trial reps were processed, the protocol candidate is assumed to represent a real Maestro trial protocol
-          and user validation is not required.
+    - If two trial reps were processed, user validation is required unless there is an existing protocol (ie, stored in
+      the lab database) matching the candidate protocol.
+
+    - If 3+ trial reps were processed, the protocol candidate is assumed to represent a real Maestro trial protocol
+      and user validation is not required.
+
     **Avoid constructing `Protocol` objects directly.** As described above, protocols are "found" by analyzing the
     Maestro trials presented during a single experiment -- `extract_protocols_from_session_data()`. This method is
-    called during automatic preprocessing of a session archive. During an interactive review phase prior to committing
+    called during automatic preprocessing of a session archive. During the interactive review phase prior to committing
     the experiment session to the lab database, any protcol candidates for which only 1 rep was encountered -- or 2 reps
     but without a match to a protocol already in the database -- must be validated by the user manually. The user can
     also add additional random variables to the protocol, but no changes to the protocol's representative trial can be

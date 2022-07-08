@@ -7,7 +7,7 @@ it cannot possibly provide a full analytical suite.
 
 Lab researchers would like to be able to retrieve preprocessed trial data from the database and perform their own
 analyses. This module defines API endpoints by which arbitrary trial data sets can be retrieved by analysis scripts.
-These are "read-only" endpoints, unlike the web portal pages, they do notexpose any functionality that would alter the
+These are "read-only" endpoints, unlike the web portal pages, they do not expose any functionality that would alter the
 contents of the database.
 
 In order to protect/track data provenance, access to these API endpoints is restricted to authorized users only. A user

@@ -42,7 +42,7 @@ import flask_login
 
 from config.app_logging import get_application_logger
 from database.user_ops import authenticate_portal_user, validate_username, validate_password
-from pages import commit, explore, user_profile, download_history, manage
+from pages import commit, explore, user_profile, download_history, manage, api_client
 
 _LOGIN_MODAL_ID = "login-modal"
 """ ID of the Login modal window component. """
@@ -161,6 +161,7 @@ def _serve_layout() -> html.Div:
                                                      href="/manage", disabled=not is_admin),
                                 dbc.DropdownMenuItem(divider=True),
                                 dbc.DropdownMenuItem("Update your profile", href="/user_profile"),
+                                dbc.DropdownMenuItem("Download API client", href="/api_client"),
                                 dbc.DropdownMenuItem("Logout", id=_LOGOUT_ID, n_clicks=0)
                             ],
                             id=_NAV_MENU_ID, align_end=True, label=drop_menu_label, color="info", style=drop_menu_style
@@ -234,6 +235,9 @@ def display_page(pathname, n_intervals, current_href):
             redirect = not can_commit
         elif pathname == '/user_profile':
             layout = user_profile.serve_layout() if is_logged_in else None
+            redirect = not is_logged_in
+        elif pathname == '/api_client':
+            layout = api_client.serve_layout() if is_logged_in else None
             redirect = not is_logged_in
         elif pathname == '/manage':
             layout = manage.serve_layout() if is_admin else None

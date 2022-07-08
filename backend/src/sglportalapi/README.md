@@ -16,7 +16,7 @@ to the database, while 'admin'-level users can add/modify metadata tables, perfo
 contents of the portal's backup repository (hosted in an AWS S3 bucket provided by Duke IT Services).
 
 A test version of the portal is now live [on the Duke OpenShift cluster](https://braincerebellumdata-test.ocp.dhe.duke.edu/explore).
-[You must be inside the Duke firewall or on the VPN to access the site.]
+You must be inside the Duke firewall or on the VPN to access the site.
 
 When an experiment session is committed to the portal database, the Maestro trial files
 and Omniplex PL2 file(s) in the session archive are preprocessed, and the behavioral and 
@@ -39,8 +39,16 @@ contiguous block of trials, or all reps of a particular trial protocol during th
 
 _**To use `sglportalapi`, you must be a registered user on the Lisberger lab portal.**_
 
-## Installation
-TODO
+## Installation (for MacOS/Linux)
+- Ensure that Python 3.9+ is installed on your system. We currently build the package against
+version 3.9.12.
+- Login to the Lisberger lab portal and navigate to the "API Client" page from the "Welcome" menu. 
+You'll find this README, along with auto-generated documentation on the key modules within the
+`sglportalapi` package.
+- Click on the "Download API Client" button to download the wheel file 
+`sglportalapi-x.y.z-py3-none-any.whl`, where `x.y.x` is the release version number.
+- In a terminal console, navigate to the directory holding the wheel file you downloaded, and install 
+the package: `pip install sglportalapi-x.y.z-py3-none-any.whl`.
 
 ## Usage
 Construct a `PortalAccessor` object, passing the portal's URL and your registered username
@@ -83,6 +91,20 @@ all_reps: List[TrialRep] = accessor.session_protocol_reps(
     sessions[0], protocols[0], completed=True, unit_ids=unit_ids)
 ```
 
+## Documentation
+Once the `sglportalapi` package is installed on your machine, you can use the `pydoc` command
+to examine auto-generated documentation for the modules, classes, and functions defined
+in the package. For example:
+- `pydoc sglportalapi.clientside`  (a module)
+- `pydoc sglportalapi.maestro.Protocol` (a class)
+- `pydoc sglportalapi.data_containers.TrialRep.instantaneous_firing_rate` (a function)
+
+Within the Python interactive console, this same documentation is available via the `help()` 
+function, but you must import the relevant module before invoking it:
+```
+>>> import sglportalapi.data_containers
+>>> help(sglportalapi.data_containers.SessionInfo)
+```
 
 ## License
 `sglportalapi` was created by [Scott Ruffner](mailto:sruffner@srscicomp.com). It is

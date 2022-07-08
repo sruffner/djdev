@@ -1,7 +1,5 @@
 # Changelog
 
-<!--next-version-placeholder-->
-
 ## v0.2.0 (06/21/2022)
 
 - Eliminated use of the pickle module in serializing and deserializing API responses.

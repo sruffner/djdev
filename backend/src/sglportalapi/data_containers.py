@@ -9,7 +9,7 @@ response to/from any endpoint.
 
 Endpoint responses may encapsulate any of four kinds of objects: experiment session metadata, neural unit metadata,
 Maestro trial protocol definitions, and individual trial reps. Three of the four objects are defined in this module:
-`SessionInfo`, `NeuronInfo`, and `TrialRep`. The `Protocol` class in `sglportalapi.maestro`encapsulates a trial
+`SessionInfo`, `NeuronInfo`, and `TrialRep`. The `Protocol` class in `sglportalapi.maestro` encapsulates a trial
 protocol definition.
 
 Author: saruffner

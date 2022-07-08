@@ -13,12 +13,10 @@ through a dedicated endpoint, which returns an access token that is supplied in 
 This module is essentially a client-side "wrapper" for the API endpoints, intended for use by custom analysis scripts
 -- or within an interactive Python console. It takes care of the details of user authentication, managing the access
 token, preparing and sending the requests to the API and processing the responses. The data returned is generally a
-Python dictionary or list of dictionaries, with each field described carefully so that users of this module can easily
-manipulate the data returned in their analysis code.
+data object or list of objects. The data object classes are defined in the modules data_containers.py; Maestro-specific
+data objects such as trial protocol definitions and target definitions are defined in maestro.py.
 
-The server-side implementation of the endpoints is found in the companion module endpoints.py. Another module,
-data_containers.py, defines simple data containers for the various kinds of information that are retrieved by the API,
-sent "over the wire" in serialized form, and reconstituted on the client side.
+The server-side implementation of the endpoints is found in the companion module endpoints.py.
 
 Author: saruffner
 """
