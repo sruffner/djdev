@@ -12,6 +12,7 @@ The page should only be accessible when a user is authenticated on the portal, b
 permitted to download and use the package.
 """
 import inspect
+import types
 from pathlib import Path
 from typing import Optional, List
 
@@ -26,28 +27,21 @@ from app import PortalUser, load_authorized_user
 from config.app_logging import get_application_logger
 
 
-def _get_documentation(which: str) -> str:
-    if which == _TAB_README or which == _TAB_CHANGELOG:
-        try:
-            p = Path(__file__)
-            p = Path(p.parent.parent, 'sglportalapi', 'README.md' if which == _TAB_README else 'CHANGELOG.md')
-            with open(p, 'rt') as f:
-                content = f.read()
-        except Exception as e:
-            content = f"Unable to retrieve documentation from file: {str(e)}"
-        return content
-    elif which == _TAB_CLIENTSIDE:
-        return _get_markdown_for_module(sglportalapi.clientside)
-    elif which == _TAB_DATA_CONTAINER:
-        return _get_markdown_for_module(sglportalapi.data_containers)
-    elif which == _TAB_MAESTRO:
-        return _get_markdown_for_module(sglportalapi.maestro)
-    else:
-        return '***No tab selected***'
+def _get_markdown_for_module(mod: types.ModuleType) -> str:
+    """
+    Auto-generate basic documentation for the specified module in markdown format.
 
+    This function attempts to display documentation in a manner similar to what the standard module `pydoc` supplies,
+    but in markdown format (conforming to the CommonMark spec) rather than plain text or HTML. It is NOT a complete
+    solution, as it only displays docstrings for the module, any module functions, and any module classes. It will not
+    handle all possible Python types correctly (but it is adequate for generating markdown documentation for the main
+    modules in the sglportalapi package.
 
-# TODO: CONTINUE DEVELOPING THIS FUNCTION THAT GENERATES ADEQUATE MARKDOWN DOCUMENTATION FOR the 3 modules we care about
-def _get_markdown_for_module(mod) -> str:
+    Args:
+        mod: The module.
+    Returns:
+        Generated module documentation in markdown format.
+    """
     lines: List[str] = list()
     lines.append(f'### Name\n&nbsp;&nbsp;&nbsp;***{mod.__name__}***')
     lines.append(f'### Description\n{mod.__doc__}')
@@ -83,11 +77,11 @@ def _get_markdown_for_module(mod) -> str:
                         replace(']', '\\]')
                     if name == '__init__':
                         name = cls.__name__
-                    lines.append(f"_{prefix}**{name}**{signature}_:{suffix}")
                     doc = inspect.getdoc(value)
+                    lines.append(f"_{prefix}**{name}**{signature}_:{suffix}")
                     lines.append(f"```text\n{doc}\n```\n" if doc else "```text\nNo documentation found.\n```\n")
-                except Exception as e:
-                    get_application_logger().debug(f"Unable to get signature for {cls.__name__}.{name}: {str(e)}")
+                except Exception:
+                    lines.append(f"_{cls.__name__}.**{name}**_: Unable to generate documentation.")
         lines.append("_______\n")
 
     module_functions = []
@@ -97,24 +91,37 @@ def _get_markdown_for_module(mod) -> str:
     if len(module_functions) > 0:
         lines.append(f'##### Functions')
         for func in module_functions:
-            signature = str(inspect.signature(func)).replace(single_quote, '').replace('[', '\\['). \
-                replace(']', '\\]')
-            lines.append(f"*def **{func.__name__}**{signature}*:\n")
-            doc = inspect.getdoc(func)
-            if doc:
-                lines.append(f"```text\n{doc}\n```\n")
+            try:
+                signature = str(inspect.signature(func)).replace(single_quote, '').replace('[', '\\['). \
+                    replace(']', '\\]')
+                doc = inspect.getdoc(func)
+                lines.append(f"*def **{func.__name__}**{signature}*:\n")
+                lines.append(f"```text\n{doc}\n```\n" if doc else "```text\nNo documentation found.\n```\n")
+            except Exception:
+                lines.append(f"*def **{func.__name__}**: Unable to generate documentation.*")
             lines.append("_______\n")
 
     return '\n'.join(lines)
 
 
+_DOWNLOAD_BTN: str = 'api_btn_download'
+""" ID of 'Download API Client' button. """
+_DOWNLOADER_ID: str = 'api_downloader'
+""" ID of the Dash Download component that manages download of the sglportalapi package installation (wheel) file. """
 _TABS_ID: str = 'api_tabs'
+""" ID of the Dash Bootstrap Tabs component in which documentation is displayed for the sglportalapi package. """
 _TAB_README: str = 'api_readme_tab'
+""" Tab on which the sglportalapi README is displayed."""
 _TAB_CHANGELOG: str = 'api_changelog_tab'
+""" Tab on which the sglpportalapi CHANGELOG is displayed. """
 _TAB_CLIENTSIDE: str = 'api_clientside_tab'
+""" Tab displaying documentation for the sglportalapi.clientside module. """
 _TAB_DATA_CONTAINER: str = 'api_data_container_tab'
+""" Tab displaying documentation for the sglportalapi.data_containers module. """
 _TAB_MAESTRO: str = 'api_maestro_tab'
+""" Tab displaying documentation for the sglportalapi.maestro module. """
 _MARKDOWN_ID: str = 'api_markdown'
+""" ID of Dash Markdown component in which documentation is rendered. """
 
 
 def serve_layout() -> html.Div:
@@ -138,16 +145,17 @@ def serve_layout() -> html.Div:
     response data sets.
     
     With this package and a secure Internet connection with access to the portal's website, you can retrieve and
-    analyze experimental data from a Python interactive console or your own analysis scripts. As a 
+    analyze experimental data directly from a Python interactive console or within your own custom Python script. As a 
     registered user, you can download the package and use it as you wish. ***Note that every package download
     and all API requests are recorded in an effort to protect the provenance of the experimental data
     stored in the portal.***
     ''', style=dict(color='black', backgroundColor='lightsteelblue'))
 
-    download_row = dbc.Row(
-        dbc.Button('Download API Client Package', size='lg', disabled=not enable),
-        class_name='d-grid col-4 mx-auto my-4',
-    )
+    download_row = dbc.Row([
+        dbc.Button('Download API Client Package', id=_DOWNLOAD_BTN, size='lg', disabled=not enable),
+        dcc.Download(id=_DOWNLOADER_ID)
+    ], class_name='d-grid col-4 mx-auto my-4')
+
     tabs = dbc.Tabs([
         dbc.Tab(label="README", tab_id=_TAB_README),
         dbc.Tab(label="Changelog", tab_id=_TAB_CHANGELOG),
@@ -155,7 +163,7 @@ def serve_layout() -> html.Div:
         dbc.Tab(label="API Doc: data_containers", tab_id=_TAB_DATA_CONTAINER),
         dbc.Tab(label='API Doc: maestro', tab_id=_TAB_MAESTRO)
     ], id=_TABS_ID, active_tab=_TAB_README)
-    content_markdown = dcc.Markdown(id=_MARKDOWN_ID, children=_get_documentation(_TAB_README),
+    content_markdown = dcc.Markdown(id=_MARKDOWN_ID, children=sglportalapi.readme(),
                                     style=dict(maxHeight='600px', overflowY='scroll',
                                                border='1px solid rgba(176,196,222,0.5'))
 
@@ -169,4 +177,30 @@ def serve_layout() -> html.Div:
 
 @callback(Output(_MARKDOWN_ID, "children"), [Input(_TABS_ID, "active_tab")])
 def update_tab_content(active_tab):
-    return _get_documentation(active_tab)
+    if active_tab == _TAB_README:
+        return sglportalapi.readme()
+    elif active_tab == _TAB_CHANGELOG:
+        return sglportalapi.changelog()
+    elif active_tab == _TAB_CLIENTSIDE:
+        return _get_markdown_for_module(sglportalapi.clientside)
+    elif active_tab == _TAB_DATA_CONTAINER:
+        return _get_markdown_for_module(sglportalapi.data_containers)
+    elif active_tab == _TAB_MAESTRO:
+        return _get_markdown_for_module(sglportalapi.maestro)
+    else:
+        return '***No tab selected***'
+
+
+# TODO: IMPLEMENT -- Need to record every API package download.
+# noinspection PyUnusedLocal
+@callback(Output(_DOWNLOADER_ID, "data"), [Input(_DOWNLOAD_BTN, "n_clicks")], prevent_initial_call=True)
+def download_api_client(n_clicks):
+    get_application_logger().info("Downloading API package")
+    p = Path(__file__)
+    p = Path(p.parent.parent, 'sglportalapi', 'dist', 'sglportalapi-0.2.0-py3-none-any.whl')
+    if not p.is_file():
+        get_application_logger().error(f"API package wheel not found at {str(p.absolute())}")
+    try:
+        return dcc.send_file(path=p)
+    except Exception as e:
+        get_application_logger().error(f"Download failed: {str(e)}", exc_info=True)
