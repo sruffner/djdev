@@ -1,7 +1,7 @@
 """
-print_log.py: A script that prints a summary of all entries in the database operations log.
+print_log.py: A script that prints a summary of all entries in the database operations or API requests log.
 
-This script is simple wrapper for `:py:func:database.log_ops.dump_log`, printing all entries in the operations log to
+This script is simple wrapper for `:py:func:database.log_ops.dump_log`, printing all entries in the specified log to
 STDOUT.
 
 Usage - when deployed on local development machine using Docker Compose:
@@ -18,8 +18,7 @@ import sys
 from database.log_ops import dump_log
 
 if __name__ == '__main__':
-    print("print_log.py: Summary of database operations log history for the Lisberger lab data portal...\n",
-          file=sys.stdout, flush=True)
-    dump_log(sys.stdout)
+    yes_or_no = input('Dump contents of database operations history (y) or API requests log (N) > ')
+    dump_log(sys.stdout, is_api_log=(yes_or_no != 'y'))
     print("\n\nBYE!", file=sys.stdout, flush=True)
     exit(0)

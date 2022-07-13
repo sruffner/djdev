@@ -30,3 +30,18 @@ def changelog() -> str:
     p = Path(__file__)
     p = Path(p.parent, 'dist', 'CHANGELOG.md')
     return _read_doc_file(p) or "Unable to retrieve sglportalapi CHANGELOG"
+
+
+def path_to_package_wheel() -> Optional[Path]:
+    """
+    Path to the API client package wheel file -- so file can be presented for download. Returns None if no wheel
+    file is found.
+    """
+    try:
+        dist_folder = Path(Path(__file__).parent, 'dist')
+        for f in dist_folder.iterdir():
+            if f.is_file() and f.name.endswith('.whl'):
+                return f
+    except Exception:
+        pass
+    return None

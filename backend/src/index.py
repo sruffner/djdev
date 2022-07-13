@@ -161,7 +161,7 @@ def _serve_layout() -> html.Div:
                                                      href="/manage", disabled=not is_admin),
                                 dbc.DropdownMenuItem(divider=True),
                                 dbc.DropdownMenuItem("Update your profile", href="/user_profile"),
-                                dbc.DropdownMenuItem("Download API client", href="/api_client"),
+                                dbc.DropdownMenuItem("API client-side package", href="/api_client"),
                                 dbc.DropdownMenuItem("Logout", id=_LOGOUT_ID, n_clicks=0)
                             ],
                             id=_NAV_MENU_ID, align_end=True, label=drop_menu_label, color="info", style=drop_menu_style

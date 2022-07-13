@@ -34,11 +34,11 @@ from typing import Tuple, Optional, List, Dict, Any
 from flask import Response, request
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 
+from database.log_ops import log_api_request
 from sglportalapi.data_containers import SessionInfo, NeuronInfo, ROUTE_AUTHENTICATE, ROUTE_SESSIONINFO, \
     ROUTE_SESSION_NEURONS, ROUTE_SESSION_PROTOCOLS, ROUTE_SESSION_TRIAL, ROUTE_SESSION_BLOCK, \
     ROUTE_PROTOCOL_REPS, serialize_api_response
 from app import app
-from config.app_logging import get_application_logger
 from config.config import get_config
 from sglportalapi.maestro import Protocol
 from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_any_proj
@@ -68,6 +68,7 @@ def api_access() -> Tuple[Response, int]:
         if err_msg is None:
             status_code, out = 200, dict(token=create_access_token(identity=dict(username=username)),
                                          expires_in=int(get_config().jwt_access_token_lifetime.total_seconds()))
+            log_api_request(route=ROUTE_AUTHENTICATE, username=username)
         else:
             status_code, out = 400, dict(error=f"Access denied - {err_msg}")
     return Response(serialize_api_response(ROUTE_AUTHENTICATE, **out)), status_code
@@ -79,10 +80,10 @@ def sessions() -> Tuple[Response, int]:
     """
     API access point that retrieves all or a subset of experiment sessions stored in the portal database. The request
     body is a JSONified dictionary with 3 keys defining possible restrictions on the set of sessions returned:
-        * experiments = None | <registered portal username; restrict to sessions owned by this user>.
-        * subj_id = None | <subject ID; restrict to sessions involving this experiment subject>.
-        * when = None | <date restriction of the form 'op YYYY-MM-DD', where op = '='|'>'|'<'; restrict to sessions
-            recorded on, after or before the data specified>.
+        * **experiments** = None | <registered portal username; restrict to sessions owned by this user>.
+        * **subj_id** = None | <subject ID; restrict to sessions involving this experiment subject>.
+        * **when** = None | <date restriction of the form 'op YYYY-MM-DD', where op = '=' or '>' or '<'; restrict to
+          sessions recorded on, after or before the data specified>.
 
     If successful, the 'sessions' key in the response dictionary is a list of
     :py:class:`api.data_containers.SessionInfo` objects, each of which contains summary information on an experiment
@@ -99,9 +100,8 @@ def sessions() -> Tuple[Response, int]:
     status_code, err_msg, session_list = _retrieve_session_info(experimenter, subj_id, when)
     out = dict(sessions=session_list) if status_code == 200 else dict(error=err_msg)
     if status_code == 200:
-        current_user = get_jwt_identity()
-        get_application_logger().info(f"{ROUTE_SESSIONINFO}: {current_user} retrieved metadata on "
-                                      f"{len(session_list)} sessions")
+        log_api_request(route=ROUTE_SESSIONINFO, username=get_jwt_identity()['username'],
+                        experimenter=experimenter, subj_id=subj_id, when=when)
     return Response(serialize_api_response(ROUTE_SESSIONINFO, **out)), status_code
 
 
@@ -199,9 +199,8 @@ def session_neurons() -> Tuple[Response, int]:
     status_code, err_msg, neuron_list = _retrieve_session_neurons(session_key, min_spikes, min_snr)
     out = dict(neurons=neuron_list) if status_code == 200 else dict(error=err_msg)
     if status_code == 200:
-        current_user = get_jwt_identity()
-        get_application_logger().info(f"{ROUTE_SESSION_NEURONS}: {current_user} retrieved metadata on "
-                                      f"{len(neuron_list)} neurons from session {session_key}")
+        log_api_request(route=ROUTE_SESSION_NEURONS, username=get_jwt_identity()['username'],
+                        session_key=session_key, min_spikes=min_spikes, min_snr=min_snr)
     return Response(serialize_api_response(ROUTE_SESSION_NEURONS, **out)), status_code
 
 
@@ -271,9 +270,8 @@ def session_protocols() -> Tuple[Response, int]:
     status_code, err_msg, proto_list = _retrieve_session_protocols(session_key)
     out = dict(protocols=proto_list) if status_code == 200 else dict(error=err_msg)
     if status_code == 200:
-        current_user = get_jwt_identity()
-        get_application_logger().info(f"{ROUTE_SESSION_PROTOCOLS}: {current_user} retrieved the {len(proto_list)} "
-                                      f"trial protocols presented during session {session_key}")
+        log_api_request(route=ROUTE_SESSION_PROTOCOLS, username=get_jwt_identity()['username'],
+                        session_key=session_key)
     return Response(serialize_api_response(ROUTE_SESSION_PROTOCOLS, **out)), status_code
 
 
@@ -337,9 +335,8 @@ def session_trial() -> Tuple[Response, int]:
     out = dict(trial=trial_rep) if status_code == 200 else dict(error=err_msg)
 
     if status_code == 200:
-        current_user = get_jwt_identity()
-        get_application_logger().info(f"{ROUTE_SESSION_TRIAL}: {current_user} retrieved data for trial {trial_index} "
-                                      f"from session {session_key}. Units requested = {unit_ids}")
+        log_api_request(route=ROUTE_SESSION_TRIAL, username=get_jwt_identity()['username'],
+                        session_key=session_key, trial_index=trial_index, unit_ids=unit_ids)
     return Response(serialize_api_response(ROUTE_SESSION_TRIAL, **out)), status_code
 
 
@@ -378,10 +375,8 @@ def session_block() -> Tuple[Response, int]:
     out = dict(trials=trial_list) if status_code == 200 else dict(error=err_msg)
 
     if status_code == 200:
-        current_user = get_jwt_identity()
-        get_application_logger().info(
-            f"{ROUTE_SESSION_BLOCK}: {current_user} retrieved data for a {len(trial_list)}-trial block starting at "
-            f"index {start} from session {session_key}. Units requested = {unit_ids}")
+        log_api_request(route=ROUTE_SESSION_BLOCK, username=get_jwt_identity()['username'],
+                        session_key=session_key, start=start, end=end, unit_ids=unit_ids)
     return Response(serialize_api_response(ROUTE_SESSION_BLOCK, **out)), status_code
 
 
@@ -422,8 +417,6 @@ def session_protocol_reps() -> Tuple[Response, int]:
     out = dict(trials=trial_list) if status_code == 200 else dict(error=err_msg)
 
     if status_code == 200:
-        current_user = get_jwt_identity()
-        get_application_logger().info(
-            f"{ROUTE_PROTOCOL_REPS}: {current_user} retrieved data for {len(trial_list)} reps of trial protocol "
-            f"(md5={proto_hash}) preented during session {session_key}. Units requested = {unit_ids}")
+        log_api_request(route=ROUTE_PROTOCOL_REPS, username=get_jwt_identity()['username'],
+                        session_key=session_key, proto_hash=proto_hash, completed=completed, unit_ids=unit_ids)
     return Response(serialize_api_response(ROUTE_PROTOCOL_REPS, **out)), status_code

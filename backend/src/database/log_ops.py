@@ -1,8 +1,10 @@
 """
-log_ops.py: Access to the database operations log in the file repository for the Lisberger lab portal.
+log_ops.py: Functions pertainign to the Lisberger lab portal's database operations log and API requests log.
 
-The database operations log is essentially a record of all operations performed on the database (via user interaction
-through the web portal) since the last database "reset". It is a backup to the DB's own backup faciliities. In case of
+**Database Operations Log:**
+
+The database operations log is essentially a record of all operations performed on the database -- other than read-only
+retrievals -- since the last database "reset". It is a backup to the DB's own backup faciliities. In case of
 catastrophic failure, the goal is to be able to repopulate the database from scratch by "playing back" all of the
 operations recorded in this log file -- in concert with the session archives that are stored in the backing repository.
 
@@ -27,8 +29,20 @@ could try to write the log at the same time. In an effort to prevent this, we im
 lock file in the the same directory as the operations log file. This is an ADVISORY, NON-REENTRANT locking scheme. All
 access to the operations log file must go through this module.
 
-@author: sruffner
-@created: 11oct2021
+**API Requests Log:**
+
+The portal implements a number of API 'endpoints' by which a client can retrieve information from the underlying
+portal database outside the context of a web browser. A clientside Python package is available for download that handles
+the details of sending requests to and unpacking the responses from these endpoints. This is the preferred method by
+which registered portal users can retrieve selected data sets for scripted analysis. All API endpoint requests,
+including requests to download the clientside package, are recorded in the API Requests Log, also implemented as a
+single log file that grows over time.
+
+The log file is stored in the same folder as the database operations log: $WS/logs/api_requests.log. The same locking
+scheme (but using a different lock file) is used to guard access to the log file, and the requests log is backed up to
+S3 as part of the same background task that backs up the database operations log file.
+
+Authoer: saruffner
 """
 import base64
 import json
@@ -51,14 +65,22 @@ from database.table_info import DBTable, AttributeValue
 from sglportalapi.util import size_with_units
 
 _LOG_DIR_NAME: str = 'logs'
+""" Name of portal workspace directory for portal logs. """
 _LOG_FILE_NAME: str = 'database_ops.log'
+""" Filename for the database operations log. """
+_API_LOG_FILE_NAME: str = 'api_requests.log'
+""" Filename for the API requests log. """
 
 _LOG_FILE_DIR: Path = Path(get_config().workspace_dir, _LOG_DIR_NAME)
-""" Directory containing the database operations log file. """
+""" Directory containing the database operations and API requests log files. """
 _LOG_FILE_PATH: Path = Path(get_config().workspace_dir, _LOG_DIR_NAME, _LOG_FILE_NAME)
 """ The location of the database operations log file in the portal's file system-based backing repository. """
 _LOG_LOCK_PATH: Path = Path(get_config().workspace_dir, _LOG_DIR_NAME, '.lock')
 """ Lock file for advisory interprocess lock to mediate exclusive access to the database operations log. """
+_API_LOG_FILE_PATH: Path = Path(get_config().workspace_dir, _LOG_DIR_NAME, _API_LOG_FILE_NAME)
+""" The location of the API requests log file in the portal's file system-based backing repository. """
+_API_LOG_LOCK_PATH: Path = Path(get_config().workspace_dir, _LOG_DIR_NAME, '.api-lock')
+""" Lock file for advisory interprocess lock to mediate exclusive access to the API requests log. """
 
 
 class FailedToAcquireLockException(Exception):
@@ -85,10 +107,13 @@ class WithTimeout(InterProcessLock):
 
 class _LogEntryJSONEncoder(json.JSONEncoder):
     """
-    JSONEncoder subclass customized to jsonify any entry written to the database operations log. It handles the
-    serialization/deserialization of those object types that standard JSON cannot handle but that can appear in a
-    log entry: (1) A DBTable enum; (2) 1D Numpy float array; (3) `datetime.date` or `datetime.datetime` objects; or
-    (4) a `bytes` object.
+    JSONEncoder subclass customized to jsonify any entry written to the database operations log or the API requests log.
+    It handles the serialization/deserialization of those object types that standard JSON cannot handle but that can
+    appear in a log entry:
+     - A DBTable enum.
+     - 1D Numpy float array.
+     - `datetime.date` or `datetime.datetime` objects.
+     - A `bytes` object.
     """
     def default(self, obj):
         if isinstance(obj, DBTable):
@@ -128,25 +153,28 @@ def log_file_path() -> Path:
     return _LOG_FILE_PATH
 
 
-def _append_log_entry(entry: Dict[str, Any]) -> None:
+def _append_log_entry(entry: Dict[str, Any], is_api_log: bool = False) -> None:
     """
-    Helper method that appends a new log entry to the database operations log file in the portal workspace. It
-    handles the details of JSONifying the entry, converting the resulting JSON to a byte sequence, acquiring an
-    interprocess lock on the dedicated log file, and then appending the byte sequence -- preceded by its length -- to
-    that file.
+    Helper method that appends a new log entry to the database operations log file or the API requests log in the portal
+    workspace. It handles the details of JSONifying the entry, converting the resulting JSON to a byte sequence,
+    acquiring an interprocess lock on the dedicated log file, and then appending the byte sequence -- preceded by its
+    length -- to that file.
 
     After appending the log entry, it will schedule a backup of the operations log file to portal's backup repository
     in S3 (if needed).
 
     Args:
         entry: The new entry.
+        is_api_log: True to append entry to API request log, else database operations log. Default = False.
     Raises:
         Exception: If an error occurs while serializing the entry to the database operations log file.
     """
     _ensure_logs_directory_exists()
     raw_bytes = json.dumps(entry, cls=_LogEntryJSONEncoder).encode()
-    with WithTimeout(_LOG_LOCK_PATH, 1):
-        with open(_LOG_FILE_PATH, 'ab') as f:
+    lock_path = _API_LOG_LOCK_PATH if is_api_log else _LOG_LOCK_PATH
+    log_path = _API_LOG_FILE_PATH if is_api_log else _LOG_FILE_PATH
+    with WithTimeout(lock_path, 1):
+        with open(log_path, 'ab') as f:
             f.write(struct.pack('<i', len(raw_bytes)))
             f.write(raw_bytes)
     schedule_log_backup_if_necessary()
@@ -261,85 +289,126 @@ def log_session_commit(user: str, subject: str, session_date: str, suffix: int) 
     return error_msg
 
 
+def log_api_request(route: str, username: str, **kwargs) -> None:
+    """
+    Log a request to one of the portal's API endpoints, or a request to download the API client-side Python package.
+    Only registered portal users have permission to download the package and use it to send API requests to retrieve
+    portal data outside the context of a web browser. To protect the provenance of that data, all API requests are
+    logged in a dedicated file within the portal workspace.
+
+    The method prepares a dictionary containing the route name, requester's username, the request parameters, and a
+    timestamp, then appends that dictionary to the dedicated log file. As a fallback, if the write fails for any reason,
+    the API log entry is written to the application message log.
+
+    All request parameters must be JSON-ifiiable. The internal JSONEncoder that processes the log entries does support
+    several additional object types not handled by the standard encoder: 1D Numpy arrays, a `date` or `datetime` object,
+    a `bytes` object, and a `DBTable` enum.
+
+    Args:
+        route: The API endpoint route name
+        username: Username of the registered portal user that initiated the API request.
+        **kwargs: The request parameters (if any).
+    """
+    entry = dict(route=route, username=username, ts=datetime.now().isoformat())
+    if isinstance(kwargs, dict):
+        for k, v in kwargs.items():
+            entry[k] = v
+    try:
+        _append_log_entry(entry, is_api_log=True)
+    except Exception as err:
+        error_msg = f"Failed to append entry in API requests log: {str(err)}."
+        get_application_logger().error(error_msg, exc_info=True)
+        get_application_logger().info(f"Unlogged API request: {str(entry)}")
+
+
 def schedule_log_backup_if_necessary(soon: bool = False) -> None:
     """
-    Schedule a background job to push a copy of the database operations log from the portal workspace to the backing
-    repository.
+    Schedule a background job to push copies of the database operations log and API requests log from the portal
+    workspace to the backing repository.
 
-    The database operations log is located in the portal workspace directory, on a file system mount accessible to the
-    backend server process. The file contains the entire history of operations on the portal database and is essential
-    if we ever need to reconstruct the database. The file is backed up regularly to the portal's backing repository,
-    which also stores the ZIP archives for experiment sessions that have been committed to the database. That repository
-    is maintained in an Amazon S3 bucket provisioned by the Lisberger lab.
+    The two dedicated log files are located in the portal workspace directory, on a file system mount accessible to the
+    backend server process. The database operations log contains the entire history of operations on the portal database
+    and is essential if we ever need to reconstruct the database. The API requests log keeps a record of all requests
+    received by the portal's API endpoints, as well as any request to download the clientside Python package by which
+    users can programmatically access those endpoints; this log is important for data provenance reasons.
 
-    Call this method to schedule a database log backup job. If a job is already scheduled, no action is taken.
+    Both are backed up regularly to the portal's backing repository, which also stores the ZIP archives for experiment
+    sessions that have been committed to the database. That repository is maintained in an Amazon S3 bucket provisioned
+    by the Lisberger lab.
+
+    Call this method to schedule a log backup job. If a job is already scheduled, no action is taken.
 
     Args:
         soon: If True, the backup is scheduled to take place one minute from "now". Otherwise, it is scheduled to
-            happen in 24 hours. Default = False. If the log has never been backed up, this argument is ignored and a
+            happen in 24 hours. Default = False. If either log has never been backed up, this argument is ignored and a
             backup is scheduled for 1 minute from now.
     """
     job_queue = Queue(connection=get_config().redis_conn)
     if len(job_queue.scheduled_job_registry) == 0:
-        if 0 == repo.file_size(f"/{_LOG_DIR_NAME}/{_LOG_FILE_NAME}"):
+        if (not soon) and (0 == repo.file_size(f"/{_LOG_DIR_NAME}/{_LOG_FILE_NAME}")):
+            soon = True
+        if (not soon) and (0 == repo.file_size(f"/{_LOG_DIR_NAME}/{_API_LOG_FILE_NAME}")):
             soon = True
         delta = timedelta(minutes=1) if soon else timedelta(hours=24)
         job_queue.enqueue_in(time_delta=delta, func=backup_log_to_repo)
-        get_application_logger().info(f"Scheduled database ops log backup {'1 min' if soon else '24 hr'} from now.")
+        get_application_logger().info(f"Scheduled logs backup {'1 min' if soon else '24 hr'} from now.")
 
 
 def backup_log_to_repo() -> None:
     """
-    Push a copy of the current database operations log in the portal workspace to the backing repository on S3.
+    Push a copy of the current database operations log and the current API requests log in the portal workspace to the
+    backing repository on S3.
 
     This method is intended to be called on a background process independent from the Dash/Flask backend server.
-    If the current size of the operations log in the portal workspace exceeds the size of its backup copy in the portal
+
+    If the current size of either log in the portal workspace exceeds the size of its backup copy in the portal
     repository, the method copies the log to a temporary file (in case other processes are updating the log file
     at the same time), then uploads that temporary file to the repository, replacing the old backup copy of the log.
     """
-    # we need to get the current size N of the log file while holding the interprocess lock. After releasing the lock,
-    # another server replica could append entries to the log file, but that's OK. We only copy the first N bytes.
+    # we need to get the current size N of each log file while holding the corresponding interprocess lock. After
+    # releasing the lock, another server replica could append entries to a log file, but that's OK. We only copy what
+    # was there when we checked.
     _ensure_logs_directory_exists()
-    log_path = log_file_path()
-    curr_size = 0
-    try:
-        with WithTimeout(_LOG_LOCK_PATH, 1):
-            curr_size = log_path.stat().st_size
-    except Exception:
-        pass
-
-    key = f"/{_LOG_DIR_NAME}/{_LOG_FILE_NAME}"
-    if curr_size <= repo.file_size(key):
-        get_application_logger().info(f"No need to backup {_LOG_FILE_NAME}.")
-        return
-
-    tmp_file_path = Path(_LOG_FILE_DIR, f"tmp_{str(uuid.uuid4())}.log")
-    try:
-        with open(log_path, 'rb') as src, open(tmp_file_path, 'wb') as dst:
-            data = src.read(curr_size)
-            dst.write(data)
-        if not repo.upload_file(tmp_file_path, key):
-            get_application_logger().error(
-                "Failed to upload current database ops log to portal repository; check system logs.")
-        else:
-            get_application_logger().info(f"Backed up current database operations log "
-                                          f"({size_with_units(curr_size)}) to portal repository.")
-    except Exception:
-        get_application_logger().error(f"Database operations log backup failed.", exc_info=True)
-    finally:
+    for lock_path, log_path in [(_LOG_LOCK_PATH, _LOG_FILE_PATH), (_API_LOG_LOCK_PATH, _API_LOG_FILE_PATH)]:
+        curr_size = 0
         try:
-            tmp_file_path.unlink(missing_ok=True)
+            with WithTimeout(lock_path, 1):
+                curr_size = log_path.stat().st_size
         except Exception:
             pass
 
+        key = f"/{_LOG_DIR_NAME}/{log_path.name}"
+        if curr_size > repo.file_size(key):
+            tmp_file_path = Path(_LOG_FILE_DIR, f"tmp_{str(uuid.uuid4())}.log")
+            try:
+                with open(log_path, 'rb') as src, open(tmp_file_path, 'wb') as dst:
+                    data = src.read(curr_size)
+                    dst.write(data)
+                if not repo.upload_file(tmp_file_path, key):
+                    get_application_logger().error(
+                        f"Failed to backup {log_path.name} to portal repository; check system logs.")
+                else:
+                    get_application_logger().info(f"Backed up {log_path.name} "
+                                                  f"({size_with_units(curr_size)}) to portal repository.")
+            except Exception:
+                get_application_logger().error(f"Internal error while backing up {log_path.name}.", exc_info=True)
+            finally:
+                try:
+                    tmp_file_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
-def read_database_operations_log() -> List[Dict[str, Any]]:
+
+def read_log_entries(is_api_log: bool = False) -> List[Dict[str, Any]]:
     """
-    Read in all entries in the database operations log file in the portal workspace.
+    Read in all entries from one of two dedicated log files maintained in the portal workspace: the database operations
+    history and the API requests log.
 
     Never call this method when the portal application is online. The method does NOT acquire an advisory interprocess
-    lock before reading the operations log file.
+    lock before reading the log file.
 
+    Args:
+        is_api_log: True to read the API requests log, False for the database operations log. Default = False.
     Returns:
         List of all entries read from the log file.
     Raises:
@@ -347,9 +416,9 @@ def read_database_operations_log() -> List[Dict[str, Any]]:
         EOFError: If end-of-file is reached in the middle of a log entry.
         JSONDecodError: If an error occurs while parsing any entry.
     """
-    log_path = log_file_path()
+    log_path = _API_LOG_FILE_PATH if is_api_log else _LOG_FILE_PATH
     if not log_path.is_file():
-        raise Exception(f"No database operations log found at {str(log_path)}")
+        raise Exception(f"No {'API requests' if is_api_log else 'database operations'} log found at {str(log_path)}")
     entries: List[Dict[str, Any]] = list()
     int_sz = struct.calcsize('<i')
     with open(log_path, 'rb') as f:
@@ -369,26 +438,28 @@ def read_database_operations_log() -> List[Dict[str, Any]]:
     return entries
 
 
-def dump_log(out: Optional[TextIO] = sys.stdout) -> None:
+def dump_log(out: Optional[TextIO] = sys.stdout, is_api_log: bool = False) -> None:
     """
-    Dump the entire contents of the database operations log to a text file stream.
+    Dump the entire contents of the database operations log or the API requests log to a text file stream.
 
     NOTE: THIS IS AN ADMINISTRATIVE FUNCTION that should never be called when the portal application is online. The
-    method does NOT acquire an advisory interprocess lock before reading the operations log file.
+    method does NOT acquire an advisory interprocess lock before reading the log file.
 
     Args:
         out: The target text stream. Defaults to STDOUT.
+        is_api_log: True to dump the API requests log, False for the database operations log. Default = False.
     """
     entries: List[Dict[str, Any]]
     try:
-        entries = read_database_operations_log()
+        entries = read_log_entries(is_api_log)
     except Exception as e:
-        err_msg = f"Error occurred while dumping database operations log: {str(e)}"
+        err_msg = f"Error while dumping {'API requests' if is_api_log else 'database operations'} log: {str(e)}"
         get_application_logger().error(err_msg, exc_info=True)
         print(f"=====> {err_msg}", file=out, flush=True)
         return
 
-    print("\n****** Database operations log history ******\n", file=out, flush=True)
+    log_name = "API Requests" if is_api_log else "Database Operations"
+    print(f"\n****** {log_name} log history ******\n", file=out, flush=True)
     for i, entry in enumerate(entries):
         print(f"{i:04}: {entry}", file=out)
-    print("\n****** END Database operations log history ******\n")
+    print(f"\n****** END {log_name} log history ******\n", file=out, flush=True)

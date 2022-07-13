@@ -13,18 +13,19 @@ permitted to download and use the package.
 """
 import inspect
 import types
-from pathlib import Path
 from typing import Optional, List
 
 from dash import html, dcc, callback, Output, Input
 import dash_bootstrap_components as dbc
 import flask_login
+from dash.exceptions import PreventUpdate
 
 import sglportalapi.clientside
 import sglportalapi.data_containers
 import sglportalapi.maestro
 from app import PortalUser, load_authorized_user
 from config.app_logging import get_application_logger
+from database.log_ops import log_api_request
 
 
 def _get_markdown_for_module(mod: types.ModuleType) -> str:
@@ -139,7 +140,7 @@ def serve_layout() -> html.Div:
     explainer = dcc.Markdown('''
     This portal implements a number of API "endpoints" by which a client-side application can directly 
     access content in the Lisberger laboratory database outside the context of a web browser. The Python
-    package described here implements the low-level details of sending HTTP requests to the API endpoints 
+    package documented here implements the low-level details of sending HTTP requests to the API endpoints 
     and unpacking the responses. It also defines the various data objects that may be returned in a 
     response -- experiment session or neural unit metadata, trial protocol definitions, and trial 
     response data sets.
@@ -191,16 +192,22 @@ def update_tab_content(active_tab):
         return '***No tab selected***'
 
 
-# TODO: IMPLEMENT -- Need to record every API package download.
 # noinspection PyUnusedLocal
 @callback(Output(_DOWNLOADER_ID, "data"), [Input(_DOWNLOAD_BTN, "n_clicks")], prevent_initial_call=True)
 def download_api_client(n_clicks):
-    get_application_logger().info("Downloading API package")
-    p = Path(__file__)
-    p = Path(p.parent.parent, 'sglportalapi', 'dist', 'sglportalapi-0.2.0-py3-none-any.whl')
-    if not p.is_file():
-        get_application_logger().error(f"API package wheel not found at {str(p.absolute())}")
+    # need to make sure current user is still logged in, and that wheel file exists
+    wheel_path = sglportalapi.path_to_package_wheel()
+    portal_user: Optional[PortalUser] = None
+    if flask_login.current_user.is_authenticated:
+        portal_user = load_authorized_user(flask_login.current_user.get_id())
+    if (portal_user is None) or (wheel_path is None):
+        get_application_logger().debug(f"Download aborted because "
+                                       f"{'user not logged in' if (portal_user is None) else 'wheel file missing'}")
+        raise PreventUpdate
+
     try:
-        return dcc.send_file(path=p)
+        out = dcc.send_file(path=wheel_path)
+        log_api_request(route='/api_client', username=portal_user.id)
+        return out
     except Exception as e:
         get_application_logger().error(f"Download failed: {str(e)}", exc_info=True)

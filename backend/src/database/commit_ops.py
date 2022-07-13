@@ -93,7 +93,7 @@ from config.app_logging import get_application_logger
 from config.config import get_config
 from database import repo
 from sglportalapi import maestro, PL2
-from database.log_ops import log_session_commit, read_database_operations_log
+from database.log_ops import log_session_commit, read_log_entries
 from database.table_info import DBTable, AttributeValue, primary_key_of
 from database.table_ops import fetch_attribute_values, fetch_one_row, fetch_rows, check_row, fetch_restrict_proj, \
     SessionCommitter, rollback_session_commit, database_empty, insert_into_table, delete_from_table, update_table_row, \
@@ -2675,7 +2675,7 @@ def reconstruct_database(initial_pwd: str) -> None:
 
     entries: List[Dict[str, Any]]
     try:
-        entries = read_database_operations_log()
+        entries = read_log_entries()
     except Exception as e:
         err_msg = f"Error occurred while reading database operations log: {str(e)}"
         get_application_logger().error(err_msg, exc_info=True)
