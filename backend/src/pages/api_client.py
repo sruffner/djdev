@@ -12,8 +12,9 @@ The page should only be accessible when a user is authenticated on the portal, b
 permitted to download and use the package.
 """
 import inspect
+import sys
 import types
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 from dash import html, dcc, callback, Output, Input
 import dash_bootstrap_components as dbc
@@ -28,79 +29,150 @@ from config.app_logging import get_application_logger
 from database.log_ops import log_api_request
 
 
-def _get_markdown_for_module(mod: types.ModuleType) -> str:
+def _get_module_functions(mod: types.ModuleType) -> List[str]:
     """
-    Auto-generate basic documentation for the specified module in markdown format.
-
-    This function attempts to display documentation in a manner similar to what the standard module `pydoc` supplies,
-    but in markdown format (conforming to the CommonMark spec) rather than plain text or HTML. It is NOT a complete
-    solution, as it only displays docstrings for the module, any module functions, and any module classes. It will not
-    handle all possible Python types correctly (but it is adequate for generating markdown documentation for the main
-    modules in the sglportalapi package.
+    Get the names of all functions defined in the specified Python module. This method only finds non-builtin
+    functions belonging to the module and not starting with '_'.
 
     Args:
         mod: The module.
     Returns:
-        Generated module documentation in markdown format.
+        List of module function names, possibly empty.
     """
+    out = []
+    for name, func in inspect.getmembers(mod, inspect.isroutine):
+        if (inspect.getmodule(func) == mod) and (not inspect.isbuiltin(func)) and not name.startswith('_'):
+            out.append(name)
+    return out
+
+
+def _get_module_classes(mod: types.ModuleType) -> List[str]:
+    """
+    Get the names of all classes defined in the specified Python module. Module classes starting with '_' are ignored.
+
+    Args:
+        mod: The module.
+    Returns:
+        List of module class names, possibly empty.
+    """
+    out = []
+    for name, cls in inspect.getmembers(mod, inspect.isclass):
+        if (inspect.getmodule(cls) == mod) and not name.startswith('_'):
+            out.append(name)
+    return out
+
+
+def _get_module_markdown(mod_name: str) -> str:
+    """
+    Get top-level description of the specified module.
+
+    Args:
+        mod_name: The module name.
+    Returns:
+        The "doc string" for the module, in markdown format (CommonMark spec). If unable to locate module or its doc
+            string, returns "No documentation found."
+    """
+    mod = sys.modules.get(mod_name)
+    if mod is None:
+        return "***No documentation found.***"
+
     lines: List[str] = list()
-    lines.append(f'### Name\n&nbsp;&nbsp;&nbsp;***{mod.__name__}***')
+    lines.append(f'### Module\n&nbsp;&nbsp;&nbsp;***{mod.__name__}***')
     lines.append(f'### Description\n{mod.__doc__}')
-    lines.append("_______\n")
+    return '\n'.join(lines)
+
+
+def _get_module_function_markdown(mod_name: str, func_name: str) -> str:
+    """
+    Get documentation for the specified module function, including the function's signature and its Python doc-string.
+
+    Args:
+        mod_name: The module name.
+        func_name: The function name.
+    Returns:
+        The documentation in markdown format (CommonMark spec), or "No documentation found".
+    """
+    mod = sys.modules.get(mod_name)
+    if mod is None:
+        return "***No documentation found.***"
+
+    func = None
+    for name, v in inspect.getmembers(mod, inspect.isroutine):
+        if (name == func_name) and (inspect.getmodule(v) == mod) and \
+                (not inspect.isbuiltin(v)) and not name.startswith('_'):
+            func = v
+            break
+    if func is None:
+        return '***No documentation found.***'
+
+    lines: List[str] = list()
+    try:
+        single_quote = "'"
+        signature = str(inspect.signature(func)).replace(single_quote, '').replace('[', '\\['). \
+            replace(']', '\\]')
+        doc = inspect.getdoc(func)
+        lines.append(f"*def **{func.__name__}**{signature}*:\n")
+        lines.append(f"```text\n{doc}\n```\n" if doc else "```text\nNo documentation found.\n```\n")
+    except Exception:
+        lines.append(f"*def **{func.__name__}**: Unable to generate documentation.*")
+    return '\n'.join(lines)
+
+
+def _get_module_class_markdown(mod_name: str, cls_name: str) -> str:
+    """
+    Get documentation for the specified module class, including:
+     - Class-level doc-string.
+     - Signature and doc-string for each static method, class method, instance method, and property of the class.
+
+    Args:
+        mod_name: The module name.
+        cls_name: The class name.
+    Returns:
+        The documentation in markdown format (CommonMark spec), or "No documentation found".
+    """
+    mod = sys.modules.get(mod_name)
+    if mod is None:
+        return "***No documentation found.***"
+
+    cls = None
+    for name, v in inspect.getmembers(mod, inspect.isclass):
+        if (name == cls_name) and (inspect.getmodule(v) == mod) and not name.startswith('_'):
+            cls = v
+            break
+    if cls is None:
+        return '***No documentation found.***'
 
     single_quote = "'"
-    module_classes = []
-    for k, v in inspect.getmembers(mod, inspect.isclass):
-        if (inspect.getmodule(v) == mod) and not k.startswith('_'):
-            module_classes.append(v)
-    for cls in module_classes:
-        lines.append(f"##### class {cls.__name__}:\n")
-        inspect.classify_class_attrs(cls)
-        doc = inspect.getdoc(cls)
-        if doc:
-            lines.append(f"{doc}\n")
-        attrs = inspect.classify_class_attrs(cls)
-        attrs.sort(key=lambda a: a[0])
-        for name, kind, home_cls, value in attrs:
-            if ((name == '__init__') or ((not name.startswith('_')) and (home_cls == cls))) and \
-                    (kind in ['method', 'static method', 'class method', 'property']):
-                try:
-                    suffix = ""
-                    prefix = ""
-                    if kind in ['static method', 'class method']:
-                        value = value.__func__  # HACK to get around decorators
-                        prefix = "@staticmethod " if kind == 'static method' else "@classmethod "
-                    elif kind == 'property':
-                        suffix = ' (readonly)' if value.fset is None else ''
-                        value = value.fget
-                        prefix = '@property '
-                    signature = str(inspect.signature(value)).replace(single_quote, '').replace('[', '\\['). \
-                        replace(']', '\\]')
-                    if name == '__init__':
-                        name = cls.__name__
-                    doc = inspect.getdoc(value)
-                    lines.append(f"_{prefix}**{name}**{signature}_:{suffix}")
-                    lines.append(f"```text\n{doc}\n```\n" if doc else "```text\nNo documentation found.\n```\n")
-                except Exception:
-                    lines.append(f"_{cls.__name__}.**{name}**_: Unable to generate documentation.")
-        lines.append("_______\n")
-
-    module_functions = []
-    for k, v in inspect.getmembers(mod, inspect.isroutine):
-        if (inspect.getmodule(v) == mod) and (not inspect.isbuiltin(v)) and not k.startswith('_'):
-            module_functions.append(v)
-    if len(module_functions) > 0:
-        lines.append(f'##### Functions')
-        for func in module_functions:
+    lines: List[str] = list()
+    lines.append(f"##### class {cls.__name__}:\n")
+    inspect.classify_class_attrs(cls)
+    doc = inspect.getdoc(cls)
+    if doc:
+        lines.append(f"{doc}\n")
+    attrs = inspect.classify_class_attrs(cls)
+    attrs.sort(key=lambda a: a[0])
+    for name, kind, home_cls, value in attrs:
+        if ((name == '__init__') or ((not name.startswith('_')) and (home_cls == cls))) and \
+                (kind in ['method', 'static method', 'class method', 'property']):
             try:
-                signature = str(inspect.signature(func)).replace(single_quote, '').replace('[', '\\['). \
+                suffix = ""
+                prefix = ""
+                if kind in ['static method', 'class method']:
+                    value = value.__func__  # HACK to get around decorators
+                    prefix = "@staticmethod " if kind == 'static method' else "@classmethod "
+                elif kind == 'property':
+                    suffix = ' (readonly)' if value.fset is None else ''
+                    value = value.fget
+                    prefix = '@property '
+                signature = str(inspect.signature(value)).replace(single_quote, '').replace('[', '\\['). \
                     replace(']', '\\]')
-                doc = inspect.getdoc(func)
-                lines.append(f"*def **{func.__name__}**{signature}*:\n")
+                if name == '__init__':
+                    name = cls.__name__
+                doc = inspect.getdoc(value)
+                lines.append(f"_{prefix}**{name}**{signature}_:{suffix}")
                 lines.append(f"```text\n{doc}\n```\n" if doc else "```text\nNo documentation found.\n```\n")
             except Exception:
-                lines.append(f"*def **{func.__name__}**: Unable to generate documentation.*")
-            lines.append("_______\n")
+                lines.append(f"_{cls.__name__}.**{name}**_: Unable to generate documentation.")
 
     return '\n'.join(lines)
 
@@ -109,18 +181,8 @@ _DOWNLOAD_BTN: str = 'api_btn_download'
 """ ID of 'Download API Client' button. """
 _DOWNLOADER_ID: str = 'api_downloader'
 """ ID of the Dash Download component that manages download of the sglportalapi package installation (wheel) file. """
-_TABS_ID: str = 'api_tabs'
-""" ID of the Dash Bootstrap Tabs component in which documentation is displayed for the sglportalapi package. """
-_TAB_README: str = 'api_readme_tab'
-""" Tab on which the sglportalapi README is displayed."""
-_TAB_CHANGELOG: str = 'api_changelog_tab'
-""" Tab on which the sglpportalapi CHANGELOG is displayed. """
-_TAB_CLIENTSIDE: str = 'api_clientside_tab'
-""" Tab displaying documentation for the sglportalapi.clientside module. """
-_TAB_DATA_CONTAINER: str = 'api_data_container_tab'
-""" Tab displaying documentation for the sglportalapi.data_containers module. """
-_TAB_MAESTRO: str = 'api_maestro_tab'
-""" Tab displaying documentation for the sglportalapi.maestro module. """
+_DOC_ITEM_LIST: str = 'api_doc_items'
+""" A Bootstrap component displaying list of modules, classes, function, etc for which documentation is available. """
 _MARKDOWN_ID: str = 'api_markdown'
 """ ID of Dash Markdown component in which documentation is rendered. """
 
@@ -157,39 +219,52 @@ def serve_layout() -> html.Div:
         dcc.Download(id=_DOWNLOADER_ID)
     ], class_name='d-grid col-4 mx-auto my-4')
 
-    tabs = dbc.Tabs([
-        dbc.Tab(label="README", tab_id=_TAB_README),
-        dbc.Tab(label="Changelog", tab_id=_TAB_CHANGELOG),
-        dbc.Tab(label="API Doc: clientside", tab_id=_TAB_CLIENTSIDE),
-        dbc.Tab(label="API Doc: data_containers", tab_id=_TAB_DATA_CONTAINER),
-        dbc.Tab(label='API Doc: maestro', tab_id=_TAB_MAESTRO)
-    ], id=_TABS_ID, active_tab=_TAB_README)
     content_markdown = dcc.Markdown(id=_MARKDOWN_ID, children=sglportalapi.readme(),
                                     style=dict(maxHeight='600px', overflowY='scroll',
-                                               border='1px solid rgba(176,196,222,0.5'))
+                                               border='1px solid rgb(176,196,222)'))
+
+    options: List[Tuple[str, str]] = [("README", "README"), ("CHANGELOG", "CHANGELOG")]
+    for mod in [sglportalapi.clientside, sglportalapi.data_containers, sglportalapi.maestro]:
+        options.append((mod.__name__, f"M {mod.__name__}"))
+        options.extend([(f"\u2003{name}", f"F {mod.__name__} {name}") for name in _get_module_functions(mod)])
+        options.extend([(f"\u2003{name}", f"C {mod.__name__} {name}") for name in _get_module_classes(mod)])
+
+    list_group = dbc.RadioItems(
+        id=_DOC_ITEM_LIST,
+        class_name="btn-group-vertical radio-group",
+        inputClassName="btn-check",
+        labelClassName="btn btn-outline-primary",
+        labelCheckedClassName="active",
+        options=[{"label": lbl, "value": val} for lbl, val in options],
+        value="README",
+        style=dict(display='block', maxHeight='600px', overflowY='scroll', border='1px solid rgb(176,196,222)')
+    )
+
+    documentation_section = dbc.Row([dbc.Col(list_group, width=3), dbc.Col(content_markdown, width=9)])
 
     card = dbc.Card([
         dbc.CardHeader("API Client"),
-        dbc.CardBody([explainer, download_row, tabs, content_markdown]),
+        dbc.CardBody([explainer, download_row, html.Hr(), documentation_section]),
     ], class_name='mx-5 my-5')
 
     return html.Div([card])
 
 
-@callback(Output(_MARKDOWN_ID, "children"), [Input(_TABS_ID, "active_tab")])
-def update_tab_content(active_tab):
-    if active_tab == _TAB_README:
+@callback(Output(_MARKDOWN_ID, "children"), [Input(_DOC_ITEM_LIST, "value")], prevent_initial_call=True)
+def display_documentation(value):
+    if value == 'README':
         return sglportalapi.readme()
-    elif active_tab == _TAB_CHANGELOG:
+    elif value == 'CHANGELOG':
         return sglportalapi.changelog()
-    elif active_tab == _TAB_CLIENTSIDE:
-        return _get_markdown_for_module(sglportalapi.clientside)
-    elif active_tab == _TAB_DATA_CONTAINER:
-        return _get_markdown_for_module(sglportalapi.data_containers)
-    elif active_tab == _TAB_MAESTRO:
-        return _get_markdown_for_module(sglportalapi.maestro)
+    parts = value.split()
+    if parts[0] == 'M':
+        return _get_module_markdown(parts[1])
+    elif parts[0] == 'F':
+        return _get_module_function_markdown(parts[1], parts[2])
+    elif parts[0] == 'C':
+        return _get_module_class_markdown(parts[1], parts[2])
     else:
-        return '***No tab selected***'
+        return "***No documentation found.***"
 
 
 # noinspection PyUnusedLocal

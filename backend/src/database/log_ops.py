@@ -404,8 +404,7 @@ def read_log_entries(is_api_log: bool = False) -> List[Dict[str, Any]]:
     Read in all entries from one of two dedicated log files maintained in the portal workspace: the database operations
     history and the API requests log.
 
-    Never call this method when the portal application is online. The method does NOT acquire an advisory interprocess
-    lock before reading the log file.
+    It is safe to call this method when the portal application is online.
 
     Args:
         is_api_log: True to read the API requests log, False for the database operations log. Default = False.
@@ -417,25 +416,50 @@ def read_log_entries(is_api_log: bool = False) -> List[Dict[str, Any]]:
         JSONDecodError: If an error occurs while parsing any entry.
     """
     log_path = _API_LOG_FILE_PATH if is_api_log else _LOG_FILE_PATH
+    lock_path = _API_LOG_LOCK_PATH if is_api_log else _LOG_LOCK_PATH
     if not log_path.is_file():
         raise Exception(f"No {'API requests' if is_api_log else 'database operations'} log found at {str(log_path)}")
-    entries: List[Dict[str, Any]] = list()
-    int_sz = struct.calcsize('<i')
-    with open(log_path, 'rb') as f:
-        while True:
-            size_bytes = f.read(int_sz)
-            if len(size_bytes) == 0:
-                break
-            elif len(size_bytes) != int_sz:
-                raise EOFError('Hit EOF in the middle of a log entry')
-            entry_size, = struct.unpack('<i', size_bytes)
-            raw_entry = f.read(entry_size)
-            if len(raw_entry) != entry_size:
-                raise EOFError('Hit EOF in the middle of a log entry')
-            entry = json.loads(raw_entry, object_hook=_LogEntryJSONEncoder.decoder_hook)
-            entries.append(entry)
 
-    return entries
+    # get current size of log file while we hold the access lock...
+    curr_size = 0
+    try:
+        with WithTimeout(lock_path, 1):
+            curr_size = log_path.stat().st_size
+    except Exception:
+        pass
+    if curr_size <= 0:
+        return []
+
+    # then copy that number of bytes to a temp file and read entries from temp file. The copy should not be affected by
+    # a simultaneous append by another process...
+    entries: List[Dict[str, Any]] = list()
+    tmp_file_path = Path(_LOG_FILE_DIR, f"tmp_{str(uuid.uuid4())}.log")
+    try:
+        with open(log_path, 'rb') as src, open(tmp_file_path, 'wb') as dst:
+            data = src.read(curr_size)
+            dst.write(data)
+
+        int_sz = struct.calcsize('<i')
+        with open(tmp_file_path, 'rb') as f:
+            while True:
+                size_bytes = f.read(int_sz)
+                if len(size_bytes) == 0:
+                    break
+                elif len(size_bytes) != int_sz:
+                    raise EOFError('Hit EOF in the middle of a log entry')
+                entry_size, = struct.unpack('<i', size_bytes)
+                raw_entry = f.read(entry_size)
+                if len(raw_entry) != entry_size:
+                    raise EOFError('Hit EOF in the middle of a log entry')
+                entry = json.loads(raw_entry, object_hook=_LogEntryJSONEncoder.decoder_hook)
+                entries.append(entry)
+
+        return entries
+    finally:
+        try:
+            tmp_file_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def dump_log(out: Optional[TextIO] = sys.stdout, is_api_log: bool = False) -> None:
