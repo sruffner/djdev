@@ -15,11 +15,25 @@ rendered in a different module:
 from typing import Optional
 
 import flask_login
-from dash import html
+from dash import html, callback, Output, Input, dcc
 import dash_bootstrap_components as dbc
 
 from app import PortalUser, load_authorized_user
-from pages import manage_users, manage_repo, curate, manage_app_log
+from pages import manage_users, manage_repo, curate, manage_app_log, manage_api_requests_log
+
+
+_CURATE, _USERS, _REPO, _APP_LOG, _API_REQ = 'curate', 'users', 'repo', 'app-log', 'api-req'
+_ADMIN_SECTIONS = [_CURATE, _USERS, _REPO, _APP_LOG, _API_REQ]
+""" The different sections on the Portal Administration page. """
+_ADMIN_SECTION_LABELS = ['Curate Portal Content', 'Manage Users', 'View Backup Repository on S3',
+                         'Portal Server Messages', 'Portal API Request History']
+""" User-friendly labels for the different admin sections. """
+
+_SECTION_SELECTOR: str = 'admin_sect_select'
+""" ID of mutually exclusive Bootstrap RadioItems group used to select the admin section to display. """
+
+_SECTION_LOADING: str = 'admin_sect_loading'
+""" ID of Dash Loading component in which selected admin section is rendered (some sections load a bit slowly. """
 
 
 def serve_layout() -> html.Div:
@@ -32,16 +46,38 @@ def serve_layout() -> html.Div:
         return html.Div("Access denied. You must be logged in with administrator privileges to view this content.",
                         className='mx-5 my-5')
 
-    content_div = html.Div(dbc.Accordion([
-        dbc.AccordionItem(curate.layout, title="Curate Portal Content"),
-        dbc.AccordionItem(manage_users.serve_layout(), title='Manage Users'),
-        dbc.AccordionItem(manage_repo.serve_layout(), title='View Backup Repository on S3'),
-        dbc.AccordionItem(manage_app_log.serve_layout(), title='Portal Server Message Logs')
-    ], start_collapsed=True, flush=True))
+    section_selector = dbc.RadioItems(
+        id=_SECTION_SELECTOR,
+        class_name="btn-group radio-group mb-3",
+        inputClassName="btn-check",
+        labelClassName="btn btn-outline-primary",
+        labelCheckedClassName="active",
+        options=[{"label": _ADMIN_SECTION_LABELS[i], "value": _ADMIN_SECTIONS[i]} for i in range(len(_ADMIN_SECTIONS))],
+        value=_CURATE,
+        style=dict(display='block', borderBottom='1.5px solid rgb(176,196,222)'),
+        inline=True,
+    )
+    section_loading = dcc.Loading(id=_SECTION_LOADING, children=curate.layout, type='circle')
 
     card = dbc.Card([
         dbc.CardHeader("Portal Administration"),
-        dbc.CardBody([content_div]),
+        dbc.CardBody([section_selector, section_loading]),
     ], class_name='mx-5 my-5')
 
-    return html.Div([card])
+    return html.Div(card)
+
+
+@callback(Output(_SECTION_LOADING, "children"), [Input(_SECTION_SELECTOR, "value")], prevent_initial_call=True)
+def on_select_option(value):
+    out = "Select one of the options above."
+    if value == _CURATE:
+        out = curate.layout
+    elif value == _USERS:
+        out = manage_users.serve_layout()
+    elif value == _REPO:
+        out = manage_repo.serve_layout()
+    elif value == _APP_LOG:
+        out = manage_app_log.serve_layout()
+    elif value == _API_REQ:
+        out = manage_api_requests_log.serve_layout()
+    return out
