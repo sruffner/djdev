@@ -21,7 +21,7 @@ import functools
 import json
 import struct
 from datetime import date
-from typing import Dict, Any, Optional, Tuple, List, Union
+from typing import Dict, Any, Optional, Tuple, List, Union, Final
 
 import numpy as np
 
@@ -29,24 +29,188 @@ from sglportalapi.maestro import Protocol
 
 API_VERSION: int = 1
 """ The current version number for the portal database access API. """
-ROUTE_AUTHENTICATE: str = "/api"
-""" API path to authenticate user and receive access token required for all other API endpoints. """
-ROUTE_SESSIONINFO: str = "/api/sessions"
-""" API path to retrieve summary information on selected experiment sessions in portal database. """
-ROUTE_SESSION_NEURONS: str = "/api/session/neurons"
-""" API path to retrieve summary information about selected neural unit recorded during a specified experiment. """
-ROUTE_SESSION_PROTOCOLS: str = "/api/session/protocols"
-""" API path to retrieve the defintions of all distinct Maestro trial protocols presented during an experiment. """
-ROUTE_SESSION_TRIAL: str = "/api/session/trial"
-""" API path to retrieve behavioral and neuronal responses for a Maestro trial presented during an experiment. """
-ROUTE_SESSION_BLOCK: str = "/api/session/block"
-""" API path to retrieve response data, etc for a sequential block of Maestro trials presented during an experiment. """
-ROUTE_PROTOCOL_REPS: str = "/api/session/protocol/reps"
-""" API path to retrieve response data for all reps of a specified trial protocol during an experiment session. """
 
-_KNOWN_ROUTES: List[str] = [ROUTE_AUTHENTICATE, ROUTE_SESSIONINFO, ROUTE_SESSION_NEURONS, ROUTE_SESSION_PROTOCOLS,
-                            ROUTE_SESSION_TRIAL, ROUTE_SESSION_BLOCK, ROUTE_PROTOCOL_REPS]
-""" List of all supported API routes. """
+
+class Route:
+    """
+    A collection of all supported API routes. Each route is a defined subpath under the portal's base URL:
+     - `Route.AUTHENTICATE`: API route by which client authenticates with portal and receives access token required
+       for all other API endpoints.
+     - `Route.SESSIONINFO`: API route to retrieve summary information on a filtered subset of experiment sessions in
+       the portal database.
+     - `Route.SESSION_NEURONS`: API route to retrieve summary information about selected neural units recorded during a
+       specified experiment session.
+     - `Route.SESSION_PROTOCOLS`: API route to retrieve the defintions of all distinct Maestro trial protocols presented
+       during an experiment session.
+     - `Route.SESSION_TRIAL`: API route to retrieve behavioral and neuronal responses for a single Maestro trial
+       presented during an experiment session.
+     - `Route.SESSION_BLOCK`: API route to retrieve response data, etc for a sequential block of Maestro trials
+       presented during an experiment session.
+     - `Route.SESSION_PROTOCOL_REPS`: API route to retrieve response data for all reps of a specified trial protocol
+       during an experiment session.
+     - `Route.METADATA_TABLE`: API route to retrieve the contents of one of the small metadata tables in the portal
+       database.
+    """
+    AUTHENTICATE: Final[str] = '/api'
+    SESSIONINFO: Final[str] = '/api/sessions'
+    SESSION_NEURONS: Final[str] = '/api/session/neurons'
+    SESSION_PROTOCOLS: Final[str] = '/api/session/protocols'
+    SESSION_TRIAL: Final[str] = '/api/session/trial'
+    SESSION_BLOCK: Final[str] = '/api/session/block'
+    SESSION_PROTOCOL_REPS: Final[str] = '/api/session/protocol/reps'
+    METADATA_TABLE: Final[str] = '/api/metadata'
+
+    _KNOWN_ROUTES: List[str] = [
+        AUTHENTICATE, SESSIONINFO, SESSION_NEURONS, SESSION_PROTOCOLS,
+        SESSION_TRIAL, SESSION_BLOCK, SESSION_PROTOCOL_REPS, METADATA_TABLE
+    ]
+    """ List of all supported API routes. """
+
+    @classmethod
+    def is_supported_api(cls, route: str) -> bool:
+        """
+        Is the specified URL subpath a recognized and supported portal API endpoint?
+
+        Args:
+            route: The route subpath (beyond the portal's base URL).
+        Returns:
+            True for a valid API enpoint; else False.
+        """
+        return route in cls._KNOWN_ROUTES
+
+
+class MetadataTable:
+    """
+    A client-side container encapsulating the contents of one of the "general information" metadata tables in the portal
+    database. These small tables contain information used to describe, categorize, and search for experimental datasets:
+     - `SUBJECTS`: Experiment subjects.
+     - `IMPLANTS`: Implant surgeries for all subjects.
+     - `RIGS`: Experiment rigs.
+     - `STUDIES`: Research projects in the lab.
+     - `NEURON_TYPES`: The types of neurons studied in the lab.
+     - `BRAIN_AREAS`: The brain regions studied in the lab.
+
+    MetadataTable is a convenience class for serializing/deserializing the contents of these tables for retrieval from
+    a dedicated portal API endpoint and textual display on the clientside. It does not expose the schema of the
+    underlying database table.
+    """
+    SUBJECTS: Final[str] = 'Experiment Subjects'
+    """ Information about laboratory subjects. """
+    IMPLANTS: Final[str] = 'Subject Implants'
+    """ Surgical implant history across all experiment subjects. """
+    RIGS: Final[str] = 'Experiment Rigs'
+    """ List of rigs in which laboratory experiments are conducted. """
+    STUDIES: Final[str] = 'Research Projects'
+    """ Current or past lab research projects. """
+    NEURON_TYPES: Final[str] = 'Neuron Types'
+    """ List of neuron types studied in the laboratory. """
+    BRAIN_AREAS: Final[str] = 'Brain Areas'
+    """ List of brain regions studied in the laboratory. """
+
+    _META_TABLE_NAMES: List[str] = [SUBJECTS, IMPLANTS, RIGS, STUDIES, NEURON_TYPES, BRAIN_AREAS]
+    """ List of all supported API routes. """
+
+    @classmethod
+    def is_supported_table_name(cls, name: str) -> bool:
+        """
+        Does the specified name identify one of the small metadata tables retrievable via the portal API?
+
+        Args:
+            name: The table name.
+        Returns:
+            True if name identifies a metadata table; else False.
+        """
+        return name in cls._META_TABLE_NAMES
+
+    def __init__(self, info: Dict[str, Any]):
+        """
+        Construct a MetadataTable.
+
+        Args:
+            info: A dictionary with 3 keys: 'name' (str) is the table name; 'columns' (List[str]) holds the table column
+                headings; and 'rows' (List[List[str]]) are the corresponding table rows.
+        Raises:
+            ValueError: If dictionary argument is missing any required keys, or any key value is deemed invalid.
+        """
+        try:
+            if not MetadataTable.is_supported_table_name(info['name']):
+                raise ValueError(f"Unrecognized metadata table name {info['name']}")
+            if not all([isinstance(k, str) for k in info['columns']]):
+                raise ValueError(f"Missing or invalid column heading")
+            num_cols = len(info['columns'])
+            for row in info['rows']:
+                if (len(row) != num_cols) or not all([isinstance(k, str) for k in row]):
+                    raise ValueError(f"Invalid row")
+        except Exception as e:
+            raise ValueError(f"Invalid metadata table initialization dict: {str(e)}")
+        self._info = info
+
+    @staticmethod
+    def from_database_rows(name: str, table_rows: List[Dict[str, Any]]) -> MetadataTable:
+        """
+        Construct a MetadataTable object representing the content of a portal database table. **For internal use only
+        by the portal API endpoint that handles requests for metadata table contents.**
+
+        Args:
+            name: The name of a table in the portal database.
+            table_rows: List of all rows retrieved from the database table.
+        Raises:
+            ValueError: If `table_rows` is empty or contains entries inconsistent with the schema of the underlying
+                database table, or if `name` is not recognized.
+        """
+        if not MetadataTable.is_supported_table_name(name):
+            raise ValueError('Table name/ID not recognized')
+
+        try:
+            if name == MetadataTable.SUBJECTS:
+                columns = ['Subject', 'Species', 'Date of Birth', 'Sex']
+                rows = [[r['subj_id'], r['species'], str(r['dob']), r['sex']] for r in table_rows]
+            elif name == MetadataTable.IMPLANTS:
+                columns = ['Subject', 'Date', 'Stereotaxic Coordinates (AP,ML,DV in mm); (AP \u03b8, ML \u03b8)']
+                rows = [[r['subj_id'], str(r['implant_date']),
+                         f"({r['st_ap']}, {r['st_ml']}, {r['st_dv']}); "
+                         f"({r['ap_angle']:.2f}, {r['ml_angle']:.2f})"] for r in table_rows]
+            elif name == MetadataTable.RIGS:
+                columns = ['Rig ID', 'Rig Location']
+                rows = [[r['rig_id'], r['rig_loc']] for r in table_rows]
+            elif name == MetadataTable.BRAIN_AREAS:
+                columns = ['Brain Area']
+                rows = [[r['ba_name']] for r in table_rows]
+            elif name == MetadataTable.NEURON_TYPES:
+                columns = ['Neuron Type']
+                rows = [[r['nt_name']] for r in table_rows]
+            else:  # MetadataTable.STUDIES
+                columns = ['Study Title', 'Lead', 'Description']
+                rows = [[r['study_title'], r['study_lead'], r['study_desc']] for r in table_rows]
+            return MetadataTable(dict(name=name, columns=columns, rows=rows))
+        except Exception:
+            raise ValueError("Invalid or unexpected database table content")
+
+    @property
+    def table_name(self) -> str:
+        """ The metadata table name, succinctly describing its purpose in the laboratory database. """
+        return self._info['name']
+
+    @property
+    def column_headings(self) -> List[str]:
+        """ The column headings for the metadata table. """
+        return self._info['columns'].copy()
+
+    @property
+    def rows(self) -> List[List[str]]:
+        """ The row contents of the metadata table. Each row contains a value for each table column. """
+        return [r.copy() for r in self._info['rows']]
+
+    def to_bytes(self) -> bytes:
+        """ Serialize this object to a byte sequence. """
+        out = dict(name=self._info['name'], columns=self._info['columns'], rows=self._info['rows'])
+        return json.dumps(out).encode()
+
+    @staticmethod
+    def from_bytes(raw: bytes) -> MetadataTable:
+        """ Reconstruct MetadataTable from a byte sequence previously generated by `to_bytes()`. """
+        info: Dict[str, Any] = json.loads(raw.decode())
+        return MetadataTable(info)
 
 
 class SessionInfo:
@@ -801,25 +965,27 @@ def serialize_api_response(route: str, **kwargs) -> bytes:
             any error occurs while serializing the response.
     """
     try:
-        if not (route in _KNOWN_ROUTES):
+        if not Route.is_supported_api(route):
             raise ValueError(f"Unsupported API endpoint: {route}")
         out = bytearray()
         hdr: Dict[str, Any] = dict(route=route, version=API_VERSION)
-        hdr_only = (route == ROUTE_AUTHENTICATE) or ('error' in kwargs)
+        hdr_only = (route == Route.AUTHENTICATE) or ('error' in kwargs)
         if hdr_only:
             if 'error' in kwargs:
                 hdr['error'] = kwargs['error']
             else:
                 hdr['token'], hdr['expires_in'] = kwargs['token'], kwargs['expires_in']
-        elif route == ROUTE_SESSIONINFO:
+        elif route == Route.SESSIONINFO:
             hdr['num_objects'] = len(kwargs['sessions'])
-        elif route == ROUTE_SESSION_NEURONS:
+        elif route == Route.SESSION_NEURONS:
             hdr['num_objects'] = len(kwargs['neurons'])
-        elif route == ROUTE_SESSION_PROTOCOLS:
+        elif route == Route.SESSION_PROTOCOLS:
             hdr['num_objects'] = len(kwargs['protocols'])
-        elif route == ROUTE_SESSION_TRIAL:
+        elif route == Route.SESSION_TRIAL:
             hdr['num_objects'] = 1
-        else:  # ROUTE_SESSION_BLOCK, ROUTE_PROTOCOL_REPS
+        elif route == Route.METADATA_TABLE:
+            hdr['num_objects'] = 1
+        else:  # Route.SESSION_BLOCK, .SESSION_PROTOCOL_REPS
             hdr['num_objects'] = len(kwargs['trials'])
         raw_hdr = json.dumps(hdr).encode()
         out.extend(struct.pack("<i", len(raw_hdr)))
@@ -827,30 +993,35 @@ def serialize_api_response(route: str, **kwargs) -> bytes:
         if hdr_only:
             return bytes(out)
 
-        if route == ROUTE_SESSIONINFO:
+        if route == Route.SESSIONINFO:
             session: SessionInfo
             for session in kwargs['sessions']:
                 raw_session = session.to_bytes()
                 out.extend(struct.pack("<i", len(raw_session)))
                 out.extend(raw_session)
-        elif route == ROUTE_SESSION_NEURONS:
+        elif route == Route.SESSION_NEURONS:
             neuron: NeuronInfo
             for neuron in kwargs['neurons']:
                 raw_neuron = neuron.to_bytes()
                 out.extend(struct.pack("<i", len(raw_neuron)))
                 out.extend(raw_neuron)
-        elif route == ROUTE_SESSION_PROTOCOLS:
+        elif route == Route.SESSION_PROTOCOLS:
             proto: Protocol
             for proto in kwargs['protocols']:
                 raw_proto = proto.to_bytes()
                 out.extend(struct.pack("<i", len(raw_proto)))
                 out.extend(raw_proto)
-        elif route == ROUTE_SESSION_TRIAL:
+        elif route == Route.SESSION_TRIAL:
             trial: TrialRep = kwargs['trial']
             raw_trial = trial.to_bytes()
             out.extend(struct.pack("<i", len(raw_trial)))
             out.extend(raw_trial)
-        else:  # ROUTE_SESSION_BLOCK, ROUTE_PROTOCOL_REPS
+        elif route == Route.METADATA_TABLE:
+            metatable: MetadataTable = kwargs['metatable']
+            raw_metatable = metatable.to_bytes()
+            out.extend(struct.pack("<i", len(raw_metatable)))
+            out.extend(raw_metatable)
+        else:  # Route.SESSION_BLOCK, .SESSION_PROTOCOL_REPS
             trial: TrialRep
             for trial in kwargs['trials']:
                 raw_trial = trial.to_bytes()
@@ -876,7 +1047,7 @@ def deserialize_api_response(route: str, raw: bytes) -> Dict[str, Any]:
             response dictionary, or if any error occurs during deserialization.
     """
     try:
-        if not (route in _KNOWN_ROUTES):
+        if not Route.is_supported_api(route):
             raise ValueError(f"Unsupported API endpoint: {route}")
         int_sz = struct.calcsize('<i')
         offset = 0
@@ -889,7 +1060,7 @@ def deserialize_api_response(route: str, raw: bytes) -> Dict[str, Any]:
             raise ValueError('Route mismatch in response!')
         elif resp['version'] != API_VERSION:
             raise ValueError(f"Invalid API version in response: {resp['version']}")
-        if route == ROUTE_AUTHENTICATE:
+        if route == Route.AUTHENTICATE:
             if not all([(k in resp) for k in ['token', 'expires_in']]):
                 raise KeyError(f"Missing one or more keys in response")
             return resp
@@ -897,10 +1068,10 @@ def deserialize_api_response(route: str, raw: bytes) -> Dict[str, Any]:
             return resp
         else:
             num_objects = resp['num_objects']
-            if num_objects < 0 or (route == ROUTE_SESSION_TRIAL and num_objects != 1):
+            if num_objects < 0 or ((route in [Route.SESSION_TRIAL, Route.METADATA_TABLE]) and num_objects != 1):
                 raise ValueError(f"Invalid number of objects returned in response")
 
-        if route == ROUTE_SESSIONINFO:
+        if route == Route.SESSIONINFO:
             session_list: List[SessionInfo] = list()
             for i in range(num_objects):
                 info_sz, = struct.unpack_from('<i', raw, offset)
@@ -908,7 +1079,7 @@ def deserialize_api_response(route: str, raw: bytes) -> Dict[str, Any]:
                 session_list.append(SessionInfo.from_bytes(raw[offset:offset+info_sz]))
                 offset += info_sz
             resp['sessions'] = session_list
-        elif route == ROUTE_SESSION_NEURONS:
+        elif route == Route.SESSION_NEURONS:
             neuron_list: List[NeuronInfo] = list()
             for i in range(num_objects):
                 info_sz, = struct.unpack_from('<i', raw, offset)
@@ -916,7 +1087,7 @@ def deserialize_api_response(route: str, raw: bytes) -> Dict[str, Any]:
                 neuron_list.append(NeuronInfo.from_bytes(raw[offset:offset+info_sz]))
                 offset += info_sz
             resp['neurons'] = neuron_list
-        elif route == ROUTE_SESSION_PROTOCOLS:
+        elif route == Route.SESSION_PROTOCOLS:
             protocol_list: List[Protocol] = list()
             for i in range(num_objects):
                 info_sz, = struct.unpack_from('<i', raw, offset)
@@ -924,12 +1095,17 @@ def deserialize_api_response(route: str, raw: bytes) -> Dict[str, Any]:
                 protocol_list.append(Protocol.from_bytes(raw[offset:offset+info_sz]))
                 offset += info_sz
             resp['protocols'] = protocol_list
-        elif route == ROUTE_SESSION_TRIAL:
+        elif route == Route.SESSION_TRIAL:
             info_sz, = struct.unpack_from('<i', raw, offset)
             offset += int_sz
             resp['trial'] = TrialRep.from_bytes(raw[offset:offset+info_sz])
             offset += info_sz
-        else:   # ROUTE_SESSION_BLOCK, ROUTE_PROTOCOL_REPS
+        elif route == Route.METADATA_TABLE:
+            info_sz, = struct.unpack_from('<i', raw, offset)
+            offset += int_sz
+            resp['metatable'] = MetadataTable.from_bytes(raw[offset:offset+info_sz])
+            offset += info_sz
+        else:   # Route.SESSION_BLOCK, .SESSION_PROTOCOL_REPS
             trial_list: List[TrialRep] = list()
             for i in range(num_objects):
                 info_sz, = struct.unpack_from('<i', raw, offset)

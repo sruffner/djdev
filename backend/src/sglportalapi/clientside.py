@@ -22,14 +22,13 @@ Author: saruffner
 """
 import time
 from datetime import date
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Tuple
 
 import requests
 from requests import RequestException
 
-from sglportalapi.data_containers import SessionInfo, NeuronInfo, ROUTE_AUTHENTICATE, ROUTE_SESSIONINFO, \
-    ROUTE_SESSION_NEURONS, ROUTE_SESSION_PROTOCOLS, TrialRep, ROUTE_SESSION_TRIAL, ROUTE_SESSION_BLOCK, \
-    ROUTE_PROTOCOL_REPS, deserialize_api_response, APISerializeError
+from sglportalapi.data_containers import SessionInfo, NeuronInfo, TrialRep, Route, deserialize_api_response, \
+    APISerializeError, MetadataTable
 from sglportalapi.maestro import Protocol
 
 _REQ_TIMEOUT_SECONDS: float = 20
@@ -76,12 +75,12 @@ class PortalAccessor:
                 return None  # already authenticated
 
         try:
-            response = requests.post(f"{self._base_url}{ROUTE_AUTHENTICATE}",
+            response = requests.post(f"{self._base_url}{Route.AUTHENTICATE}",
                                      json=dict(username=self._uname, password=self._pwd),
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
             if response.status_code == 200 or response.status_code == 400:
                 try:
-                    content = deserialize_api_response(ROUTE_AUTHENTICATE, response.content)
+                    content = deserialize_api_response(Route.AUTHENTICATE, response.content)
                     if response.status_code == 200:
                         self._token = content['token']
                         self._expires = time.time() + content['expires_in'] - 60
@@ -93,6 +92,39 @@ class PortalAccessor:
             return f"Authentication failed on server: [{response.status_code}] {response.reason}"
         except RequestException as e:
             return f"Authentication request failed on send: {str(e)}"
+
+    def metadata_table(self, table_name: str) -> Tuple[str, Optional[MetadataTable]]:
+        """
+        Retrieve the entire contents of one of the small "general information" tables in the portal database. These
+        tables contain information used to describe, categorize and search for experimental data sets, such as:
+        experiment subjects, subject implants, experiment rigs, research studies, neuron types, and brain areas. The
+        very large database tables storing experiment sessions, neural units, trial protocols, and recorded trial
+        response data are **not** exposed by this method.
+
+        Args:
+            table_name: Name of the metadata table requested. For a list of recognized table names, see
+                :py:class:`sglportalapi.data_containers.MetadataTable`.
+        Returns:
+            A 3-tuple (emsg, metatable). On failure, `emsg` is the error description and `metatable` is None. On
+                success, emsg is an empty string, and `metatable' encapsulates the requested table's contents.
+        """
+        if (out := self.authenticate()) is not None:
+            return out, None
+        req_body = dict(table=table_name)
+        try:
+            response = requests.post(f"{self._base_url}{Route.METADATA_TABLE}",
+                                     json=req_body,
+                                     headers={'Authorization': f"Bearer {self._token}"},
+                                     allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
+            content = deserialize_api_response(Route.METADATA_TABLE, response.content)
+            if response.status_code == 200:
+                return '', content['metatable']
+            else:
+                return f"Request failed on server [{response.status_code}]: {content['error']}", None
+        except APISerializeError as e:
+            return f"Failed to decode server response: {str(e)}", None
+        except RequestException as e:
+            return f"Request failed on send: {str(e)}", None
 
     def sessions(self, experimenter: Optional[str] = None, subject: Optional[str] = None,
                  when: Optional[str] = None) -> Union[str, List[SessionInfo]]:
@@ -125,11 +157,11 @@ class PortalAccessor:
                 raise ValueError("Arg 'when' must have the format '=|>|< YYYY-mm-dd'")
         req_body = dict(experimenter=experimenter, subj_id=subject, when=when)
         try:
-            response = requests.post(f"{self._base_url}{ROUTE_SESSIONINFO}",
+            response = requests.post(f"{self._base_url}{Route.SESSIONINFO}",
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = deserialize_api_response(ROUTE_SESSIONINFO, response.content)
+            content = deserialize_api_response(Route.SESSIONINFO, response.content)
             if response.status_code == 200:
                 return content['sessions']
             else:
@@ -159,11 +191,11 @@ class PortalAccessor:
             return out
         req_body = dict(session_key=session.primary_key, min_spikes=min_spikes, min_snr=min_snr)
         try:
-            response = requests.post(f"{self._base_url}{ROUTE_SESSION_NEURONS}",
+            response = requests.post(f"{self._base_url}{Route.SESSION_NEURONS}",
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = deserialize_api_response(ROUTE_SESSION_NEURONS, response.content)
+            content = deserialize_api_response(Route.SESSION_NEURONS, response.content)
             if response.status_code == 200:
                 return content['neurons']
             else:
@@ -187,11 +219,11 @@ class PortalAccessor:
             return out
         req_body = dict(session_key=session.primary_key)
         try:
-            response = requests.post(f"{self._base_url}{ROUTE_SESSION_PROTOCOLS}",
+            response = requests.post(f"{self._base_url}{Route.SESSION_PROTOCOLS}",
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = deserialize_api_response(ROUTE_SESSION_PROTOCOLS, response.content)
+            content = deserialize_api_response(Route.SESSION_PROTOCOLS, response.content)
             if response.status_code == 200:
                 return content['protocols']
             else:
@@ -222,11 +254,11 @@ class PortalAccessor:
         unit_ids = sorted([x for x in set(unit_ids)]) if isinstance(unit_ids, list) else []
         req_body = dict(session_key=session.primary_key, trial_index=trial_idx, unit_ids=unit_ids[0:5])
         try:
-            response = requests.post(f"{self._base_url}{ROUTE_SESSION_TRIAL}",
+            response = requests.post(f"{self._base_url}{Route.SESSION_TRIAL}",
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = deserialize_api_response(ROUTE_SESSION_TRIAL, response.content)
+            content = deserialize_api_response(Route.SESSION_TRIAL, response.content)
             if response.status_code == 200:
                 return content['trial']
             else:
@@ -259,11 +291,11 @@ class PortalAccessor:
         unit_ids = sorted([x for x in set(unit_ids)]) if isinstance(unit_ids, list) else []
         req_body = dict(session_key=session.primary_key, start=start, end=end, unit_ids=unit_ids[0:5])
         try:
-            response = requests.post(f"{self._base_url}{ROUTE_SESSION_BLOCK}",
+            response = requests.post(f"{self._base_url}{Route.SESSION_BLOCK}",
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = deserialize_api_response(ROUTE_SESSION_BLOCK, response.content)
+            content = deserialize_api_response(Route.SESSION_BLOCK, response.content)
             if response.status_code == 200:
                 return content['trials']
             else:
@@ -297,11 +329,11 @@ class PortalAccessor:
         req_body = dict(session_key=session.primary_key, proto_hash=proto.md5_digest, completed=completed,
                         unit_ids=unit_ids[0:5])
         try:
-            response = requests.post(f"{self._base_url}{ROUTE_PROTOCOL_REPS}",
+            response = requests.post(f"{self._base_url}{Route.SESSION_PROTOCOL_REPS}",
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = deserialize_api_response(ROUTE_PROTOCOL_REPS, response.content)
+            content = deserialize_api_response(Route.SESSION_PROTOCOL_REPS, response.content)
             if response.status_code == 200:
                 return content['trials']
             else:

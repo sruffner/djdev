@@ -9,3 +9,4 @@ environment/**
 discarded/**
 backend_mount/**
 dist/**
+**/sglportalapi.egg-info/**

@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.3.0 (07/21/2022)
+
+- Added method in `sglportalpi.PortalAccessor` to retrieve the contents of selected "metadata" tables in the
+portal database. 
+
 ## v0.2.0 (06/21/2022)
 
 - Eliminated use of the pickle module in serializing and deserializing API responses.

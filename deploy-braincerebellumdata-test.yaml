@@ -135,7 +135,7 @@ spec:
       - name: sgl-portal-pull-secret
       containers:
       - name: sgl-db
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel-b96e6d17
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel-6647871a
         imagePullPolicy: Always
         volumeMounts:
           - name: db-data
@@ -159,7 +159,7 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 5
       - name: sgl-redis
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel-b96e6d17
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel-6647871a
         imagePullPolicy: Always
         ports:
           - containerPort: 6379
@@ -210,7 +210,7 @@ spec:
             value: "6379"
       containers:
       - name: sgl-worker
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-b96e6d17
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-6647871a
         imagePullPolicy: Always
         command: ["rq"]
         args: ["worker", "--with-scheduler", "--url", "redis://$(REDIS_HOST):$(REDIS_PORT)"]
@@ -308,7 +308,7 @@ spec:
             value: data-store.braincerebellumdata-test.svc.cluster.local
       containers:
       - name: sgl-server
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-b96e6d17
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-6647871a
         imagePullPolicy: Always
         ports:
           - containerPort: 8050

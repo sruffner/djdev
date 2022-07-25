@@ -35,9 +35,7 @@ from flask import Response, request
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 
 from database.log_ops import log_api_request
-from sglportalapi.data_containers import SessionInfo, NeuronInfo, ROUTE_AUTHENTICATE, ROUTE_SESSIONINFO, \
-    ROUTE_SESSION_NEURONS, ROUTE_SESSION_PROTOCOLS, ROUTE_SESSION_TRIAL, ROUTE_SESSION_BLOCK, \
-    ROUTE_PROTOCOL_REPS, serialize_api_response
+from sglportalapi.data_containers import SessionInfo, NeuronInfo, Route, serialize_api_response, MetadataTable
 from app import app
 from config.config import get_config
 from sglportalapi.maestro import Protocol
@@ -47,7 +45,7 @@ from database.trial_data_ops import trial_protocols_for_session, retrieve_sessio
 from database.user_ops import authenticate_portal_user
 
 
-@app.server.route(ROUTE_AUTHENTICATE, methods=['POST'])
+@app.server.route(Route.AUTHENTICATE, methods=['POST'])
 def api_access() -> Tuple[Response, int]:
     """
     API access point to authenticate a user and obtain an access token for querying all other access points. The request
@@ -68,13 +66,80 @@ def api_access() -> Tuple[Response, int]:
         if err_msg is None:
             status_code, out = 200, dict(token=create_access_token(identity=dict(username=username)),
                                          expires_in=int(get_config().jwt_access_token_lifetime.total_seconds()))
-            log_api_request(route=ROUTE_AUTHENTICATE, username=username)
+            log_api_request(route=Route.AUTHENTICATE, username=username)
         else:
             status_code, out = 400, dict(error=f"Access denied - {err_msg}")
-    return Response(serialize_api_response(ROUTE_AUTHENTICATE, **out)), status_code
+    return Response(serialize_api_response(Route.AUTHENTICATE, **out)), status_code
 
 
-@app.server.route(ROUTE_SESSIONINFO, methods=['POST'])
+@app.server.route(Route.METADATA_TABLE, methods=['POST'])
+@jwt_required()
+def metadata_table() -> Tuple[Response, int]:
+    """
+    API access point that retrieves the contents of one of several small metadata tables in the portal database. These
+    tables contain information used to describe, categorize and search for experimental data sets, such as: experiment
+    subjects, subject implants, experiment rigs, research studies, neuron types, and brain areas. The very large
+    database tables storing experiment sessions, neural units, trial protocols, and recorded trial response data are
+    **not** exposed through this access point.
+
+    The request body is a JSONified dictionary with a single key identifying the information table requested:
+        * **table** = <table name>. Must be one of the recognized metadata table names.
+
+    The 'metatable' key in the response dictionary is a :py:class:`sglportalapi.data_containers.MetadataTable` object
+    encapsulating the table contents.
+
+    Returns:
+        Tuple with Flask Response object and HTML status code. On success, the status code is 200 and the response is
+            prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
+            and the response body is a serialized dictionary including the field 'error' (error description string).
+    """
+    table_name = request.json.get('table')
+    status_code, err_msg, metatable = _retrieve_metadata_table_entries(table_name)
+    out = dict(metatable=metatable) if status_code == 200 else dict(error=err_msg)
+    if status_code == 200:
+        log_api_request(route=Route.METADATA_TABLE, username=get_jwt_identity()['username'], table=table_name)
+    return Response(serialize_api_response(Route.METADATA_TABLE, **out)), status_code
+
+
+_METATABLE_NAME_TO_DB_TABLE = {
+    MetadataTable.SUBJECTS: ti.DBTable.SUBJECT,
+    MetadataTable.IMPLANTS: ti.DBTable.IMPLANT,
+    MetadataTable.RIGS: ti.DBTable.RIG,
+    MetadataTable.STUDIES: ti.DBTable.STUDY,
+    MetadataTable.NEURON_TYPES: ti.DBTable.NEURON_TYPE,
+    MetadataTable.BRAIN_AREAS: ti.DBTable.BRAIN_AREA
+}
+""" Maps metadata table nickname to actual database table ID. """
+
+
+def _retrieve_metadata_table_entries(table_name: str) -> Tuple[int, str, Optional[MetadataTable]]:
+    """
+    Helper method for metadata_table(). Handles the details of fetching the contents of the specified table from the
+    portal database and encapsulating the contents in a MetadataTable object for transfer to the client.
+
+    Args:
+        table_name: The name of the metadata table requested.
+
+    Returns:
+        A 3-tuple: (status, emsg, table). On failure, the `status` code is 400 (bad request) or 501 (internal server
+            error), `emsg` is an error description, and `table` is None. On success, the status code is 200, `emsg` is
+            an empty string, and `table` is the MetadataTable object.
+    """
+    if not MetadataTable.is_supported_table_name(table_name):
+        return 400, 'Metadata table name not recognized', None
+
+    table_rows = fetch_rows(_METATABLE_NAME_TO_DB_TABLE[table_name])
+    if table_rows is None:
+        return 501, "A database error occurred while fetching metadata table contents", None
+
+    try:
+        table = MetadataTable.from_database_rows(table_name, table_rows)
+        return 200, '', table
+    except ValueError as e:
+        return 501, f"Unable to prepare metadata table object: {str(e)}", None
+
+
+@app.server.route(Route.SESSIONINFO, methods=['POST'])
 @jwt_required()
 def sessions() -> Tuple[Response, int]:
     """
@@ -100,9 +165,9 @@ def sessions() -> Tuple[Response, int]:
     status_code, err_msg, session_list = _retrieve_session_info(experimenter, subj_id, when)
     out = dict(sessions=session_list) if status_code == 200 else dict(error=err_msg)
     if status_code == 200:
-        log_api_request(route=ROUTE_SESSIONINFO, username=get_jwt_identity()['username'],
+        log_api_request(route=Route.SESSIONINFO, username=get_jwt_identity()['username'],
                         experimenter=experimenter, subj_id=subj_id, when=when)
-    return Response(serialize_api_response(ROUTE_SESSIONINFO, **out)), status_code
+    return Response(serialize_api_response(Route.SESSIONINFO, **out)), status_code
 
 
 def _retrieve_session_info(experimenter: Optional[str], subj_id: Optional[str], when: Optional[str]) -> \
@@ -171,7 +236,7 @@ def _retrieve_session_info(experimenter: Optional[str], subj_id: Optional[str], 
     return 200, '', [SessionInfo(r) for r in rows]
 
 
-@app.server.route(ROUTE_SESSION_NEURONS, methods=['POST'])
+@app.server.route(Route.SESSION_NEURONS, methods=['POST'])
 @jwt_required()
 def session_neurons() -> Tuple[Response, int]:
     """
@@ -199,9 +264,9 @@ def session_neurons() -> Tuple[Response, int]:
     status_code, err_msg, neuron_list = _retrieve_session_neurons(session_key, min_spikes, min_snr)
     out = dict(neurons=neuron_list) if status_code == 200 else dict(error=err_msg)
     if status_code == 200:
-        log_api_request(route=ROUTE_SESSION_NEURONS, username=get_jwt_identity()['username'],
+        log_api_request(route=Route.SESSION_NEURONS, username=get_jwt_identity()['username'],
                         session_key=session_key, min_spikes=min_spikes, min_snr=min_snr)
-    return Response(serialize_api_response(ROUTE_SESSION_NEURONS, **out)), status_code
+    return Response(serialize_api_response(Route.SESSION_NEURONS, **out)), status_code
 
 
 def _retrieve_session_neurons(session_key: Dict[str, Any], min_spikes: Optional[int], min_snr: Optional[float]) -> \
@@ -249,7 +314,7 @@ def _retrieve_session_neurons(session_key: Dict[str, Any], min_spikes: Optional[
     return 200, '', [NeuronInfo(r) for r in rows]
 
 
-@app.server.route(ROUTE_SESSION_PROTOCOLS, methods=['POST'])
+@app.server.route(Route.SESSION_PROTOCOLS, methods=['POST'])
 @jwt_required()
 def session_protocols() -> Tuple[Response, int]:
     """
@@ -270,9 +335,9 @@ def session_protocols() -> Tuple[Response, int]:
     status_code, err_msg, proto_list = _retrieve_session_protocols(session_key)
     out = dict(protocols=proto_list) if status_code == 200 else dict(error=err_msg)
     if status_code == 200:
-        log_api_request(route=ROUTE_SESSION_PROTOCOLS, username=get_jwt_identity()['username'],
+        log_api_request(route=Route.SESSION_PROTOCOLS, username=get_jwt_identity()['username'],
                         session_key=session_key)
-    return Response(serialize_api_response(ROUTE_SESSION_PROTOCOLS, **out)), status_code
+    return Response(serialize_api_response(Route.SESSION_PROTOCOLS, **out)), status_code
 
 
 def _retrieve_session_protocols(session_key: Dict[str, Any]) -> Tuple[int, str, List[Protocol]]:
@@ -300,7 +365,7 @@ def _retrieve_session_protocols(session_key: Dict[str, Any]) -> Tuple[int, str, 
     return 200, '', out
 
 
-@app.server.route(ROUTE_SESSION_TRIAL, methods=['POST'])
+@app.server.route(Route.SESSION_TRIAL, methods=['POST'])
 @jwt_required()
 def session_trial() -> Tuple[Response, int]:
     """
@@ -335,12 +400,12 @@ def session_trial() -> Tuple[Response, int]:
     out = dict(trial=trial_rep) if status_code == 200 else dict(error=err_msg)
 
     if status_code == 200:
-        log_api_request(route=ROUTE_SESSION_TRIAL, username=get_jwt_identity()['username'],
+        log_api_request(route=Route.SESSION_TRIAL, username=get_jwt_identity()['username'],
                         session_key=session_key, trial_index=trial_index, unit_ids=unit_ids)
-    return Response(serialize_api_response(ROUTE_SESSION_TRIAL, **out)), status_code
+    return Response(serialize_api_response(Route.SESSION_TRIAL, **out)), status_code
 
 
-@app.server.route(ROUTE_SESSION_BLOCK, methods=['POST'])
+@app.server.route(Route.SESSION_BLOCK, methods=['POST'])
 @jwt_required()
 def session_block() -> Tuple[Response, int]:
     """
@@ -375,12 +440,12 @@ def session_block() -> Tuple[Response, int]:
     out = dict(trials=trial_list) if status_code == 200 else dict(error=err_msg)
 
     if status_code == 200:
-        log_api_request(route=ROUTE_SESSION_BLOCK, username=get_jwt_identity()['username'],
+        log_api_request(route=Route.SESSION_BLOCK, username=get_jwt_identity()['username'],
                         session_key=session_key, start=start, end=end, unit_ids=unit_ids)
-    return Response(serialize_api_response(ROUTE_SESSION_BLOCK, **out)), status_code
+    return Response(serialize_api_response(Route.SESSION_BLOCK, **out)), status_code
 
 
-@app.server.route(ROUTE_PROTOCOL_REPS, methods=['POST'])
+@app.server.route(Route.SESSION_PROTOCOL_REPS, methods=['POST'])
 @jwt_required()
 def session_protocol_reps() -> Tuple[Response, int]:
     """
@@ -417,6 +482,6 @@ def session_protocol_reps() -> Tuple[Response, int]:
     out = dict(trials=trial_list) if status_code == 200 else dict(error=err_msg)
 
     if status_code == 200:
-        log_api_request(route=ROUTE_PROTOCOL_REPS, username=get_jwt_identity()['username'],
+        log_api_request(route=Route.SESSION_PROTOCOL_REPS, username=get_jwt_identity()['username'],
                         session_key=session_key, proto_hash=proto_hash, completed=completed, unit_ids=unit_ids)
-    return Response(serialize_api_response(ROUTE_PROTOCOL_REPS, **out)), status_code
+    return Response(serialize_api_response(Route.SESSION_PROTOCOL_REPS, **out)), status_code

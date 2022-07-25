@@ -28,8 +28,7 @@ from app import PortalUser, load_authorized_user
 
 import database.table_info as ti
 from database.log_ops import read_log_entries
-from sglportalapi.data_containers import ROUTE_SESSIONINFO, ROUTE_SESSION_NEURONS, ROUTE_SESSION_PROTOCOLS, \
-    ROUTE_SESSION_TRIAL, ROUTE_SESSION_BLOCK, ROUTE_PROTOCOL_REPS, ROUTE_AUTHENTICATE
+from sglportalapi.data_containers import Route
 
 _API_LOG_TABLE_ID: str = "api-log-table"
 """ ID of Dash DataTable listing all entries read from the API requests log. """
@@ -62,28 +61,31 @@ def _fetch_api_requests_log() -> Union[str, List[Dict[str, str]]]:
         route = entry['route']
         if route == '/api_client':
             desc, params = 'API client package download', ''
-        elif route == ROUTE_AUTHENTICATE:
+        elif route == Route.AUTHENTICATE:
             desc, params = 'API access granted', ''
-        elif route == ROUTE_SESSIONINFO:
+        elif route == Route.SESSIONINFO:
             desc = "**sessions**"
             params = f"**experimenter**={entry['experimenter']}, **subj_id**={entry['subj_id']}, " \
                      f"**when**={entry['when']}"
+        elif route == Route.METADATA_TABLE:
+            desc = f"**metadata_table**"
+            params = f"**table**={entry['table']}"
         else:
             session_key = f"**session**={entry['session_key']}"
-            if route == ROUTE_SESSION_NEURONS:
+            if route == Route.SESSION_NEURONS:
                 desc = "**session_neurons**"
                 params = f"{session_key}, **min_spikes**={entry['min_spikes']}, **min_snr**={entry['min_snr']}"
-            elif route == ROUTE_SESSION_PROTOCOLS:
+            elif route == Route.SESSION_PROTOCOLS:
                 desc = f"**session_protocols**"
                 params = f"{session_key}"
-            elif route == ROUTE_SESSION_TRIAL:
+            elif route == Route.SESSION_TRIAL:
                 desc = f"**session_trial**"
                 params = f"{session_key}, **trial_index**={entry['trial_index']}, **unit_ids**={entry['unit_ids']}"
-            elif route == ROUTE_SESSION_BLOCK:
+            elif route == Route.SESSION_BLOCK:
                 desc = f"**session_trial_block**"
                 params = f"{session_key}, **start**={entry['start']}, **end**={entry['end']}, " \
                          f"**unit_ids**={entry['unit_ids']}"
-            elif route == ROUTE_PROTOCOL_REPS:
+            elif route == Route.SESSION_PROTOCOL_REPS:
                 desc = f"**session_protocol_reps**"
                 params = f"{session_key}, **proto_hash**={entry['proto_hash']}, **completed**={entry['completed']}, " \
                          f"**unit_ids**={entry['unit_ids']}"
