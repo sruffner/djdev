@@ -18,7 +18,7 @@ consider a large Omniplex file containing 200,000,000 samples recorded on each o
 
 I have also made some cosmetic changes such as docstrings and some type annotations.
 
-@author sruffner
+25jul2022 - Updated to reflect changes David H made to handle PL2 software version 1.19.2
 """
 
 import struct
@@ -48,6 +48,7 @@ PL2_HEADER_EVENT_CHANNEL = 0xD6
 # Data subtypes
 PL2_ANALOG_TYPE_WB = 0x03
 PL2_ANALOG_TYPE_AI = 0x0C
+PL2_ANALOG_TYPE_AI2 = 0x0D  # New in PL version 1.19.2 --- not sure why
 PL2_ANALOG_TYPE_FP = 0x07
 PL2_ANALOG_TYPE_SPKC = 0x04
 PL2_EVENT_TYPE_SINGLE_BIT = 0x09
@@ -91,7 +92,7 @@ def load_file_information(fp: IO) -> Dict[str, Any]:
     for i in range(0, data["number_of_event_channels"]):
         data["event_channels"].append(_read_event_channel_header(fp))
 
-    if data["internal_value_3"] != 0 and data["internal_value_4"] != 0:
+    if data["internal_value_4"] != 0:
         _read_footer(fp, data)
     else:
         _reconstruct_footer(fp, data)
@@ -619,41 +620,43 @@ def _read_event_channel_header(fp: IO):
     return data
 
 
-def _get_channel_offset(data: Dict[str, Any], data_subtype: int) -> int:
+def _get_channel_offset(data: Dict[str, Any], data_subtype: int, channel_number: int) -> int:
     """
     Return the offset in the type of channel given the data subtype.
+
     Args:
         data: Dictionary holding PL2 file contents culled thus far.
-        data_subtype: The channel data subtype. Must be one of PL2_ANALOG_TYPE_WB, _AI, _FP, _SPKC;
+        data_subtype: The channel data subtype. Must be one of PL2_ANALOG_TYPE_WB, _AI, _AI2, _FP, _SPKC;
             PL2_EVENT_TYPE_SINGLE_BIT, _STROBED; PL2_SPIKE_TYPE_SPK, or PL2_SPIKE_TYPE_SPK_SPKC.
-
+        channel_number: The channel index.
     Returns:
         The offset value
     """
+    channel = str(channel_number).zfill(2)
     if data_subtype == PL2_ANALOG_TYPE_WB:
         offset = next(x for x in range(len(data["analog_channels"]))
-                      if data["analog_channels"][x]["source_name"] == "WB")
-    elif data_subtype == PL2_ANALOG_TYPE_AI:
+                      if data["analog_channels"][x]["name"] == ("WB" + channel))
+    elif (data_subtype == PL2_ANALOG_TYPE_AI) or (data_subtype == PL2_ANALOG_TYPE_AI2):
         offset = next(x for x in range(len(data["analog_channels"]))
-                      if data["analog_channels"][x]["source_name"] == "AI")
+                      if data["analog_channels"][x]["name"] == ("AI" + channel))
     elif data_subtype == PL2_ANALOG_TYPE_FP:
         offset = next(x for x in range(len(data["analog_channels"]))
-                      if data["analog_channels"][x]["source_name"] == "FP")
+                      if data["analog_channels"][x]["name"] == ("FP" + channel))
     elif data_subtype == PL2_ANALOG_TYPE_SPKC:
         offset = next(x for x in range(len(data["analog_channels"]))
-                      if data["analog_channels"][x]["source_name"] == "SPKC")
+                      if data["analog_channels"][x]["name"] == ("SPKC" + channel))
     elif data_subtype == PL2_EVENT_TYPE_SINGLE_BIT:
         offset = next(x for x in range(len(data["event_channels"]))
-                      if data["event_channels"][x]["source_name"] == "Single-bit events")
+                      if data["event_channels"][x]["name"] == ("EVT" + channel))
     elif data_subtype == PL2_EVENT_TYPE_STROBED:
         offset = next(x for x in range(len(data["event_channels"]))
-                      if data["event_channels"][x]["source_name"] == "Other events")
+                      if data["event_channels"][x]["name"] == "Strobed")
     elif data_subtype == PL2_SPIKE_TYPE_SPK:
         offset = next(x for x in range(len(data["spike_channels"]))
-                      if data["spike_channels"][x]["source_name"] == "SPK")
+                      if data["spike_channels"][x]["name"] == ("SPK" + channel))
     elif data_subtype == PL2_SPIKE_TYPE_SPK_SPKC:
         offset = next(x for x in range(len(data["spike_channels"]))
-                      if data["spike_channels"][x]["source_name"] == "SPK_SPKC")
+                      if data["spike_channels"][x]["name"] == ("SPK_SPKC" + channel))
     elif data_subtype == 0x00:
         offset = 0
     else:
@@ -664,6 +667,7 @@ def _get_channel_offset(data: Dict[str, Any], data_subtype: int) -> int:
 def _read_footer(fp: IO, data: Dict[str, Any]) -> None:
     """
     Parse the PL2 file's footer and add its contents to the data dictionary provided.
+
     Args:
         fp: The PL2 file object.
         data: The data/information dictionary culled from the file thus far. The footer contents are added to this. At a
@@ -675,12 +679,9 @@ def _read_footer(fp: IO, data: Dict[str, Any]) -> None:
         data_type = _read(fp, "<B")
         data_subtype = _read(fp, "<B")
 
-        # Get the offset for this type of data
-        offset = _get_channel_offset(data, data_subtype)
-
         # All items are stored as the following
         num_words = _read(fp, "<H")
-        channel = _read(fp, "<H") + offset - 1  # Python is base 0
+        channel = _get_channel_offset(data, data_subtype, _read(fp, "<H"))
         _read(fp, "<H")  # Skipped
 
         # Determine how many items we have based on the number of words
@@ -718,6 +719,7 @@ def _read_footer(fp: IO, data: Dict[str, Any]) -> None:
 def _reconstruct_footer(fp, data: Dict[str, Any]) -> None:
     """
     Given a PL2 file without a footer, attempt to reconstruct the footer by parsing individual data records.
+
     Args:
         fp: The PL2 file object. It must be open and is NOT closed upon return.
         data: The data/information dictionary culled from the file thus far. Fields of the reconstructed footer will be
@@ -734,11 +736,10 @@ def _reconstruct_footer(fp, data: Dict[str, Any]) -> None:
         block_offset = fp.tell()
         data_type = _read(fp, "<B")
         data_subtype = _read(fp, "<B")
-        offset = _get_channel_offset(data, data_subtype)
 
         if data_type == PL2_DATA_BLOCK_ANALOG_CHANNEL:
             num_items = _read(fp, "<H")
-            channel = _read(fp, "<H") + offset - 1
+            channel = _get_channel_offset(data, data_subtype, _read(fp, "<H"))  # Python is base 0
             _read(fp, "<H")  # Unknown
             timestamp = _read(fp, "<Q")
 
@@ -751,7 +752,7 @@ def _reconstruct_footer(fp, data: Dict[str, Any]) -> None:
             fp.seek(2 * num_items, os.SEEK_CUR)
         elif data_type == PL2_DATA_BLOCK_SPIKE_CHANNEL:
             _read(fp, "<H")
-            channel = _read(fp, "<H") + offset - 1
+            channel = _get_channel_offset(data, data_subtype, _read(fp, "<H"))  # Python is base 0
             num_sample_points = _read(fp, "<H")
             num_items = _read(fp, "<Q")
 
@@ -770,7 +771,7 @@ def _reconstruct_footer(fp, data: Dict[str, Any]) -> None:
             fp.seek(2 * num_items + 2 * num_sample_points * num_items + (num_items - 1) * 8, os.SEEK_CUR)
         elif data_type == PL2_DATA_BLOCK_EVENT_CHANNEL:
             _read(fp, "<H")
-            channel = _read(fp, "<H") + offset - 1
+            channel = _get_channel_offset(data, data_subtype, _read(fp, "<H"))  # Python is base 0
             num_items = _read(fp, "<Q")
             _read(fp, "<H")
             timestamp = _read(fp, "<Q")
