@@ -58,39 +58,7 @@ def _fetch_api_requests_log() -> Union[str, List[Dict[str, str]]]:
 
     rows = list()
     for entry in reversed(entries):
-        route = entry['route']
-        if route == '/api_client':
-            desc, params = 'API client package download', ''
-        elif route == Route.AUTHENTICATE:
-            desc, params = 'API access granted', ''
-        elif route == Route.SESSIONINFO:
-            desc = "**sessions**"
-            params = f"**experimenter**={entry['experimenter']}, **subj_id**={entry['subj_id']}, " \
-                     f"**when**={entry['when']}"
-        elif route == Route.METADATA_TABLE:
-            desc = f"**metadata_table**"
-            params = f"**table**={entry['table']}"
-        else:
-            session_key = f"**session**={entry['session_key']}"
-            if route == Route.SESSION_NEURONS:
-                desc = "**session_neurons**"
-                params = f"{session_key}, **min_spikes**={entry['min_spikes']}, **min_snr**={entry['min_snr']}"
-            elif route == Route.SESSION_PROTOCOLS:
-                desc = f"**session_protocols**"
-                params = f"{session_key}"
-            elif route == Route.SESSION_TRIAL:
-                desc = f"**session_trial**"
-                params = f"{session_key}, **trial_index**={entry['trial_index']}, **unit_ids**={entry['unit_ids']}"
-            elif route == Route.SESSION_BLOCK:
-                desc = f"**session_trial_block**"
-                params = f"{session_key}, **start**={entry['start']}, **end**={entry['end']}, " \
-                         f"**unit_ids**={entry['unit_ids']}"
-            elif route == Route.SESSION_PROTOCOL_REPS:
-                desc = f"**session_protocol_reps**"
-                params = f"{session_key}, **proto_hash**={entry['proto_hash']}, **completed**={entry['completed']}, " \
-                         f"**unit_ids**={entry['unit_ids']}"
-            else:
-                desc, params = "unknown", ""
+        desc, params = Route.describe_api_request(entry)
         timestamp = datetime.fromisoformat(entry['ts']).isoformat(sep=' ', timespec='seconds')
         rows.append(dict(uname=f"***{entry['username']}***", ts=timestamp, desc=desc, params=params))
 

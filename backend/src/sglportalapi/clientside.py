@@ -342,3 +342,66 @@ class PortalAccessor:
             return f"Failed to decode server response: {str(e)}"
         except RequestException as e:
             return f"Request failed on send: {str(e)}"
+
+    def neurons(self, min_spikes: Optional[int] = None, min_snr: Optional[float] = None,
+                min_rate: Optional[float] = None, neuron_type: Optional[str] = None, subj_id: Optional[str] = None,
+                study_title: Optional[str] = None, proto: Optional[Protocol] = None,
+                min_complete: Optional[int] = None) -> Union[str, List[NeuronInfo]]:
+        """
+        Search the portal database for all neurons that satisfy zero or more filter criteria. The available filtering
+        constraints allow for a wide variety of searches, for example:
+         - Find all neural units recorded in a specific experiment subject.
+         - Find all neural units with a measured mean firing rate of at least 10Hz that were recorded in any experiment
+           belonging to a specified research study.
+         - Find all neural units recorded during at least 10 successfully completed reps of a specified trial protocol.
+
+        If you specify no criteria at all, the method will return information on every neural unit currently stored in
+        the portal database. Neuron type, subject ID, and research study title are metadata that can be queried via
+        `metadata_table()` method. Trial protocols for a particular experiment session can be retrieved via
+        `session_protocols()`.
+
+        Args:
+            min_spikes: If not None, include only those units with a total number of recorded spikes >= this value.
+            min_snr: If not None, include only those units with SNR >= this value.
+            min_rate: If not None, include only those units with mean firing rate >= this value.
+            neuron_type: If not None, include only those units classified as this neuron type.
+            subj_id: If not None, include only neural units recorded in this experiment subject.
+            study_title: If not None, include only neural units recorded as a part of this research study.
+            proto: If not None, include only neural units with trial responses recorded for this trial protocol.
+            min_complete: If not None AND a trial protocol is specified, include only neural units for which response
+                data is available from at least this many successfully completed reps of the specified trial protocol.
+        Returns:
+            If successful, a list (possibly empty) of neuron information records -- one for each neural unit in the
+                portal database that satisfies all specified filter constraints. If the operation fails, returns an
+                error message.
+        Raises:
+            ValueError:
+                If any of the numeric arguments are not strictly positive.
+        """
+        try:
+            for x in [min_spikes, min_snr, min_rate, min_complete]:
+                if (x is not None) and (x <= 0):
+                    raise ValueError("All numeric arguments must be strictly positive")
+        except Exception:
+            raise ValueError("Invalid type for numeric argument")
+
+        if (out := self.authenticate()) is not None:
+            return out
+
+        req_body = dict(min_spikes=min_spikes, min_snr=min_snr, min_rate=min_rate, neuron_type=neuron_type,
+                        subj_id=subj_id, study_title=study_title, proto_hash=proto.md5_digest if proto else None,
+                        min_complete=min_complete)
+        try:
+            response = requests.post(f"{self._base_url}{Route.NEURONS}",
+                                     json=req_body,
+                                     headers={'Authorization': f"Bearer {self._token}"},
+                                     allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
+            content = deserialize_api_response(Route.NEURONS, response.content)
+            if response.status_code == 200:
+                return content['neurons']
+            else:
+                return f"Request failed on server [{response.status_code}]: {content['error']}"
+        except APISerializeError as e:
+            return f"Failed to decode server response: {str(e)}"
+        except RequestException as e:
+            return f"Request failed on send: {str(e)}"

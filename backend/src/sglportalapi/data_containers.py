@@ -50,6 +50,7 @@ class Route:
        during an experiment session.
      - `Route.METADATA_TABLE`: API route to retrieve the contents of one of the small metadata tables in the portal
        database.
+     - `Route.NEURONS`: API route to search portal database for comparable neural units satisfying a set of filters.
     """
     AUTHENTICATE: Final[str] = '/api'
     SESSIONINFO: Final[str] = '/api/sessions'
@@ -59,10 +60,11 @@ class Route:
     SESSION_BLOCK: Final[str] = '/api/session/block'
     SESSION_PROTOCOL_REPS: Final[str] = '/api/session/protocol/reps'
     METADATA_TABLE: Final[str] = '/api/metadata'
+    NEURONS: Final[str] = '/api/neurons'
 
     _KNOWN_ROUTES: List[str] = [
         AUTHENTICATE, SESSIONINFO, SESSION_NEURONS, SESSION_PROTOCOLS,
-        SESSION_TRIAL, SESSION_BLOCK, SESSION_PROTOCOL_REPS, METADATA_TABLE
+        SESSION_TRIAL, SESSION_BLOCK, SESSION_PROTOCOL_REPS, METADATA_TABLE, NEURONS
     ]
     """ List of all supported API routes. """
 
@@ -77,6 +79,63 @@ class Route:
             True for a valid API enpoint; else False.
         """
         return route in cls._KNOWN_ROUTES
+
+    @classmethod
+    def describe_api_request(cls, entry: Dict[str, Any]) -> Tuple[str, str]:
+        """
+        Provide a descriptor and parameter list for a logged API request.
+
+        Args:
+            entry: An API request log entry.
+
+        Returns:
+            A 2-tuple (R, P) containing a brief descriptor of the API request R and the list P of parameters that were
+                part of the request. Both strings R and P are formatted in markdown text as they are intended for
+                web browser display. For most API routes, the request R is the name of the clientside method that
+                targets that route. Returns ('unknown', '') if log entry is invalid.
+        """
+        desc, params = 'unknown', ''
+        try:
+            route = entry['route']
+            if route == '/api_client':
+                desc, params = 'API client package download', ''
+            elif route == cls.AUTHENTICATE:
+                desc, params = 'API access granted', ''
+            elif route == cls.SESSIONINFO:
+                desc = "**sessions**"
+                params = f"**experimenter**={entry['experimenter']}, **subj_id**={entry['subj_id']}, " \
+                         f"**when**={entry['when']}"
+            elif route == cls.METADATA_TABLE:
+                desc = f"**metadata_table**"
+                params = f"**table**={entry['table']}"
+            elif route == cls.NEURONS:
+                desc = f"**neurons**"
+                params = f"**min_spikes**={entry['min_spikes']}, **min_snr**={entry['min_snr']}, " \
+                         f"**min_rate**={entry['min_rate']}, **neuron_type**={entry['neuron_type']}, " \
+                         f"**subj_id**={entry['subj_id']}, **study_title**={entry['study_title']}, " \
+                         f"**proto_hash**={entry['proto_hash']}, **min_complete**={entry['min_complete']}"
+            else:
+                session_key = f"**session**={entry['session_key']}"
+                if route == cls.SESSION_NEURONS:
+                    desc = "**session_neurons**"
+                    params = f"{session_key}, **min_spikes**={entry['min_spikes']}, **min_snr**={entry['min_snr']}"
+                elif route == cls.SESSION_PROTOCOLS:
+                    desc = f"**session_protocols**"
+                    params = f"{session_key}"
+                elif route == cls.SESSION_TRIAL:
+                    desc = f"**session_trial**"
+                    params = f"{session_key}, **trial_index**={entry['trial_index']}, **unit_ids**={entry['unit_ids']}"
+                elif route == cls.SESSION_BLOCK:
+                    desc = f"**session_trial_block**"
+                    params = f"{session_key}, **start**={entry['start']}, **end**={entry['end']}, " \
+                             f"**unit_ids**={entry['unit_ids']}"
+                elif route == cls.SESSION_PROTOCOL_REPS:
+                    desc = f"**session_protocol_reps**"
+                    params = f"{session_key}, **proto_hash**={entry['proto_hash']}, " \
+                             f"**completed**={entry['completed']}, **unit_ids**={entry['unit_ids']}"
+        except Exception:
+            pass
+        return desc, params
 
 
 class MetadataTable:
@@ -977,7 +1036,7 @@ def serialize_api_response(route: str, **kwargs) -> bytes:
                 hdr['token'], hdr['expires_in'] = kwargs['token'], kwargs['expires_in']
         elif route == Route.SESSIONINFO:
             hdr['num_objects'] = len(kwargs['sessions'])
-        elif route == Route.SESSION_NEURONS:
+        elif (route == Route.SESSION_NEURONS) or (route == Route.NEURONS):
             hdr['num_objects'] = len(kwargs['neurons'])
         elif route == Route.SESSION_PROTOCOLS:
             hdr['num_objects'] = len(kwargs['protocols'])
@@ -999,7 +1058,7 @@ def serialize_api_response(route: str, **kwargs) -> bytes:
                 raw_session = session.to_bytes()
                 out.extend(struct.pack("<i", len(raw_session)))
                 out.extend(raw_session)
-        elif route == Route.SESSION_NEURONS:
+        elif (route == Route.SESSION_NEURONS) or (route == Route.NEURONS):
             neuron: NeuronInfo
             for neuron in kwargs['neurons']:
                 raw_neuron = neuron.to_bytes()
@@ -1079,7 +1138,7 @@ def deserialize_api_response(route: str, raw: bytes) -> Dict[str, Any]:
                 session_list.append(SessionInfo.from_bytes(raw[offset:offset+info_sz]))
                 offset += info_sz
             resp['sessions'] = session_list
-        elif route == Route.SESSION_NEURONS:
+        elif (route == Route.SESSION_NEURONS) or (route == Route.NEURONS):
             neuron_list: List[NeuronInfo] = list()
             for i in range(num_objects):
                 info_sz, = struct.unpack_from('<i', raw, offset)

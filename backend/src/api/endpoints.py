@@ -39,7 +39,7 @@ from sglportalapi.data_containers import SessionInfo, NeuronInfo, Route, seriali
 from app import app
 from config.config import get_config
 from sglportalapi.maestro import Protocol
-from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_any_proj
+from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_any_proj, row_exists
 import database.table_info as ti
 from database.trial_data_ops import trial_protocols_for_session, retrieve_session_trial_rep, retrieve_session_trial_reps
 from database.user_ops import authenticate_portal_user
@@ -485,3 +485,141 @@ def session_protocol_reps() -> Tuple[Response, int]:
         log_api_request(route=Route.SESSION_PROTOCOL_REPS, username=get_jwt_identity()['username'],
                         session_key=session_key, proto_hash=proto_hash, completed=completed, unit_ids=unit_ids)
     return Response(serialize_api_response(Route.SESSION_PROTOCOL_REPS, **out)), status_code
+
+
+@app.server.route(Route.NEURONS, methods=['POST'])
+@jwt_required()
+def neurons() -> Tuple[Response, int]:
+    """
+    API access point that searches the portal database, across all experiment sessions, for any neural units satisfying
+    a set of criteria. The request body is a JSONified dictionary defining the filtering criteria:
+     - min_spikes = None | int. Include only those units with a total number of recorded spikes >= this value.
+     - min_snr = None | float. Include only those units with SNR >= this value.
+     - min_rate = None | float. Include only those units with mean firing rate >= this value.
+     - neuron_type = None | str. Include only those units classified as this neuron type.
+     - subj_id = None | str. Include only neural units recorded in this experiment subject.
+     - study_title = None | str. Include only neural units recorded as a part of this research study.
+     - proto_hash = None | str. Include only neural units with trial responses recorded for this trial protocol.
+     - min_complete = None | int. Ignored unless proto_hash is specified. Otherwise, include only neural units for
+       which response data is available from at least this many successfully completed reps of the specified trial
+       protocol.
+
+    If successful, the response is a serialized dictionary including the field 'neurons', a list of
+    :py:class:`api.data_containers.NeuronInfo` objects, each of which contains summary info on a recorded neural unit
+    that satisifes the specified filter criteria. An empty list is returned if no neuron in the database satisfies the
+    criteria. **If NO criteria are specified, this method will return information on every neural unit in the
+    database!**
+
+    Returns:
+        Tuple with Flask Response object and HTML status code. On success, the status code is 200 and the response is
+            prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
+            and the response body is a serialized dictionary including the field 'error' = <error description string>.
+    """
+    min_spikes = request.json.get('min_spikes')
+    min_snr = request.json.get('min_snr')
+    min_rate = request.json.get('min_rate')
+    neuron_type = request.json.get('neuron_type')
+    subj_id = request.json.get('subj_id')
+    study_title = request.json.get('study_title')
+    proto_hash = request.json.get('proto_hash')
+    min_complete = request.json.get('min_complete')
+
+    status_code, err_msg, neuron_list = _retrieve_neurons(min_spikes, min_snr, min_rate, neuron_type, subj_id,
+                                                          study_title, proto_hash, min_complete)
+    out = dict(neurons=neuron_list) if status_code == 200 else dict(error=err_msg)
+    if status_code == 200:
+        log_api_request(route=Route.NEURONS, username=get_jwt_identity()['username'], min_spikes=min_spikes,
+                        min_snr=min_snr, min_rate=min_rate, neuron_type=neuron_type, subj_id=subj_id,
+                        study_title=study_title, proto_hash=proto_hash, min_complete=min_complete)
+    return Response(serialize_api_response(Route.NEURONS, **out)), status_code
+
+
+def _retrieve_neurons(min_spikes: Optional[int], min_snr: Optional[float], min_rate: Optional[float],
+                      neuron_type: Optional[str], subj_id: Optional[str], study_title: Optional[str],
+                      proto_hash: Optional[str], min_complete: Optional[int]) -> Tuple[int, str, List[NeuronInfo]]:
+    """
+    Helper method for neurons(). Handles the details of fetching information from the portal database IAW the
+    restrictions specified and preparing the list of neuron information objects (which could be an empty one) to be
+    returned to the client.
+
+    Args:
+        min_spikes: If not None, restrict to neurons for which total # of recorded spikes >= this value.
+        min_snr: If not None, restrict to neurons for which estimated signal-to-noise ratio >= this value.
+        min_rate: If not None, restrict to neurons for which mean firing rate >= this value.
+        neuron_type: If not None, restrict to neurons classified as this neuron type.
+        subj_id: If not None, restrict to neurons recorded in this experiment subject.
+        study_title: If not None, restrict to neurons recorded in experiments for this research study.
+        proto_hash: If not None, restrict to neurons recorded during one or more reps of this trial protocol.
+        min_complete: If not None AND a protocol is specified, restrict to neurons recorded during at least this many
+            successfully completed reps of the specified protocol.
+
+    Returns:
+        A 3-tuple: (HTTP response status code, error description string, neuron list). On failure, the status code is
+            400 (bad request) or 501 (internal server error), an error description is provided, and the neuron list
+            is empty. On success: (200, '', neuron list).
+    """
+    # need neuron type map in order to prepare response and to possibly filter on neuron type
+    neuron_type_rows = fetch_rows(ti.DBTable.NEURON_TYPE)
+    if neuron_type_rows is None:
+        return 501, f"A database error occurred while fetching neuron types metadata", []
+    nt_name_to_id: Dict[str, int] = {r['nt_name']: r['nt_id'] for r in neuron_type_rows}
+    nt_id_to_name: Dict[int, str] = {r['nt_id']: r['nt_name'] for r in neuron_type_rows}
+
+    neuron_restrictions = list()
+    session_restriction = None
+    if isinstance(min_spikes, (float, int)):
+        neuron_restrictions.append(f"unit_spikes >= {int(min_spikes)}")
+    if isinstance(min_snr, (float, int)):
+        neuron_restrictions.append(f"unit_snr >= {float(min_snr)}")
+    if isinstance(min_rate, (float, int)):
+        neuron_restrictions.append(f"unit_rate >= {float(min_rate)}")
+    if isinstance(subj_id, str):
+        neuron_restrictions.append(f"subj_id = '{subj_id}'")
+    if isinstance(neuron_type, str):
+        if not (neuron_type in nt_name_to_id):
+            return 400, f"Invalid neuron type specified: {neuron_type}", []
+        neuron_restrictions.append(f"unit_type = {nt_name_to_id[neuron_type]}")
+    if isinstance(study_title, str):
+        studies = fetch_restrict_proj([ti.DBTable.STUDY], [[f"study_title = '{study_title}'"]], None)
+        if studies is None:
+            return 501, f"A database error occurred while fetching research studies metadata", []
+        elif len(studies) == 0:
+            return 400, f"Research study '{study_title}' not found in database.", []
+        else:
+            session_restriction = [f"study_id = {studies[0]['study_id']}"]
+
+    # fetch all Session.Neurons satisfying the constraints set up thus far.
+    rows = fetch_restrict_proj([ti.DBTable.SESSION_NEURON, ti.DBTable.SESSION],
+                               [neuron_restrictions, session_restriction], [])
+    if rows is None:
+        return 501, f"A database error occurred while fetching filtered set of neural units", []
+
+    # further restrict to neural units with responses recorded to reps of specified trial protocol
+    if isinstance(proto_hash, str):
+        if not row_exists(ti.DBTable.TRIAL_PROTOCOL, dict(proto_hash=proto_hash)):
+            return 400, f"Specified trial protocol not found in database.", []
+        trial_restrictions = dict(proto_hash=proto_hash)
+        min_reps = 1
+        if isinstance(min_complete, int):
+            trial_restrictions['trial_success'] = True
+            min_reps = max(1, min_complete)
+        accepted_rows = list()
+        for r in rows:
+            neuron_pk = {k: r[k] for k in ti.primary_key_of(ti.DBTable.SESSION_NEURON, False)}
+            reps = fetch_restrict_proj([ti.DBTable.TRIAL, ti.DBTable.TRIAL_NEURONAL], [trial_restrictions, neuron_pk])
+            if reps is None:
+                return 501, "A database error occurred while fetching protocol reps for a neural unit", []
+            if len(reps) >= min_reps:
+                accepted_rows.append(r)
+    else:
+        accepted_rows = rows
+
+    # for each Session.Neuron record in the result, replace neuron type ID with the human readable name, and convert the
+    # session date to an ISO formatted string 'YYYY-MM-DD'
+    for r in accepted_rows:
+        r['neuron_type'] = nt_id_to_name[r['unit_type']]
+        r.pop('unit_type', None)
+        if isinstance(r['session_date'], date):
+            r['session_date'] = r['session_date'].isoformat()
+
+    return 200, '', [NeuronInfo(r) for r in accepted_rows]
