@@ -40,7 +40,6 @@ from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_attribute_
 from database.trial_data_ops import trial_protocols_for_session, trial_protocols_for_neuron, trials_for_session, \
     trials_for_neuron, get_trial_protocol_definition, retrieve_trial_reps_for_neuron
 from pages.commit import display_trial_protocol_definition
-from pages.download_modal import render_download_modal_and_button
 from sglportalapi.util import check_date
 
 
@@ -816,9 +815,6 @@ def _trial_data_tabpane(session: Dict[str, Any]) -> html.Div:
         [dbc.PopoverBody(markdown)],
         id=_TD_HELP_POPOVER_ID, target=_TD_HELP_BADGE_ID, trigger='hover', placement='top-end')
 
-    # the modal component for requesting downloads and the invoking button are handled in a submodule
-    download_modal, download_btn = render_download_modal_and_button(session)
-
     nav_row = dbc.Row([
         dbc.Col(dbc.Row([
             dbc.Col([help_badge, help_popover], width='auto', class_name='me-4'),
@@ -827,8 +823,7 @@ def _trial_data_tabpane(session: Dict[str, Any]) -> html.Div:
             dbc.Col(proto_grp, width='auto', class_name='me-1'),
             dbc.Col([view_proto_btn, proto_modal], width='auto', class_name='me-5'),
             dbc.Col(disp_grp, width='auto')
-        ], class_name='g-0'), width=10),
-        dbc.Col([download_btn, download_modal], width='auto')
+        ], class_name='g-0'), width=10)
     ], align='center', justify='between', class_name='mb-2')
 
     loading_figure = dcc.Loading(id=_DISP_VIEW_LOADING_ID, children=figure_view, type='circle')

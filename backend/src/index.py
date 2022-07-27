@@ -42,7 +42,7 @@ import flask_login
 
 from config.app_logging import get_application_logger
 from database.user_ops import authenticate_portal_user, validate_username, validate_password
-from pages import commit, explore, user_profile, download_history, manage, api_client
+from pages import commit, explore, user_profile, manage, api_client
 
 _LOGIN_MODAL_ID = "login-modal"
 """ ID of the Login modal window component. """
@@ -62,8 +62,6 @@ _NAV_MENU_ID = "nav-menu"
 """ ID of dropdown menu in navigation bar exposing parts of the portal accessible only to authenticated clients. """
 _LINK_COMMIT_ID = "link-commit"
 """ ID of link-style menu item in navigation bar's dropdown menu that links to the 'commit session' page. """
-_LINK_DOWNLOADS_ID = "link-download-history"
-""" ID of link-style menu item in navigation bar's dropdown menu that links to the 'download history' page. """
 _LINK_ADMIN_ID = "link-admin"
 """ ID of link-style menu item in navigation bar's dropdown menu that links to the 'portal administration' page. """
 _LOGOUT_ID = "logout-btn"
@@ -154,8 +152,6 @@ def _serve_layout() -> html.Div:
                                 dbc.DropdownMenuItem("Commit experiment sessions (access restricted)",
                                                      id=_LINK_COMMIT_ID, href="/commit",
                                                      disabled=not can_commit),
-                                dbc.DropdownMenuItem("Download history (access restricted)", href='/downloads',
-                                                     id=_LINK_DOWNLOADS_ID, disabled=not can_commit),
                                 dbc.DropdownMenuItem(divider=True),
                                 dbc.DropdownMenuItem("Portal Administration (access restricted)", id=_LINK_ADMIN_ID,
                                                      href="/manage", disabled=not is_admin),
@@ -213,8 +209,7 @@ def display_page(pathname, n_intervals, current_href):
                 can_commit = portal_user.can_commit_to_database()
                 is_admin = portal_user.is_admin()
         if ((url_parts.path == '/commit') and not can_commit) or \
-                ((url_parts.path == '/manage') and not is_admin) or \
-                ((url_parts.path == '/downloads') and not can_commit) or (not is_logged_in):
+                ((url_parts.path == '/manage') and not is_admin) or (not is_logged_in):
             url_parts = [(part if i != 2 else '/explore') for i, part in enumerate(url_parts)]
             return no_update, urlunparse(url_parts), True
         return no_update, no_update, False
@@ -242,9 +237,6 @@ def display_page(pathname, n_intervals, current_href):
         elif pathname == '/manage':
             layout = manage.serve_layout() if is_admin else None
             redirect = not is_admin
-        elif pathname == '/downloads':
-            layout = download_history.serve_layout() if can_commit else None
-            redirect = not can_commit
         else:
             layout = explore.serve_layout()
             redirect = not (pathname in ['/', '/explore'])   # eg, someone enters a bogus path manually
@@ -278,7 +270,7 @@ def enable_login_submit(*args):
 @app.callback(
     [Output(_LOGIN_MODAL_ID, 'is_open'), Output(_LOGIN_USERNAME_ID, 'value'), Output(_LOGIN_PASSWORD_ID, 'value'),
      Output(_NAV_MENU_ID, 'label'), Output(_NAV_MENU_ID, 'style'), Output(_LOGIN_ID, 'style'),
-     Output(_LINK_COMMIT_ID, 'disabled'), Output(_LINK_DOWNLOADS_ID, 'disabled'), Output(_LINK_ADMIN_ID, 'disabled'),
+     Output(_LINK_COMMIT_ID, 'disabled'), Output(_LINK_ADMIN_ID, 'disabled'),
      Output(_LOGIN_ALERT_ID, 'children'), Output(_LOGIN_ALERT_ID, 'is_open'), Output(_URL_ID, 'pathname')],
     [Input(_LOGIN_ID, 'n_clicks'), Input(_LOGIN_SUBMIT_ID, 'n_clicks'), Input(_LOGIN_CANCEL_ID, 'n_clicks'),
      Input(_LOGOUT_ID, 'n_clicks')],
@@ -286,13 +278,13 @@ def enable_login_submit(*args):
 )
 def login_callback(*args):
     ctx = callback_context
-    out = [no_update] * 12
+    out = [no_update] * 11
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if (ctx.triggered is not None) else ""
 
     if trigger_id == _LOGIN_ID:
         out[0] = True
         out[1] = out[2] = ""
-        out[10] = False
+        out[9] = False
     elif trigger_id == _LOGIN_SUBMIT_ID:
         username = args[4] if isinstance(args[4], str) else ""
         password = args[5] if isinstance(args[5], str) else ""
@@ -312,19 +304,18 @@ def login_callback(*args):
             out[4] = None
             out[5] = dict(display='none')
             out[6] = not portal_user.can_commit_to_database()
-            out[7] = not portal_user.can_commit_to_database()
-            out[8] = not portal_user.is_admin()
-            out[9] = ""
-            out[10] = False
-            out[11] = '/explore'
+            out[7] = not portal_user.is_admin()
+            out[8] = ""
+            out[9] = False
+            out[10] = '/explore'
         else:
             get_application_logger().warning(f"Unsuccessful login attempt ({error_msg})")
-            out[9] = error_msg
-            out[10] = True
+            out[8] = error_msg
+            out[9] = True
     elif trigger_id == _LOGIN_CANCEL_ID:
         out[0] = False
         out[1] = out[2] = ""
-        out[10] = False
+        out[9] = False
     elif trigger_id == _LOGOUT_ID:
         if flask_login.current_user.is_authenticated:
             get_application_logger().info(f"{flask_login.current_user.get_id()} logged out")
@@ -333,9 +324,8 @@ def login_callback(*args):
         out[4] = dict(display='none')
         out[5] = None
         out[6] = True
-        out[7] = True
-        out[8] = True
-        out[11] = '/explore'
+        out[9] = False
+        out[10] = '/explore'
     return tuple(out)
 
 

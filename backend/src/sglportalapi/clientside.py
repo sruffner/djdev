@@ -27,8 +27,7 @@ from typing import Optional, Union, List, Tuple
 import requests
 from requests import RequestException
 
-from sglportalapi.data_containers import SessionInfo, NeuronInfo, TrialRep, Route, deserialize_api_response, \
-    APISerializeError, MetadataTable
+from sglportalapi.data_containers import SessionInfo, NeuronInfo, TrialRep, Route, APISerializeError, MetadataTable
 from sglportalapi.maestro import Protocol
 
 _REQ_TIMEOUT_SECONDS: float = 20
@@ -80,7 +79,7 @@ class PortalAccessor:
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
             if response.status_code == 200 or response.status_code == 400:
                 try:
-                    content = deserialize_api_response(Route.AUTHENTICATE, response.content)
+                    content = Route.deserialize_api_response(Route.AUTHENTICATE, response.content)
                     if response.status_code == 200:
                         self._token = content['token']
                         self._expires = time.time() + content['expires_in'] - 60
@@ -116,7 +115,7 @@ class PortalAccessor:
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = deserialize_api_response(Route.METADATA_TABLE, response.content)
+            content = Route.deserialize_api_response(Route.METADATA_TABLE, response.content)
             if response.status_code == 200:
                 return '', content['metatable']
             else:
@@ -161,7 +160,7 @@ class PortalAccessor:
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = deserialize_api_response(Route.SESSIONINFO, response.content)
+            content = Route.deserialize_api_response(Route.SESSIONINFO, response.content)
             if response.status_code == 200:
                 return content['sessions']
             else:
@@ -195,7 +194,7 @@ class PortalAccessor:
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = deserialize_api_response(Route.SESSION_NEURONS, response.content)
+            content = Route.deserialize_api_response(Route.SESSION_NEURONS, response.content)
             if response.status_code == 200:
                 return content['neurons']
             else:
@@ -223,7 +222,7 @@ class PortalAccessor:
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = deserialize_api_response(Route.SESSION_PROTOCOLS, response.content)
+            content = Route.deserialize_api_response(Route.SESSION_PROTOCOLS, response.content)
             if response.status_code == 200:
                 return content['protocols']
             else:
@@ -258,7 +257,7 @@ class PortalAccessor:
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = deserialize_api_response(Route.SESSION_TRIAL, response.content)
+            content = Route.deserialize_api_response(Route.SESSION_TRIAL, response.content)
             if response.status_code == 200:
                 return content['trial']
             else:
@@ -295,7 +294,7 @@ class PortalAccessor:
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = deserialize_api_response(Route.SESSION_BLOCK, response.content)
+            content = Route.deserialize_api_response(Route.SESSION_BLOCK, response.content)
             if response.status_code == 200:
                 return content['trials']
             else:
@@ -333,7 +332,7 @@ class PortalAccessor:
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = deserialize_api_response(Route.SESSION_PROTOCOL_REPS, response.content)
+            content = Route.deserialize_api_response(Route.SESSION_PROTOCOL_REPS, response.content)
             if response.status_code == 200:
                 return content['trials']
             else:
@@ -396,7 +395,7 @@ class PortalAccessor:
                                      json=req_body,
                                      headers={'Authorization': f"Bearer {self._token}"},
                                      allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = deserialize_api_response(Route.NEURONS, response.content)
+            content = Route.deserialize_api_response(Route.NEURONS, response.content)
             if response.status_code == 200:
                 return content['neurons']
             else:

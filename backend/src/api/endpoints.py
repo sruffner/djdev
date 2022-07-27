@@ -35,7 +35,7 @@ from flask import Response, request
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 
 from database.log_ops import log_api_request
-from sglportalapi.data_containers import SessionInfo, NeuronInfo, Route, serialize_api_response, MetadataTable
+from sglportalapi.data_containers import SessionInfo, NeuronInfo, Route, MetadataTable
 from app import app
 from config.config import get_config
 from sglportalapi.maestro import Protocol
@@ -69,7 +69,7 @@ def api_access() -> Tuple[Response, int]:
             log_api_request(route=Route.AUTHENTICATE, username=username)
         else:
             status_code, out = 400, dict(error=f"Access denied - {err_msg}")
-    return Response(serialize_api_response(Route.AUTHENTICATE, **out)), status_code
+    return Response(Route.serialize_api_response(Route.AUTHENTICATE, **out)), status_code
 
 
 @app.server.route(Route.METADATA_TABLE, methods=['POST'])
@@ -98,7 +98,7 @@ def metadata_table() -> Tuple[Response, int]:
     out = dict(metatable=metatable) if status_code == 200 else dict(error=err_msg)
     if status_code == 200:
         log_api_request(route=Route.METADATA_TABLE, username=get_jwt_identity()['username'], table=table_name)
-    return Response(serialize_api_response(Route.METADATA_TABLE, **out)), status_code
+    return Response(Route.serialize_api_response(Route.METADATA_TABLE, **out)), status_code
 
 
 _METATABLE_NAME_TO_DB_TABLE = {
@@ -167,7 +167,7 @@ def sessions() -> Tuple[Response, int]:
     if status_code == 200:
         log_api_request(route=Route.SESSIONINFO, username=get_jwt_identity()['username'],
                         experimenter=experimenter, subj_id=subj_id, when=when)
-    return Response(serialize_api_response(Route.SESSIONINFO, **out)), status_code
+    return Response(Route.serialize_api_response(Route.SESSIONINFO, **out)), status_code
 
 
 def _retrieve_session_info(experimenter: Optional[str], subj_id: Optional[str], when: Optional[str]) -> \
@@ -193,7 +193,7 @@ def _retrieve_session_info(experimenter: Optional[str], subj_id: Optional[str], 
     if isinstance(experimenter, str):
         restrictions.append(f"experimenter = '{experimenter}'")
     if isinstance(subj_id, str):
-        restrictions.append(f"subj_id =' {subj_id}'")
+        restrictions.append(f"subj_id = '{subj_id}'")
     if isinstance(when, str):
         restrictions.append(f"session_date {when}")
     if len(restrictions) == 0:
@@ -266,7 +266,7 @@ def session_neurons() -> Tuple[Response, int]:
     if status_code == 200:
         log_api_request(route=Route.SESSION_NEURONS, username=get_jwt_identity()['username'],
                         session_key=session_key, min_spikes=min_spikes, min_snr=min_snr)
-    return Response(serialize_api_response(Route.SESSION_NEURONS, **out)), status_code
+    return Response(Route.serialize_api_response(Route.SESSION_NEURONS, **out)), status_code
 
 
 def _retrieve_session_neurons(session_key: Dict[str, Any], min_spikes: Optional[int], min_snr: Optional[float]) -> \
@@ -337,7 +337,7 @@ def session_protocols() -> Tuple[Response, int]:
     if status_code == 200:
         log_api_request(route=Route.SESSION_PROTOCOLS, username=get_jwt_identity()['username'],
                         session_key=session_key)
-    return Response(serialize_api_response(Route.SESSION_PROTOCOLS, **out)), status_code
+    return Response(Route.serialize_api_response(Route.SESSION_PROTOCOLS, **out)), status_code
 
 
 def _retrieve_session_protocols(session_key: Dict[str, Any]) -> Tuple[int, str, List[Protocol]]:
@@ -402,7 +402,7 @@ def session_trial() -> Tuple[Response, int]:
     if status_code == 200:
         log_api_request(route=Route.SESSION_TRIAL, username=get_jwt_identity()['username'],
                         session_key=session_key, trial_index=trial_index, unit_ids=unit_ids)
-    return Response(serialize_api_response(Route.SESSION_TRIAL, **out)), status_code
+    return Response(Route.serialize_api_response(Route.SESSION_TRIAL, **out)), status_code
 
 
 @app.server.route(Route.SESSION_BLOCK, methods=['POST'])
@@ -442,7 +442,7 @@ def session_block() -> Tuple[Response, int]:
     if status_code == 200:
         log_api_request(route=Route.SESSION_BLOCK, username=get_jwt_identity()['username'],
                         session_key=session_key, start=start, end=end, unit_ids=unit_ids)
-    return Response(serialize_api_response(Route.SESSION_BLOCK, **out)), status_code
+    return Response(Route.serialize_api_response(Route.SESSION_BLOCK, **out)), status_code
 
 
 @app.server.route(Route.SESSION_PROTOCOL_REPS, methods=['POST'])
@@ -484,7 +484,7 @@ def session_protocol_reps() -> Tuple[Response, int]:
     if status_code == 200:
         log_api_request(route=Route.SESSION_PROTOCOL_REPS, username=get_jwt_identity()['username'],
                         session_key=session_key, proto_hash=proto_hash, completed=completed, unit_ids=unit_ids)
-    return Response(serialize_api_response(Route.SESSION_PROTOCOL_REPS, **out)), status_code
+    return Response(Route.serialize_api_response(Route.SESSION_PROTOCOL_REPS, **out)), status_code
 
 
 @app.server.route(Route.NEURONS, methods=['POST'])
@@ -531,7 +531,7 @@ def neurons() -> Tuple[Response, int]:
         log_api_request(route=Route.NEURONS, username=get_jwt_identity()['username'], min_spikes=min_spikes,
                         min_snr=min_snr, min_rate=min_rate, neuron_type=neuron_type, subj_id=subj_id,
                         study_title=study_title, proto_hash=proto_hash, min_complete=min_complete)
-    return Response(serialize_api_response(Route.NEURONS, **out)), status_code
+    return Response(Route.serialize_api_response(Route.NEURONS, **out)), status_code
 
 
 def _retrieve_neurons(min_spikes: Optional[int], min_snr: Optional[float], min_rate: Optional[float],

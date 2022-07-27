@@ -400,6 +400,10 @@ class Trial(dj.Imported):
 @schema
 class DataDownload(dj.Manual):
     """
+    DEPRECATED a/o 26jul2022. With the introduction of the portal API for retrieving datasets directly using a client-
+    side package (sglportalapi), the download feature is no longer needed, and was awkward anyway. Be sure to remove
+    entirely before fielding a production version of the portal.
+
     Any registered portal user may download behavioral and neuronal response data from a specified experiment session.
     Per-trial eye position and velocity traces, fixation target position trajectories, and neural unit spike trains are
     included in the generated data file, along with metadata to assist in aggregation and analysis. Responses from up to

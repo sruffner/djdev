@@ -20,8 +20,9 @@ import base64
 import functools
 import json
 import struct
+import sys
 from datetime import date
-from typing import Dict, Any, Optional, Tuple, List, Union, Final
+from typing import Dict, Any, Optional, Tuple, List, Union, Final, Type
 
 import numpy as np
 
@@ -29,113 +30,6 @@ from sglportalapi.maestro import Protocol
 
 API_VERSION: int = 1
 """ The current version number for the portal database access API. """
-
-
-class Route:
-    """
-    A collection of all supported API routes. Each route is a defined subpath under the portal's base URL:
-     - `Route.AUTHENTICATE`: API route by which client authenticates with portal and receives access token required
-       for all other API endpoints.
-     - `Route.SESSIONINFO`: API route to retrieve summary information on a filtered subset of experiment sessions in
-       the portal database.
-     - `Route.SESSION_NEURONS`: API route to retrieve summary information about selected neural units recorded during a
-       specified experiment session.
-     - `Route.SESSION_PROTOCOLS`: API route to retrieve the defintions of all distinct Maestro trial protocols presented
-       during an experiment session.
-     - `Route.SESSION_TRIAL`: API route to retrieve behavioral and neuronal responses for a single Maestro trial
-       presented during an experiment session.
-     - `Route.SESSION_BLOCK`: API route to retrieve response data, etc for a sequential block of Maestro trials
-       presented during an experiment session.
-     - `Route.SESSION_PROTOCOL_REPS`: API route to retrieve response data for all reps of a specified trial protocol
-       during an experiment session.
-     - `Route.METADATA_TABLE`: API route to retrieve the contents of one of the small metadata tables in the portal
-       database.
-     - `Route.NEURONS`: API route to search portal database for comparable neural units satisfying a set of filters.
-    """
-    AUTHENTICATE: Final[str] = '/api'
-    SESSIONINFO: Final[str] = '/api/sessions'
-    SESSION_NEURONS: Final[str] = '/api/session/neurons'
-    SESSION_PROTOCOLS: Final[str] = '/api/session/protocols'
-    SESSION_TRIAL: Final[str] = '/api/session/trial'
-    SESSION_BLOCK: Final[str] = '/api/session/block'
-    SESSION_PROTOCOL_REPS: Final[str] = '/api/session/protocol/reps'
-    METADATA_TABLE: Final[str] = '/api/metadata'
-    NEURONS: Final[str] = '/api/neurons'
-
-    _KNOWN_ROUTES: List[str] = [
-        AUTHENTICATE, SESSIONINFO, SESSION_NEURONS, SESSION_PROTOCOLS,
-        SESSION_TRIAL, SESSION_BLOCK, SESSION_PROTOCOL_REPS, METADATA_TABLE, NEURONS
-    ]
-    """ List of all supported API routes. """
-
-    @classmethod
-    def is_supported_api(cls, route: str) -> bool:
-        """
-        Is the specified URL subpath a recognized and supported portal API endpoint?
-
-        Args:
-            route: The route subpath (beyond the portal's base URL).
-        Returns:
-            True for a valid API enpoint; else False.
-        """
-        return route in cls._KNOWN_ROUTES
-
-    @classmethod
-    def describe_api_request(cls, entry: Dict[str, Any]) -> Tuple[str, str]:
-        """
-        Provide a descriptor and parameter list for a logged API request.
-
-        Args:
-            entry: An API request log entry.
-
-        Returns:
-            A 2-tuple (R, P) containing a brief descriptor of the API request R and the list P of parameters that were
-                part of the request. Both strings R and P are formatted in markdown text as they are intended for
-                web browser display. For most API routes, the request R is the name of the clientside method that
-                targets that route. Returns ('unknown', '') if log entry is invalid.
-        """
-        desc, params = 'unknown', ''
-        try:
-            route = entry['route']
-            if route == '/api_client':
-                desc, params = 'API client package download', ''
-            elif route == cls.AUTHENTICATE:
-                desc, params = 'API access granted', ''
-            elif route == cls.SESSIONINFO:
-                desc = "**sessions**"
-                params = f"**experimenter**={entry['experimenter']}, **subj_id**={entry['subj_id']}, " \
-                         f"**when**={entry['when']}"
-            elif route == cls.METADATA_TABLE:
-                desc = f"**metadata_table**"
-                params = f"**table**={entry['table']}"
-            elif route == cls.NEURONS:
-                desc = f"**neurons**"
-                params = f"**min_spikes**={entry['min_spikes']}, **min_snr**={entry['min_snr']}, " \
-                         f"**min_rate**={entry['min_rate']}, **neuron_type**={entry['neuron_type']}, " \
-                         f"**subj_id**={entry['subj_id']}, **study_title**={entry['study_title']}, " \
-                         f"**proto_hash**={entry['proto_hash']}, **min_complete**={entry['min_complete']}"
-            else:
-                session_key = f"**session**={entry['session_key']}"
-                if route == cls.SESSION_NEURONS:
-                    desc = "**session_neurons**"
-                    params = f"{session_key}, **min_spikes**={entry['min_spikes']}, **min_snr**={entry['min_snr']}"
-                elif route == cls.SESSION_PROTOCOLS:
-                    desc = f"**session_protocols**"
-                    params = f"{session_key}"
-                elif route == cls.SESSION_TRIAL:
-                    desc = f"**session_trial**"
-                    params = f"{session_key}, **trial_index**={entry['trial_index']}, **unit_ids**={entry['unit_ids']}"
-                elif route == cls.SESSION_BLOCK:
-                    desc = f"**session_trial_block**"
-                    params = f"{session_key}, **start**={entry['start']}, **end**={entry['end']}, " \
-                             f"**unit_ids**={entry['unit_ids']}"
-                elif route == cls.SESSION_PROTOCOL_REPS:
-                    desc = f"**session_protocol_reps**"
-                    params = f"{session_key}, **proto_hash**={entry['proto_hash']}, " \
-                             f"**completed**={entry['completed']}, **unit_ids**={entry['unit_ids']}"
-        except Exception:
-            pass
-        return desc, params
 
 
 class MetadataTable:
@@ -1175,3 +1069,203 @@ def deserialize_api_response(route: str, raw: bytes) -> Dict[str, Any]:
         return resp
     except Exception as e:
         raise APISerializeError(cause=e)
+
+
+class Route:
+    """
+    A collection of all supported API routes. Each route is a defined subpath under the portal's base URL:
+     - `Route.AUTHENTICATE`: API route by which client authenticates with portal and receives access token required
+       for all other API endpoints.
+     - `Route.SESSIONINFO`: API route to retrieve summary information on a filtered subset of experiment sessions in
+       the portal database.
+     - `Route.SESSION_NEURONS`: API route to retrieve summary information about selected neural units recorded during a
+       specified experiment session.
+     - `Route.SESSION_PROTOCOLS`: API route to retrieve the defintions of all distinct Maestro trial protocols presented
+       during an experiment session.
+     - `Route.SESSION_TRIAL`: API route to retrieve behavioral and neuronal responses for a single Maestro trial
+       presented during an experiment session.
+     - `Route.SESSION_BLOCK`: API route to retrieve response data, etc for a sequential block of Maestro trials
+       presented during an experiment session.
+     - `Route.SESSION_PROTOCOL_REPS`: API route to retrieve response data for all reps of a specified trial protocol
+       during an experiment session.
+     - `Route.METADATA_TABLE`: API route to retrieve the contents of one of the small metadata tables in the portal
+       database.
+     - `Route.NEURONS`: API route to search portal database for comparable neural units satisfying a set of filters.
+    """
+    AUTHENTICATE: Final[str] = '/api'
+    SESSIONINFO: Final[str] = '/api/sessions'
+    SESSION_NEURONS: Final[str] = '/api/session/neurons'
+    SESSION_PROTOCOLS: Final[str] = '/api/session/protocols'
+    SESSION_TRIAL: Final[str] = '/api/session/trial'
+    SESSION_BLOCK: Final[str] = '/api/session/block'
+    SESSION_PROTOCOL_REPS: Final[str] = '/api/session/protocol/reps'
+    METADATA_TABLE: Final[str] = '/api/metadata'
+    NEURONS: Final[str] = '/api/neurons'
+
+    _KNOWN_ROUTES: List[str] = [
+        AUTHENTICATE, SESSIONINFO, SESSION_NEURONS, SESSION_PROTOCOLS,
+        SESSION_TRIAL, SESSION_BLOCK, SESSION_PROTOCOL_REPS, METADATA_TABLE, NEURONS
+    ]
+    """ List of all supported API routes. """
+
+    @classmethod
+    def is_supported_api(cls, route: str) -> bool:
+        """
+        Is the specified URL subpath a recognized and supported portal API endpoint?
+
+        Args:
+            route: The route subpath (beyond the portal's base URL).
+        Returns:
+            True for a valid API enpoint; else False.
+        """
+        return route in cls._KNOWN_ROUTES
+
+    @classmethod
+    def describe_api_request(cls, entry: Dict[str, Any]) -> Tuple[str, str]:
+        """
+        Provide a descriptor and parameter list for a logged API request.
+
+        Args:
+            entry: An API request log entry.
+
+        Returns:
+            A 2-tuple (R, P) containing a brief descriptor of the API request R and the list P of parameters that were
+                part of the request. Both strings R and P are formatted in markdown text as they are intended for
+                web browser display. For most API routes, the request R is the name of the clientside method that
+                targets that route. Returns ('unknown', '') if log entry is invalid.
+        """
+        try:
+            desc, param_list = cls._ROUTE_TO_DESCRIBE_INFO[entry['route']]
+            params = ", ".join([f"**{p}**={entry[p]}" for p in param_list])
+            return desc, params
+        except Exception as e:
+            print(f"DEBUG: Exception in describe_api_request: {str(e)}", file=sys.stdout, flush=True)  # TODO: DEBUG
+            return '**unknown**', ''
+
+    _ROUTE_TO_DESCRIBE_INFO: Dict[str, Tuple[str, List[str]]] = {
+        '/api_client': ('API client package download', []),   # not really an API, but the URL for the download page
+        AUTHENTICATE: ('API client access granted', []),
+        SESSIONINFO: ('**sessions**', ['experimenter', 'subj_id', 'when']),
+        SESSION_NEURONS: ('**session_neurons**', ['session_key', 'min_spikes', 'min_snr']),
+        SESSION_PROTOCOLS: ('**session_protocols**', ['session_key']),
+        SESSION_TRIAL: ('**session_trial**', ['session_key', 'trial_index', 'unit_ids']),
+        SESSION_BLOCK: ('**session_trial_block**', ['session_key', 'start', 'end', 'unit_ids']),
+        SESSION_PROTOCOL_REPS: ('**session_protocol_reps**', ['session_key', 'proto_hash', 'completed', 'unit_ids']),
+        METADATA_TABLE: ('**metadata_table**', ['table']),
+        NEURONS: ('**neurons**', ['min_spikes', 'min_snr', 'min_rate', 'neuron_type', 'subj_id', 'study_title',
+                                  'proto_hash', 'min_complete'])
+    }
+    """
+    Maps API route name to a tuple (D, L), where D is a short description of the API function and L is a list of
+    paramaeters (corresponding to keys in the dictionary defining the API request log entry. D is in Markdown format
+    and L will be empty for any API that has no request parameters.
+    """
+
+    _ROUTE_TO_RESP_INFO: Dict[str, Tuple[str, Type, bool]] = {
+        AUTHENTICATE: (None, None, None),
+        SESSIONINFO: ('sessions', SessionInfo, True),
+        SESSION_NEURONS: ('neurons', NeuronInfo, True),
+        SESSION_PROTOCOLS: ('protocols', Protocol, True),
+        SESSION_TRIAL: ('trial', TrialRep, False),
+        SESSION_BLOCK: ('trials', TrialRep, True),
+        SESSION_PROTOCOL_REPS: ('trials', TrialRep, True),
+        METADATA_TABLE: ('metatable', MetadataTable, False),
+        NEURONS: ('neurons', NeuronInfo, True)
+    }
+    """ 
+    Maps API route name to a tuple (K, T, L), where K is the string key for the response field holding the object(s)
+    returned; T is the object type; L==True if the response field is a list of objects of type T, else the response
+    field is just an object of type T
+    """
+
+    @classmethod
+    def serialize_api_response(cls, route: str, **kwargs) -> bytes:
+        """
+        Serialize a response from one of the Lisberger lab portal API endpoints.
+
+        Args:
+            route: The endpoint route name.
+            kwargs: The response dictionary.
+        Returns:
+            A byte sequence encoding the response.
+        Raises:
+            APISerializeError: If endpoint route is invalid, if response dictionary is missing any required keyword,
+                or if any error occurs while serializing the response.
+        """
+
+        try:
+            out = bytearray()
+            hdr: Dict[str, Any] = dict(route=route, version=API_VERSION)
+            obj_key, obj_class, is_list = None, None, False
+            if not cls.is_supported_api(route):
+                raise ValueError(f"Unsupported API endpoint: {route}")
+            elif 'error' in kwargs:
+                hdr['error'] = kwargs['error']
+            elif route == cls.AUTHENTICATE:
+                hdr['token'], hdr['expires_in'] = kwargs['token'], kwargs['expires_in']
+            else:
+                obj_key, obj_class, is_list = cls._ROUTE_TO_RESP_INFO[route]
+            if obj_key:
+                hdr['num_objects'] = len(kwargs[obj_key]) if is_list else 1
+            raw_hdr = json.dumps(hdr).encode()
+            out.extend(struct.pack("<i", len(raw_hdr)))
+            out.extend(raw_hdr)
+            if obj_key:
+                obj_list: List[Any] = kwargs[obj_key] if is_list else [kwargs[obj_key]]
+                for o in obj_list:
+                    raw_object = o.to_bytes()
+                    out.extend(struct.pack("<i", len(raw_object)))
+                    out.extend(raw_object)
+
+            return bytes(out)
+        except Exception as e:
+            raise APISerializeError(cause=e)
+
+    @classmethod
+    def deserialize_api_response(cls, route: str, raw: bytes) -> Dict[str, Any]:
+        """
+        Deserialize the response object received from a Lisberger lab portal API endpoint.
+
+        Args:
+            route: The endpoint route name.
+            raw: The byte sequence encoding the endpoint's response
+        Returns:
+            The deserialized response dictionary.
+        Raises:
+            APISerializeError: If the endpoint route name is invalid, if a required keyword is missing in the
+                deserialized response dictionary, or if any error occurs during deserialization.
+        """
+        try:
+            if not cls.is_supported_api(route):
+                raise ValueError(f"Unsupported API endpoint: {route}")
+            int_sz = struct.calcsize('<i')
+            offset = 0
+            hdr_sz, = struct.unpack_from('<i', raw, offset)
+            offset += int_sz
+            resp: Dict[str, Any] = json.loads(raw[offset:offset + hdr_sz].decode())
+            offset += hdr_sz
+            if resp['route'] != route:
+                raise ValueError('Route mismatch in response!')
+            elif resp['version'] != API_VERSION:
+                raise ValueError(f"Invalid API version in response: {resp['version']}")
+            elif route == Route.AUTHENTICATE:
+                if not all([(k in resp) for k in ['token', 'expires_in']]):
+                    raise KeyError(f"Missing one or more keys in response")
+                return resp
+            elif 'error' in resp:
+                return resp
+
+            obj_key, obj_class, is_list = cls._ROUTE_TO_RESP_INFO[route]
+            num_objects = resp['num_objects']
+            obj_list: List[obj_class] = list()
+            for i in range(num_objects):
+                info_sz, = struct.unpack_from('<i', raw, offset)
+                offset += int_sz
+                # noinspection PyUnresolvedReferences
+                # TODO: Could be an issue here. Really should define an abstract class with to_bytes/from_bytes
+                obj_list.append(obj_class.from_bytes(raw[offset:offset + info_sz]))
+                offset += info_sz
+            resp[obj_key] = obj_list if is_list else obj_list[0]
+            return resp
+        except Exception as e:
+            raise APISerializeError(cause=e)
