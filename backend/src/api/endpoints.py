@@ -35,7 +35,7 @@ from flask import Response, request
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 
 from database.log_ops import log_api_request
-from sglportalapi.data_containers import SessionInfo, NeuronInfo, Route, MetadataTable
+from sglportalapi.data_containers import SessionInfo, NeuronInfo, Route, MetadataTable, RequestedData
 from app import app
 from config.config import get_config
 from sglportalapi.maestro import Protocol
@@ -373,9 +373,9 @@ def session_trial() -> Tuple[Response, int]:
     experiment session committed to the portal database. The responses of up to 5 distinct neural units recorded during
     the experiment may be requested.
 
-    The request body is a JSONified dictionary specifing the primary key of the session, the trial index, and a list of
-    up to 5 neural unit IDs. The unit IDs are simply integers in 1..N, where N is the number of neural units that were
-    recorded in the session.
+    The request body is a JSONified dictionary specifing the primary key of the session, the trial index, a list of
+    up to 5 neural unit IDs, and a bit flag set that tailors what recorded data are retrieved. The unit IDs are simply
+    integers in 1..N, where N is the number of neural units that were recorded in the session.
 
     If successful, the response is a serialized dictionary including the field 'trial',
     a :py:class:`api.data_containers.TrialRep` object, the data container for the trial information and recorded
@@ -389,6 +389,8 @@ def session_trial() -> Tuple[Response, int]:
     session_key = request.json.get('session_key')
     trial_index = request.json.get('trial_index')
     unit_ids = request.json.get('unit_ids')
+    what = request.json.get('what')
+    what = RequestedData.ALL if not what else RequestedData(what & RequestedData.ALL)
 
     status_code, err_msg, trial_rep = 200, '', None
     if len(unit_ids) > 5:
@@ -401,7 +403,7 @@ def session_trial() -> Tuple[Response, int]:
 
     if status_code == 200:
         log_api_request(route=Route.SESSION_TRIAL, username=get_jwt_identity()['username'],
-                        session_key=session_key, trial_index=trial_index, unit_ids=unit_ids)
+                        session_key=session_key, trial_index=trial_index, unit_ids=unit_ids, what=what)
     return Response(Route.serialize_api_response(Route.SESSION_TRIAL, **out)), status_code
 
 
@@ -413,9 +415,10 @@ def session_block() -> Tuple[Response, int]:
     during a specified experiment session committed to the portal database. The responses of up to 5 distinct neural
     units recorded during the experiment may be requested with the trial data.
 
-    The request body is a JSONified dictionary specifing the primary key of the session, the starting trial index, the
-    number of trial reps to retrieve, and a list of up to 5 neural unit IDs. The unit IDs are simply integers in 1..N,
-    where N is the number of neural units that were recorded in the session.
+    The request body is a JSONified dictionary specifing the primary key of the session, the first trial index in the
+    bloack, the last trial index in the block, and a list of up to 5 neural unit IDs, and a bit flag set that tailors
+    what recorded data are retrieved. The unit IDs are simply integers in 1..N, where N is the number of neural units
+    that were recorded in the session.
 
     If successful, the response is a serialized dictionary including the 'trials' field, which is a list of
     :py:class:`api.data_containers.TrialRep` objects.
@@ -429,19 +432,22 @@ def session_block() -> Tuple[Response, int]:
     start = request.json.get('start')
     end = request.json.get('end')
     unit_ids = request.json.get('unit_ids')
+    what = request.json.get('what')
+    what = RequestedData.ALL if not what else RequestedData(what & RequestedData.ALL)
 
     status_code, err_msg, trial_list = 200, '', None
     if len(unit_ids) > 5:
         status_code, err_msg = 400, "Too many neural units requested (max is 5)"
     else:
-        trial_list = retrieve_session_trial_reps(session_key, start=start, end=end, completed=False, unit_ids=unit_ids)
+        trial_list = retrieve_session_trial_reps(
+            session_key, start=start, end=end, completed=False, unit_ids=unit_ids, what=what)
         if isinstance(trial_list, str):
             status_code, err_msg = 501, trial_list
     out = dict(trials=trial_list) if status_code == 200 else dict(error=err_msg)
 
     if status_code == 200:
         log_api_request(route=Route.SESSION_BLOCK, username=get_jwt_identity()['username'],
-                        session_key=session_key, start=start, end=end, unit_ids=unit_ids)
+                        session_key=session_key, start=start, end=end, unit_ids=unit_ids, what=what)
     return Response(Route.serialize_api_response(Route.SESSION_BLOCK, **out)), status_code
 
 
@@ -454,9 +460,9 @@ def session_protocol_reps() -> Tuple[Response, int]:
     distinct neural units recorded during the experiment may be requested with the trial data.
 
     The request body is a JSONified dictionary specifing the primary key of the session, the MD5 digest hash identifying
-    the trial protocol, a flag to restrict the results to successfully completed trial reps only, and a list of up to 5
-    neural unit IDs. The unit IDs are simply integers in 1..N, where N is the number of neural units that were recorded
-    in the session.
+    the trial protocol, a flag to restrict the results to successfully completed trial reps only, a list of up to 5
+    neural unit IDs, and a bit flag set that tailors what recorded data are retrieved. The unit IDs are simply integers
+    in 1..N, where N is the number of neural units that were recorded in the session.
 
     If successful, the response is a serialized dictionary including the field 'trials', which is a list of
     :py:class:`api.data_containers.TrialRep` objects.
@@ -470,20 +476,23 @@ def session_protocol_reps() -> Tuple[Response, int]:
     proto_hash = request.json.get('proto_hash')
     completed = request.json.get('completed')
     unit_ids = request.json.get('unit_ids')
+    what = request.json.get('what')
+    what = RequestedData.ALL if not what else RequestedData(what & RequestedData.ALL)
 
     status_code, err_msg, trial_list = 200, '', None
     if len(unit_ids) > 5:
         status_code, err_msg = 400, "Too many neural units requested (max is 5)"
     else:
         trial_list = retrieve_session_trial_reps(session_key, proto_hash=proto_hash, completed=completed,
-                                                 unit_ids=unit_ids)
+                                                 unit_ids=unit_ids, what=what)
         if isinstance(trial_list, str):
             status_code, err_msg = 501, trial_list
     out = dict(trials=trial_list) if status_code == 200 else dict(error=err_msg)
 
     if status_code == 200:
         log_api_request(route=Route.SESSION_PROTOCOL_REPS, username=get_jwt_identity()['username'],
-                        session_key=session_key, proto_hash=proto_hash, completed=completed, unit_ids=unit_ids)
+                        session_key=session_key, proto_hash=proto_hash, completed=completed, unit_ids=unit_ids,
+                        what=what)
     return Response(Route.serialize_api_response(Route.SESSION_PROTOCOL_REPS, **out)), status_code
 
 

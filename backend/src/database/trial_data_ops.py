@@ -13,7 +13,7 @@ from config.app_logging import get_application_logger
 from sglportalapi import maestro
 from database.table_info import AttributeValue, DBTable, primary_key_of
 from database.table_ops import fetch_one_row, fetch_rows, fetch_restrict_proj, fetch_any_proj, fetch_attribute_values
-from sglportalapi.data_containers import TrialRep
+from sglportalapi.data_containers import TrialRep, RequestedData
 
 
 def trial_protocols_for_session(session_key: Dict[str, AttributeValue], aggregate: bool = False) \
@@ -194,8 +194,8 @@ def trials_for_neuron(neuron_key: Dict[str, AttributeValue], proto_hash: Optiona
         return None
 
 
-def retrieve_session_trial_rep(
-        session_key: Dict[str, Any], trial_index: int, unit_ids: List[int]) -> Union[str, TrialRep]:
+def retrieve_session_trial_rep(session_key: Dict[str, Any], trial_index: int, unit_ids: List[int],
+                               what: RequestedData = RequestedData.ALL) -> Union[str, TrialRep]:
     """
     Retrieve metadata and recorded response data for a single specified trial rep in the Lisberger lab database.
 
@@ -204,6 +204,8 @@ def retrieve_session_trial_rep(
         trial_index: Index of the trial rep to be retrieved.
         unit_ids: Use this argument to request the responses (ie, spike trains) of one or more neural units (identified
             by their integer unit ID). If None, no neuronal responses are retrieved. Default = None.
+        what: Bit flag set selects what types of recorded data (behavioral, neuronal, event times) should be retrieved.
+            By default, all recorded data is retrieved.
     Returns:
         The trial rep, or an error description if the operation failed for any reason.
     """
@@ -218,10 +220,10 @@ def retrieve_session_trial_rep(
         if proto_info is None:
             get_application_logger().error(f"Trial protocol (hash={trial_row['proto_hash']}) not found in database!")
             return"Protocol for trial rep not found, or database error"
-        behavioral_responses = fetch_rows(DBTable.TRIAL_BEHAVIORAL, trial_pk)
-        neuronal_responses = fetch_rows(DBTable.TRIAL_NEURONAL, trial_pk)
-        events = fetch_rows(DBTable.TRIAL_EVENT, trial_pk)
-        if (behavioral_responses is None) or (neuronal_responses is None) or (events is None):
+        behav_responses = fetch_rows(DBTable.TRIAL_BEHAVIORAL, trial_pk) if (RequestedData.BEHAVIORAL in what) else []
+        neuronal_responses = fetch_rows(DBTable.TRIAL_NEURONAL, trial_pk) if (RequestedData.NEURONAL in what) else []
+        events = fetch_rows(DBTable.TRIAL_EVENT, trial_pk) if (RequestedData.EVENTS in what) else []
+        if (behav_responses is None) or (neuronal_responses is None) or (events is None):
             get_application_logger().error(f"DB error occurred while retrieving response data for trial {trial_pk}")
             return "An internal database error occured"
 
@@ -238,7 +240,7 @@ def retrieve_session_trial_rep(
         trial_info['trial_rewarded'] = (trial_info['trial_rewarded'] != 0)
 
         trial_info['hgpos'], trial_info['vepos'], trial_info['hevel'], trial_info['vevel'] = None, None, None, None
-        for response in behavioral_responses:
+        for response in behav_responses:
             if response['response_id'] == 'HEPOS':
                 trial_info['hgpos'] = response['response_trace']
             elif response['response_id'] == 'VEPOS':
@@ -249,7 +251,7 @@ def retrieve_session_trial_rep(
                 trial_info['vevel'] = response['response_trace']
 
         trial_info['spike_trains'] = dict()
-        if len(unit_ids) > 0:
+        if (len(unit_ids) > 0) and (len(neuronal_responses) > 0):
             # for any unit requested that was not recorded during trial, spike times array must be None!
             for i in unit_ids:
                 trial_info['spike_trains'][i] = None
@@ -269,7 +271,8 @@ def retrieve_session_trial_rep(
 
 def retrieve_session_trial_reps(
         session_key: Dict[str, Any], proto_hash: Optional[str] = None, start: int = 1, end: int = 1,
-        completed: bool = True, unit_ids: Optional[List[int]] = None) -> Union[str, List[TrialRep]]:
+        completed: bool = True, unit_ids: Optional[List[int]] = None, what: RequestedData = RequestedData.ALL) -> \
+        Union[str, List[TrialRep]]:
     """
     Retrieve metadata and recorded response data for a selection of trial reps recorded during an experiment session
     stored in the portal database -- either a contiguous block of trials OR all trials belonging to the specified trial
@@ -284,9 +287,13 @@ def retrieve_session_trial_reps(
         completed: If true, only successfully completed trial reps are included in the results. Default = True.
         unit_ids: Use this argument to request the responses (ie, spike trains) of one or more neural units (identified
             by their integer unit ID). If None, no neuronal responses are retrieved. Default = None.
+        what: Bit flag set selects what types of recorded data (behavioral, neuronal, event times) should be retrieved.
+            By default, all recorded data is retrieved.
     Returns:
         The list of trial reps retrieved, or an error description if the operation failed for any reason.
     """
+    unit_ids = unit_ids if (isinstance(unit_ids, list) and (RequestedData.NEURONAL in what)) else []
+
     try:
         session_info = fetch_one_row(DBTable.SESSION, session_key)
         if session_info is None:
@@ -318,19 +325,19 @@ def retrieve_session_trial_reps(
         if relevant_trials is None:
             return "An internal error occurred while retrieving trial reps"
         relevant_trials.sort(key=lambda x: x['trial_idx'], reverse=True)
-        behavioral_responses = \
+        behavioral_responses = [] if not (RequestedData.BEHAVIORAL in what) else \
             fetch_restrict_proj([DBTable.TRIAL_BEHAVIORAL, DBTable.TRIAL], [None, trial_restrictions], [])
         if behavioral_responses is None:
             return "An internal error occurred while retrieving behavioral responses for trial reps"
         behavioral_responses.sort(key=lambda x: x['trial_idx'], reverse=True)
-        events = \
+        events = [] if not (RequestedData.EVENTS in what) else \
             fetch_restrict_proj([DBTable.TRIAL_EVENT, DBTable.TRIAL], [None, trial_restrictions], [])
         if events is None:
             return "An internal error occurred while retrieving marker events for trial reps"
         events.sort(key=lambda x: x['trial_idx'], reverse=True)
 
         units: Dict[int, List[Dict[str, Any]]] = dict()
-        if isinstance(unit_ids, list) and (len(unit_ids) > 0):
+        if len(unit_ids) > 0:
             neuron_pk = session_key.copy()
             for unit_id in unit_ids:
                 neuron_pk['unit_id'] = unit_id
@@ -385,7 +392,7 @@ def retrieve_session_trial_reps(
                 trial_info['events'][event_row['event_ch']] = event_row['event_times']
 
             trial_info['spike_trains'] = dict()
-            for unit_id in (unit_ids if isinstance(unit_ids, list) else []):
+            for unit_id in unit_ids:
                 u = units[unit_id]
                 # IMPORTANT: A given unit may not have been recorded during a given trial.
                 if (len(u) > 0) and u[-1]['trial_idx'] == trial_info['trial_idx']:

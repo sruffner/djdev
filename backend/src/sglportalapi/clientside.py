@@ -27,7 +27,8 @@ from typing import Optional, Union, List, Tuple
 import requests
 from requests import RequestException
 
-from sglportalapi.data_containers import SessionInfo, NeuronInfo, TrialRep, Route, APISerializeError, MetadataTable
+from sglportalapi.data_containers import SessionInfo, NeuronInfo, TrialRep, Route, APISerializeError, MetadataTable, \
+    RequestedData
 from sglportalapi.maestro import Protocol
 
 _REQ_TIMEOUT_SECONDS: float = 20
@@ -232,7 +233,8 @@ class PortalAccessor:
         except RequestException as e:
             return f"Request failed on send: {str(e)}"
 
-    def session_trial(self, session: SessionInfo, trial_idx: int, unit_ids: Optional[List[int]] = None) -> \
+    def session_trial(self, session: SessionInfo, trial_idx: int, unit_ids: Optional[List[int]] = None,
+                      what: Optional[RequestedData] = None) -> \
             Union[str, TrialRep]:
         """
         Retrieve response data and other metadata for a single trial rep recorded during a specified experiment session.
@@ -245,13 +247,17 @@ class PortalAccessor:
                 ID is an integer in [1..M], where M is the number of distinct units recorded during the experiment. If
                 None or empty list, no neural response data is retrieved. Only the first 5 unique IDs are included; any
                 additional or repeat elements are ignored.
+            what: Bit flag set indicating what types of data should be retrieved. By default, all available
+                data are retrieved. For example, if you only need the neural spike trains for the units listed in
+                `unit_ids`, set this argument to `RequestedData.NEURONAL`.
         Returns:
             The trial rep requested, or an error message if the operation fails.
         """
         if (out := self.authenticate()) is not None:
             return out
         unit_ids = sorted([x for x in set(unit_ids)]) if isinstance(unit_ids, list) else []
-        req_body = dict(session_key=session.primary_key, trial_index=trial_idx, unit_ids=unit_ids[0:5])
+        req_body = dict(session_key=session.primary_key, trial_index=trial_idx, unit_ids=unit_ids[0:5],
+                        what=int(what if isinstance(what, RequestedData) else RequestedData.ALL))
         try:
             response = requests.post(f"{self._base_url}{Route.SESSION_TRIAL}",
                                      json=req_body,
@@ -267,8 +273,8 @@ class PortalAccessor:
         except RequestException as e:
             return f"Request failed on send: {str(e)}"
 
-    def session_trial_block(self, session: SessionInfo, start: int, end: int, unit_ids: Optional[List[int]] = None) -> \
-            Union[str, List[TrialRep]]:
+    def session_trial_block(self, session: SessionInfo, start: int, end: int, unit_ids: Optional[List[int]] = None,
+                            what: Optional[RequestedData] = None) -> Union[str, List[TrialRep]]:
         """
         Retrieve response data and other metadata for a sequential block of up to 25 trial reps recorded during a
         specified experiment session.
@@ -282,13 +288,17 @@ class PortalAccessor:
                 ID is an integer in [1..M], where M is the number of distinct units recorded during the experiment. If
                 None or empty list, no neural response data is retrieved. Only the first 5 unique IDs are included; any
                 additional or repeat elements are ignored.
+            what: Bit flag set indicating what types of data should be retrieved. By default, all available
+                data are retrieved. For example, if you only need the neural spike trains for the units listed in
+                `unit_ids`, set this argument to `RequestedData.NEURONAL`.
         Returns:
             The list of trials requested, or an error message if the operation fails.
         """
         if (out := self.authenticate()) is not None:
             return out
         unit_ids = sorted([x for x in set(unit_ids)]) if isinstance(unit_ids, list) else []
-        req_body = dict(session_key=session.primary_key, start=start, end=end, unit_ids=unit_ids[0:5])
+        req_body = dict(session_key=session.primary_key, start=start, end=end, unit_ids=unit_ids[0:5],
+                        what=int(what if isinstance(what, RequestedData) else RequestedData.ALL))
         try:
             response = requests.post(f"{self._base_url}{Route.SESSION_BLOCK}",
                                      json=req_body,
@@ -305,9 +315,10 @@ class PortalAccessor:
             return f"Request failed on send: {str(e)}"
 
     def session_protocol_reps(self, session: SessionInfo, proto: Protocol, completed: bool = False,
-                              unit_ids: Optional[List[int]] = None) -> Union[str, List[TrialRep]]:
+                              unit_ids: Optional[List[int]] = None, what: Optional[RequestedData] = None) -> \
+            Union[str, List[TrialRep]]:
         """
-        Retrieve response data and other metadata for all reps of a specified Maestro trial protocol recorde during a
+        Retrieve response data and other metadata for all reps of a specified Maestro trial protocol recorded during a
         specified experiment session.
 
         Args:
@@ -319,14 +330,19 @@ class PortalAccessor:
                 ID is an integer in [1..M], where M is the number of distinct units recorded during the experiment. If
                 None or empty list, no neural response data is retrieved. Only the first 5 unique IDs are included; any
                 additional or repeat elements are ignored.
+            what: Bit flag set indicating what types of data should be retrieved. By default, all available
+                data are retrieved. For example, if you only need the neural spike trains for the units listed in
+                `unit_ids`, set this argument to `RequestedData.NEURONAL`.
         Returns:
             The list of trials requested, or an error message if the operation fails.
         """
         if (out := self.authenticate()) is not None:
             return out
         unit_ids = sorted([x for x in set(unit_ids)]) if isinstance(unit_ids, list) else []
-        req_body = dict(session_key=session.primary_key, proto_hash=proto.md5_digest, completed=completed,
-                        unit_ids=unit_ids[0:5])
+        req_body = dict(
+            session_key=session.primary_key, proto_hash=proto.md5_digest, completed=completed, unit_ids=unit_ids[0:5],
+            what=int(what if isinstance(what, RequestedData) else RequestedData.ALL)
+        )
         try:
             response = requests.post(f"{self._base_url}{Route.SESSION_PROTOCOL_REPS}",
                                      json=req_body,

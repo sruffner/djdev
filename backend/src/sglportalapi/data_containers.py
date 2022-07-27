@@ -20,8 +20,8 @@ import base64
 import functools
 import json
 import struct
-import sys
 from datetime import date
+from enum import IntFlag
 from typing import Dict, Any, Optional, Tuple, List, Union, Final, Type
 
 import numpy as np
@@ -443,10 +443,29 @@ class NeuronInfo:
         return NeuronInfo(json.loads(raw.decode(), object_hook=_CustomJSONEncoder.decoder_hook))
 
 
+class RequestedData(IntFlag):
+    """
+    Enumeration of the different types of trial data that may be requested from the portal and encapsulated within a
+    :py:class:`sglportalapi.data_containers.TrialRep` object:
+     - BEHAVIORAL: Behavioral response traces (horizontal and vertical eye position, velocity).
+     - NEURONAL: Neural unit spike trains.
+     - EVENTS: Digital input marker event times during trial (including eye-blink epochs if available).
+     - ALL: All behavioral, neuronal, and event data.
+    """
+    BEHAVIORAL = 1 << 0
+    """ Behavioral response traces (H,V eye position, velocity). """
+    NEURONAL = 1 << 1
+    """ Neural unit spike trains. """
+    EVENTS = 1 << 2
+    """ Digital input marker event times during trial (including eye-blink epochs if available). """
+    ALL = 7
+    """ All behavioral, neuronal and event data. """
+
+
 class TrialRep:
     """
-    Response data recorded during a single presentation of a Maestro trial during an exeriment session committed to the
-    Lisberger lab portal database, along with various metadata about the trial presented.
+    A container for behavioral and neuronal response data recorded during a single presentation of a Maestro trial
+    committed to the Lisberger lab portal database, along with various metadata about the trial presented.
     """
     __CONTENT_TYPES: Dict[str, type] = dict(
         experimenter=str, subj_id=str, session_date=str, session_sfx=int, trial_idx=int, protocol=Protocol,
@@ -492,7 +511,10 @@ class TrialRep:
     def __init__(self, info: Dict[str, Any]):
         """
         Recorded response data and other information about a single Maestro trial presented during an experiment
-        session that is stored in the Lisberger lab portal database. Use read-only properties to access the information.
+        session that is stored in the Lisberger lab portal database.
+
+        **Intended for internal use only on the portal server to prepare trial data sets for transfer to the requesting
+        client. On the client-side, use the read-only properties to access response traces and other trial metadata.**
 
         Args:
             info: Dictionary containing the trial data as gleaned from portal database.
@@ -640,7 +662,7 @@ class TrialRep:
     def hgpos(self) -> Optional[np.ndarray]:
         """
         Subject's horizontal gaze position during trial, in degrees (1-ms sampling period). None if gaze position
-        was not recorded (rare).
+        was not recorded (rare), **OR if behavioral response traces were not requested**.
         """
         return self._info['hgpos']
 
@@ -648,7 +670,7 @@ class TrialRep:
     def vepos(self) -> Optional[np.ndarray]:
         """
         Subject's vertical eye position trajectory during trial, in degrees (1-ms sampling period). None if vertical
-        eye position was not recorded (rare).
+        eye position was not recorded (rare), **OR if behavioral response traces were not requested**.
         """
         return self._info['vepos']
 
@@ -656,14 +678,15 @@ class TrialRep:
     def hevel(self) -> Optional[np.ndarray]:
         """
         Subject's horizontal eye velocity trajectory during trial, in deg/sec (1-ms sampling period). None if
-        horizontal eye velocity was not recorded (rare). """
+        horizontal eye velocity was not recorded (rare), **OR if behavioral response traces were not requested**.
+        """
         return self._info['hevel']
 
     @property
     def vevel(self) -> Optional[np.ndarray]:
         """
         Subject's vertical eye velocity trajectory during trial, in deg/sec (1-ms sampling period). None if vertical
-        eye velocity was not recorded (rare).
+        eye velocity was not recorded (rare), **OR if behavioral response traces were not requested**.
         """
         return self._info['vevel']
 
@@ -671,20 +694,21 @@ class TrialRep:
     def events(self) -> Dict[int, np.ndarray]:
         """
         Timestamps (in seconds relative to trial start) of any marker pulses detected on the digital inputs in the
-        recording rig.
+        recording rig. **The returned dictionary will be empty if event timestamps were not requested.**
 
         Returns:
             A dictionary mapping the input channel # (in 0..15) to a Numpy array of the timestamps of marker pulse
                 events detected on that channel. Only channels on which at least one pulse occurred are included; the
                 dictionary could be empty if no pulses were detected on any of the available digital inputs over the
-                course of the trial.
+                course of the trial, or if event timestamps were not requested.
         """
         return self._info['events']
 
     @property
     def spike_trains(self) -> Dict[int, Optional[np.ndarray]]:
         """
-        Neural unit spike trains recorded during trial, with spike times in seconds since trial start.
+        Neural unit spike trains recorded during trial, with spike times in seconds since trial start. **The returned
+        dictionary will be empty if neural responses were not requested.**
 
         Returns:
             A dictionary mapping the unit ID to a Numpy array holding the timestamps of any spikes detected from that
@@ -702,6 +726,10 @@ class TrialRep:
         position in column 0 and vertical position in column 1, in degrees subtended at eye. If fixation target #1 was
         not used at all, returns a zero-length Numpy array. Otherwise, during any portion of the trial in which fixation
         target #1 is undefined, its position is (NaN, NaN).
+
+        **NOTE: If velocity stabilization was in effect during the trial, the fixation target trajectory is adjusted
+        accordingly -- but only if behavioral response data was requested , and both horizontal and vertical eye
+        position traces were recorded during the trial.**
         """
         if self._fix1_pos is None:
             self._init_fixation_target_trajectories()
@@ -714,6 +742,10 @@ class TrialRep:
         position in column 0 and vertical position in column 1, in degrees subtended at eye. If fixation target #2 was
         not used at all, returns a zero-length Numpy array. Otherwise, during any portion of the trial in which fixation
         target #2 is undefined, its position is (NaN, NaN).
+
+        **NOTE: If velocity stabilization was in effect during the trial, the fixation target trajectory is adjusted
+        accordingly -- but only if behavioral response data was requested , and both horizontal and vertical eye
+        position traces were recorded during the trial.**
         """
         if self._fix2_pos is None:
             self._init_fixation_target_trajectories()
@@ -904,173 +936,6 @@ class APISerializeError(Exception):
         return self.message
 
 
-def serialize_api_response(route: str, **kwargs) -> bytes:
-    """
-    Serialize a response from one of the Lisberger lab portal API endpoints.
-
-    Args:
-        route: The endpoint route name.
-        kwargs: The response dictionary.
-    Returns:
-        A byte sequence encoding the response.
-    Raises:
-        APISerializeError: If endpoint route is invalid, if response dictionary is missing any required keyword, or if
-            any error occurs while serializing the response.
-    """
-    try:
-        if not Route.is_supported_api(route):
-            raise ValueError(f"Unsupported API endpoint: {route}")
-        out = bytearray()
-        hdr: Dict[str, Any] = dict(route=route, version=API_VERSION)
-        hdr_only = (route == Route.AUTHENTICATE) or ('error' in kwargs)
-        if hdr_only:
-            if 'error' in kwargs:
-                hdr['error'] = kwargs['error']
-            else:
-                hdr['token'], hdr['expires_in'] = kwargs['token'], kwargs['expires_in']
-        elif route == Route.SESSIONINFO:
-            hdr['num_objects'] = len(kwargs['sessions'])
-        elif (route == Route.SESSION_NEURONS) or (route == Route.NEURONS):
-            hdr['num_objects'] = len(kwargs['neurons'])
-        elif route == Route.SESSION_PROTOCOLS:
-            hdr['num_objects'] = len(kwargs['protocols'])
-        elif route == Route.SESSION_TRIAL:
-            hdr['num_objects'] = 1
-        elif route == Route.METADATA_TABLE:
-            hdr['num_objects'] = 1
-        else:  # Route.SESSION_BLOCK, .SESSION_PROTOCOL_REPS
-            hdr['num_objects'] = len(kwargs['trials'])
-        raw_hdr = json.dumps(hdr).encode()
-        out.extend(struct.pack("<i", len(raw_hdr)))
-        out.extend(raw_hdr)
-        if hdr_only:
-            return bytes(out)
-
-        if route == Route.SESSIONINFO:
-            session: SessionInfo
-            for session in kwargs['sessions']:
-                raw_session = session.to_bytes()
-                out.extend(struct.pack("<i", len(raw_session)))
-                out.extend(raw_session)
-        elif (route == Route.SESSION_NEURONS) or (route == Route.NEURONS):
-            neuron: NeuronInfo
-            for neuron in kwargs['neurons']:
-                raw_neuron = neuron.to_bytes()
-                out.extend(struct.pack("<i", len(raw_neuron)))
-                out.extend(raw_neuron)
-        elif route == Route.SESSION_PROTOCOLS:
-            proto: Protocol
-            for proto in kwargs['protocols']:
-                raw_proto = proto.to_bytes()
-                out.extend(struct.pack("<i", len(raw_proto)))
-                out.extend(raw_proto)
-        elif route == Route.SESSION_TRIAL:
-            trial: TrialRep = kwargs['trial']
-            raw_trial = trial.to_bytes()
-            out.extend(struct.pack("<i", len(raw_trial)))
-            out.extend(raw_trial)
-        elif route == Route.METADATA_TABLE:
-            metatable: MetadataTable = kwargs['metatable']
-            raw_metatable = metatable.to_bytes()
-            out.extend(struct.pack("<i", len(raw_metatable)))
-            out.extend(raw_metatable)
-        else:  # Route.SESSION_BLOCK, .SESSION_PROTOCOL_REPS
-            trial: TrialRep
-            for trial in kwargs['trials']:
-                raw_trial = trial.to_bytes()
-                out.extend(struct.pack("<i", len(raw_trial)))
-                out.extend(raw_trial)
-
-        return bytes(out)
-    except Exception as e:
-        raise APISerializeError(cause=e)
-
-
-def deserialize_api_response(route: str, raw: bytes) -> Dict[str, Any]:
-    """
-    Deserialize the response object received from a Lisberger lab portal API endpoint.
-
-    Args:
-        route: The endpoint route name.
-        raw: The byte sequence encoding the endpoint's response
-    Returns:
-        The deserialized response dictionary.
-    Raises:
-        APISerializeError: If the endpoint route name is invalid, if a required keyword is missing in the deserialized
-            response dictionary, or if any error occurs during deserialization.
-    """
-    try:
-        if not Route.is_supported_api(route):
-            raise ValueError(f"Unsupported API endpoint: {route}")
-        int_sz = struct.calcsize('<i')
-        offset = 0
-        hdr_sz, = struct.unpack_from('<i', raw, offset)
-        offset += int_sz
-        resp: Dict[str, Any] = json.loads(raw[offset:offset+hdr_sz].decode())
-        offset += hdr_sz
-        num_objects: int
-        if resp['route'] != route:
-            raise ValueError('Route mismatch in response!')
-        elif resp['version'] != API_VERSION:
-            raise ValueError(f"Invalid API version in response: {resp['version']}")
-        if route == Route.AUTHENTICATE:
-            if not all([(k in resp) for k in ['token', 'expires_in']]):
-                raise KeyError(f"Missing one or more keys in response")
-            return resp
-        elif 'error' in resp:
-            return resp
-        else:
-            num_objects = resp['num_objects']
-            if num_objects < 0 or ((route in [Route.SESSION_TRIAL, Route.METADATA_TABLE]) and num_objects != 1):
-                raise ValueError(f"Invalid number of objects returned in response")
-
-        if route == Route.SESSIONINFO:
-            session_list: List[SessionInfo] = list()
-            for i in range(num_objects):
-                info_sz, = struct.unpack_from('<i', raw, offset)
-                offset += int_sz
-                session_list.append(SessionInfo.from_bytes(raw[offset:offset+info_sz]))
-                offset += info_sz
-            resp['sessions'] = session_list
-        elif (route == Route.SESSION_NEURONS) or (route == Route.NEURONS):
-            neuron_list: List[NeuronInfo] = list()
-            for i in range(num_objects):
-                info_sz, = struct.unpack_from('<i', raw, offset)
-                offset += int_sz
-                neuron_list.append(NeuronInfo.from_bytes(raw[offset:offset+info_sz]))
-                offset += info_sz
-            resp['neurons'] = neuron_list
-        elif route == Route.SESSION_PROTOCOLS:
-            protocol_list: List[Protocol] = list()
-            for i in range(num_objects):
-                info_sz, = struct.unpack_from('<i', raw, offset)
-                offset += int_sz
-                protocol_list.append(Protocol.from_bytes(raw[offset:offset+info_sz]))
-                offset += info_sz
-            resp['protocols'] = protocol_list
-        elif route == Route.SESSION_TRIAL:
-            info_sz, = struct.unpack_from('<i', raw, offset)
-            offset += int_sz
-            resp['trial'] = TrialRep.from_bytes(raw[offset:offset+info_sz])
-            offset += info_sz
-        elif route == Route.METADATA_TABLE:
-            info_sz, = struct.unpack_from('<i', raw, offset)
-            offset += int_sz
-            resp['metatable'] = MetadataTable.from_bytes(raw[offset:offset+info_sz])
-            offset += info_sz
-        else:   # Route.SESSION_BLOCK, .SESSION_PROTOCOL_REPS
-            trial_list: List[TrialRep] = list()
-            for i in range(num_objects):
-                info_sz, = struct.unpack_from('<i', raw, offset)
-                offset += int_sz
-                trial_list.append(TrialRep.from_bytes(raw[offset:offset + info_sz]))
-                offset += info_sz
-            resp['trials'] = trial_list
-        return resp
-    except Exception as e:
-        raise APISerializeError(cause=e)
-
-
 class Route:
     """
     A collection of all supported API routes. Each route is a defined subpath under the portal's base URL:
@@ -1136,10 +1001,9 @@ class Route:
         """
         try:
             desc, param_list = cls._ROUTE_TO_DESCRIBE_INFO[entry['route']]
-            params = ", ".join([f"**{p}**={entry[p]}" for p in param_list])
+            params = ", ".join([f"**{p}**={entry[p]}" for p in param_list if p in entry])
             return desc, params
-        except Exception as e:
-            print(f"DEBUG: Exception in describe_api_request: {str(e)}", file=sys.stdout, flush=True)  # TODO: DEBUG
+        except Exception:
             return '**unknown**', ''
 
     _ROUTE_TO_DESCRIBE_INFO: Dict[str, Tuple[str, List[str]]] = {
@@ -1148,9 +1012,10 @@ class Route:
         SESSIONINFO: ('**sessions**', ['experimenter', 'subj_id', 'when']),
         SESSION_NEURONS: ('**session_neurons**', ['session_key', 'min_spikes', 'min_snr']),
         SESSION_PROTOCOLS: ('**session_protocols**', ['session_key']),
-        SESSION_TRIAL: ('**session_trial**', ['session_key', 'trial_index', 'unit_ids']),
-        SESSION_BLOCK: ('**session_trial_block**', ['session_key', 'start', 'end', 'unit_ids']),
-        SESSION_PROTOCOL_REPS: ('**session_protocol_reps**', ['session_key', 'proto_hash', 'completed', 'unit_ids']),
+        SESSION_TRIAL: ('**session_trial**', ['session_key', 'trial_index', 'unit_ids', 'what']),
+        SESSION_BLOCK: ('**session_trial_block**', ['session_key', 'start', 'end', 'unit_ids', 'what']),
+        SESSION_PROTOCOL_REPS: ('**session_protocol_reps**',
+                                ['session_key', 'proto_hash', 'completed', 'unit_ids', 'what']),
         METADATA_TABLE: ('**metadata_table**', ['table']),
         NEURONS: ('**neurons**', ['min_spikes', 'min_snr', 'min_rate', 'neuron_type', 'subj_id', 'study_title',
                                   'proto_hash', 'min_complete'])
@@ -1211,6 +1076,7 @@ class Route:
             out.extend(struct.pack("<i", len(raw_hdr)))
             out.extend(raw_hdr)
             if obj_key:
+                # NOTE: This relies on fact that all object types returned in an API response implement to_bytes()
                 obj_list: List[Any] = kwargs[obj_key] if is_list else [kwargs[obj_key]]
                 for o in obj_list:
                     raw_object = o.to_bytes()
@@ -1255,6 +1121,7 @@ class Route:
             elif 'error' in resp:
                 return resp
 
+            # NOTE: This relies on fact that all object types returned in an API response implement from_bytes()
             obj_key, obj_class, is_list = cls._ROUTE_TO_RESP_INFO[route]
             num_objects = resp['num_objects']
             obj_list: List[obj_class] = list()
@@ -1262,7 +1129,6 @@ class Route:
                 info_sz, = struct.unpack_from('<i', raw, offset)
                 offset += int_sz
                 # noinspection PyUnresolvedReferences
-                # TODO: Could be an issue here. Really should define an abstract class with to_bytes/from_bytes
                 obj_list.append(obj_class.from_bytes(raw[offset:offset + info_sz]))
                 offset += info_sz
             resp[obj_key] = obj_list if is_list else obj_list[0]
