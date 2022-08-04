@@ -114,3 +114,8 @@ licensed under the terms of the MIT license.
 `sglportalapi` relies on the [requests](https://docs.python-requests.org/) library to
 authenticate your identity on the portal and query the portal's API endpoints. Response
 data is typically represented as 1D [Numpy](https://numpy.org/) arrays.
+
+David J Herzfeld has been instrumental in providing guidance during the development of the Lisberger lab
+portal and its API, not to mention supplying sample experimental data for testing and serving as 
+liaison with Duke IT. He also provided Python code for parsing the Plexon PL2 files, which is 
+essential when committing experimental data to the portal.

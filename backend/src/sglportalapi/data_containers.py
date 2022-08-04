@@ -28,7 +28,7 @@ import numpy as np
 
 from sglportalapi.maestro import Protocol
 
-API_VERSION: int = 1
+API_VERSION: int = 2
 """ The current version number for the portal database access API. """
 
 

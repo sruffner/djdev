@@ -19,10 +19,12 @@ consider a large Omniplex file containing 200,000,000 samples recorded on each o
 I have also made some cosmetic changes such as docstrings and some type annotations.
 
 25jul2022 - Updated to reflect changes David H made to handle PL2 software version 1.19.2
+03aug2022 - Further changes to fix _get_channel_offset()
 """
 
 import struct
 import os
+
 import numpy as np
 from typing import Dict, Any, Optional, Union, Tuple, List, IO
 
@@ -45,14 +47,16 @@ PL2_HEADER_ANALOG_CHANNEL = 0xD4
 PL2_HEADER_SPIKE_CHANNEL = 0xD5
 PL2_HEADER_EVENT_CHANNEL = 0xD6
 
-# Data subtypes
-PL2_ANALOG_TYPE_WB = 0x03
-PL2_ANALOG_TYPE_AI = 0x0C
-PL2_ANALOG_TYPE_AI2 = 0x0D  # New in PL version 1.19.2 --- not sure why
+# Data sources/subtypes
+PL2_ANALOG_TYPE_WB = 0x03   # Wide band analog
+PL2_ANALOG_TYPE_AI = 0x0C   # Prior to PL v1.19, this was the source for 'AI' channels. For v1.19+, it's "Cineplex Data"
+PL2_ANALOG_TYPE_AI2 = 0x0D  # As of PL v1.19, this is the source for 'AI' channels.
 PL2_ANALOG_TYPE_FP = 0x07
-PL2_ANALOG_TYPE_SPKC = 0x04
-PL2_EVENT_TYPE_SINGLE_BIT = 0x09
-PL2_EVENT_TYPE_STROBED = 0x0A
+PL2_ANALOG_TYPE_SPKC = 0x04   # Narrow band analog
+PL2_EVENT_TYPE_KBD = 0x08  # Keyboard events
+PL2_EVENT_TYPE_SINGLE_BIT = 0x09  # TTL events
+PL2_EVENT_TYPE_STROBED = 0x0A  # Source name = 'Other Events': 'Strobed', 'RSTART', and 'RSTOP'
+PL2_EVENT_TYPE_CINEPLEX = 0x0C  # "Cineplex Data" event channels introduced in PL v1.19 (?)
 PL2_SPIKE_TYPE_SPK = 0x06
 PL2_SPIKE_TYPE_SPK_SPKC = 0x01
 
@@ -620,48 +624,106 @@ def _read_event_channel_header(fp: IO):
     return data
 
 
-def _get_channel_offset(data: Dict[str, Any], data_subtype: int, channel_number: int) -> int:
+def _get_creator_software_version(data: Dict[str, Any]) -> Tuple[int, int, int]:
     """
-    Return the offset in the type of channel given the data subtype.
+    Get the Plexon software version that created the PL2 file. This method assumes the data file header has already
+    been parsed and that the software version string 'N.M.R' -- where N, M, and R all are integer strings -- is
+    available in the field 'creator_software_version'.
 
     Args:
         data: Dictionary holding PL2 file contents culled thus far.
-        data_subtype: The channel data subtype. Must be one of PL2_ANALOG_TYPE_WB, _AI, _AI2, _FP, _SPKC;
-            PL2_EVENT_TYPE_SINGLE_BIT, _STROBED; PL2_SPIKE_TYPE_SPK, or PL2_SPIKE_TYPE_SPK_SPKC.
+
+    Returns:
+        A 3-tuple holding the major, minor and revision number (N, M, R). If version string not found or cannot be
+            parsed, returns (1, 18, 0).
+    """
+    try:
+        parts = data['creator_software_version'].split('.')
+        if len(parts) != 3:
+            raise Exception(f"Bad version string: {data['creator_software_version']}")
+        return int(parts[0]), int(parts[1]), int(parts[2])
+    except Exception:
+        return 1, 18, 0
+
+
+def get_analog_channel_record_index(data: Dict[str, Any], is_wide_band: bool, channel_number: int) -> int:
+    """
+    Get the (zero-based) index of the channel record within the PL2 file contents for the specified wide-band ("WB")
+    or narrow-band ("SPKC") analog channel.
+
+    Args:
+        data: Dictionary holding PL2 file contents.
+        is_wide_band: True for wide-band analog channel, False for narrow-band.
+        channel_number: The requested channel number (a positive integer between 1 and the number of supported wide-band
+            or narrow-band channels).
+    Returns:
+        Index of relevant channel record within the analog channel list in data['analog_channels'], or -1 if not found.
+    """
+    try:
+        idx = _get_channel_offset(data, PL2_ANALOG_TYPE_WB if is_wide_band else PL2_ANALOG_TYPE_SPKC, channel_number)
+    except Exception:
+        idx = -1
+    return idx
+
+
+def _get_channel_offset(data: Dict[str, Any], data_subtype: int, channel_number: int) -> int:
+    """
+    Return the offset to the channel header information record for the specified channel data source or channel number.
+
+    There are four categories of channel data stored in the Plexon data file -- analog data, spike data, event data, and
+    start/stop channel data. Within each category -- except the last one -- are one or more channel "sources". For
+    example, there are 4 different sources or "subtypes" of analog data. And within each channel source are 1 or more
+    individual channels. For example, there are 32 "single-bit" (source = 9) event channels numbered 1-32.
+
+    As PL2 file contents are loaded into the `data` dictionary, the channel data is organized into 4 subdictionaries:
+     - `data['analog_channels']` = List of all analog data channels.
+     - `data['spike_channels']` = List of all spike data channels.
+     - `data['event_channels']` = List of all digital event data channels.
+     - `data['start_stop_channels']` = The start/stop data (NOT a list of individual channels).
+
+    Given the data source/subtype and the channel number within that subtype, this method returns the zero-based index
+    of the relevant channel record within the channel list for the appropriate channel category.
+
+    NOTES:
+     1. The notion of multiple channels per category does not apply to the start/stop data. For this category
+        (source == 0), the method always returns 0.
+     2. The method makes no assumption about how the channel records are stored within each of 3 channel lists.
+
+    Args:
+        data: Dictionary holding PL2 file contents culled thus far.
+        data_subtype: The channel data source or subtype. Must be one of PL2_ANALOG_TYPE_WB, _AI, _AI2, _FP, _SPKC;
+            PL2_EVENT_TYPE_SINGLE_BIT, _STROBED; PL2_SPIKE_TYPE_SPK, or PL2_SPIKE_TYPE_SPK_SPKC. Will be zero for
+            start/stop data.
         channel_number: The channel index.
     Returns:
         The offset value
+    Raises:
+        RuntimeError: If channel data source is not recognized.
     """
-    channel = str(channel_number).zfill(2)
-    if data_subtype == PL2_ANALOG_TYPE_WB:
-        offset = next(x for x in range(len(data["analog_channels"]))
-                      if data["analog_channels"][x]["name"] == ("WB" + channel))
-    elif (data_subtype == PL2_ANALOG_TYPE_AI) or (data_subtype == PL2_ANALOG_TYPE_AI2):
-        offset = next(x for x in range(len(data["analog_channels"]))
-                      if data["analog_channels"][x]["name"] == ("AI" + channel))
-    elif data_subtype == PL2_ANALOG_TYPE_FP:
-        offset = next(x for x in range(len(data["analog_channels"]))
-                      if data["analog_channels"][x]["name"] == ("FP" + channel))
-    elif data_subtype == PL2_ANALOG_TYPE_SPKC:
-        offset = next(x for x in range(len(data["analog_channels"]))
-                      if data["analog_channels"][x]["name"] == ("SPKC" + channel))
-    elif data_subtype == PL2_EVENT_TYPE_SINGLE_BIT:
-        offset = next(x for x in range(len(data["event_channels"]))
-                      if data["event_channels"][x]["name"] == ("EVT" + channel))
-    elif data_subtype == PL2_EVENT_TYPE_STROBED:
-        offset = next(x for x in range(len(data["event_channels"]))
-                      if data["event_channels"][x]["name"] == "Strobed")
-    elif data_subtype == PL2_SPIKE_TYPE_SPK:
-        offset = next(x for x in range(len(data["spike_channels"]))
-                      if data["spike_channels"][x]["name"] == ("SPK" + channel))
-    elif data_subtype == PL2_SPIKE_TYPE_SPK_SPKC:
-        offset = next(x for x in range(len(data["spike_channels"]))
-                      if data["spike_channels"][x]["name"] == ("SPK_SPKC" + channel))
-    elif data_subtype == 0x00:
-        offset = 0
-    else:
-        raise RuntimeError(f"Unknown channel data subtype provided: 0x{data_subtype:x}")
-    return offset
+    major, minor, rev = _get_creator_software_version(data)
+    spike_sources = [PL2_SPIKE_TYPE_SPK, PL2_SPIKE_TYPE_SPK_SPKC]
+    analog_sources = [PL2_ANALOG_TYPE_WB, PL2_ANALOG_TYPE_FP, PL2_ANALOG_TYPE_SPKC,
+                      PL2_ANALOG_TYPE_AI if ((major < 1) or (major == 1 and minor < 19)) else PL2_ANALOG_TYPE_AI2]
+    event_sources = [PL2_EVENT_TYPE_KBD, PL2_EVENT_TYPE_SINGLE_BIT, PL2_EVENT_TYPE_STROBED]
+    if (major < 1) or (major == 1 and minor < 19):
+        event_sources.append(PL2_EVENT_TYPE_CINEPLEX)
+
+    channel_list: Optional[List[Dict]] = None
+    if data_subtype == 0:
+        return 0
+    elif data_subtype in spike_sources:
+        channel_list = data['spike_channels']
+    elif data_subtype in analog_sources:
+        channel_list = data['analog_channels']
+    elif data_subtype in event_sources:
+        channel_list = data['event_channels']
+
+    if channel_list:
+        for i in range(len(channel_list)):
+            if (channel_list[i]['source'] == data_subtype) and (channel_list[i]['channel'] == channel_number):
+                return i
+
+    raise RuntimeError(f"Channel record not found in file header: source={data_subtype}, channel={channel_number}")
 
 
 def _read_footer(fp: IO, data: Dict[str, Any]) -> None:
@@ -739,7 +801,7 @@ def _reconstruct_footer(fp, data: Dict[str, Any]) -> None:
 
         if data_type == PL2_DATA_BLOCK_ANALOG_CHANNEL:
             num_items = _read(fp, "<H")
-            channel = _get_channel_offset(data, data_subtype, _read(fp, "<H"))  # Python is base 0
+            channel = _get_channel_offset(data, data_subtype, _read(fp, "<H"))
             _read(fp, "<H")  # Unknown
             timestamp = _read(fp, "<Q")
 
@@ -752,7 +814,7 @@ def _reconstruct_footer(fp, data: Dict[str, Any]) -> None:
             fp.seek(2 * num_items, os.SEEK_CUR)
         elif data_type == PL2_DATA_BLOCK_SPIKE_CHANNEL:
             _read(fp, "<H")
-            channel = _get_channel_offset(data, data_subtype, _read(fp, "<H"))  # Python is base 0
+            channel = _get_channel_offset(data, data_subtype, _read(fp, "<H"))
             num_sample_points = _read(fp, "<H")
             num_items = _read(fp, "<Q")
 
@@ -771,7 +833,7 @@ def _reconstruct_footer(fp, data: Dict[str, Any]) -> None:
             fp.seek(2 * num_items + 2 * num_sample_points * num_items + (num_items - 1) * 8, os.SEEK_CUR)
         elif data_type == PL2_DATA_BLOCK_EVENT_CHANNEL:
             _read(fp, "<H")
-            channel = _get_channel_offset(data, data_subtype, _read(fp, "<H"))  # Python is base 0
+            channel = _get_channel_offset(data, data_subtype, _read(fp, "<H"))
             num_items = _read(fp, "<Q")
             _read(fp, "<H")
             timestamp = _read(fp, "<Q")

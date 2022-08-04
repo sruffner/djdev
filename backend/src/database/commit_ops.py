@@ -99,6 +99,7 @@ from database.table_ops import fetch_attribute_values, fetch_one_row, fetch_rows
     SessionCommitter, rollback_session_commit, database_empty, insert_into_table, delete_from_table, update_table_row, \
     update_mapping_table
 from database.user_ops import validate_username, PASSWORD_HASH_METHOD, validate_password
+from sglportalapi.PL2 import get_analog_channel_record_index
 from sglportalapi.util import DocEnum
 
 _logger = get_application_logger()
@@ -365,7 +366,8 @@ class OmniplexUnit:
 
         Args:
             src: The filename of the original Omniplex source file.
-            ch: Omniplex channel on which unit was recorded.
+            ch: Omniplex channel on which unit was recorded. This should be either a wide-band analog channel "WB<num>"
+                or a narrow-band analog channel "SPKC<num>", where <num> is a 1-, 2- or 3-digit positive integer.
             spikes: The spike train, with times in seconds since Omniplex recording started. May be None when using
                 this structure to store unit metrics without the spike train, which can be VERY large.
             num_spikes: The total number of spikes recorded. If `spikes` is not None, then this argument is
@@ -394,8 +396,9 @@ class OmniplexUnit:
     @property
     def channel(self) -> str:
         """
-        The Omniplex source channel name, which consists of the tag 'WB' (wide-band channel) or 'SPKC' (narrow-band
-        channel) followed by a 2-digit number.
+        The Omniplex source channel name, which consists of the tag 'WB' (wide-band analog) or 'SPKC' (narrow-band
+        analog) followed by a 1-, 2-digit or 3-digit positive integer specifying the channel number. For example: "WB8",
+        "WB08" and "WB008" all refer to wide-band analog channel #8.
         """
         return self._definition['channel']
 
@@ -1511,10 +1514,14 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
     On calculating the template waveform and SNR for each neural unit: The unit's recorded channel ID must start
     with "WB" (wide band data) or "SPKC" (narrow band data). Wide band data is preferred because the filtering
     parameters for SPKC can be changed during an Omniplex session and are not stored in the PL2 file. If the
-    specified channel ID is "SPKC<num>", where <num> is a 2-digit number, the method first looks for the wide-band
-    channel "WB<num>". If that is available, the analog trace is bandpass-filtered between 300-8000Hz using a
-    second-order Butterworth filter via the SciPy package. If not, the analog trace on "SPKC<num>" is used as is
-    (it should already have been filtered).
+    specified channel ID is "SPKC<num>", the method first looks for the wide-band channel "WB<num>". If that is
+    available, the analog trace is bandpass-filtered between 300-8000Hz using a econd-order Butterworth filter via the
+    SciPy package. If not, the analog trace on "SPKC<num>" is used as is (it should already have been filtered).
+
+    [NOTE: In the channel ID string "SPKC<num>" or "WB<num>", "<num>" should evaluate to a 1-, 2- or 3-digit positive
+    integer. Since Plexon software version 1.19, there is support for 128 wide-band and narrow-band analog channels, so
+    a 3-digit (zero-filled, eg, "001") number is needed. In earlier versions, only 2 digits were needed to represent
+    the channel number.]
 
     To calculate the template waveform, the method averages 10-ms "clips" in the filtered trace that start 1ms prior
     to each spike timestamp. To calculate SNR, the method first estimates the standard deviation of the background
@@ -1536,7 +1543,9 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
 
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
-        channel_id: ID of the Omniplex analog data channel: wide-band "WBnn" or narrow-band "SPKCnn"
+        channel_id: ID of the Omniplex analog data channel: wide-band "WB<num>" or narrow-band "SPKC<num>", where <num>
+            is a 1-, 2- or 3-digit positive integer. Thus, "WB8", "WB08", and "WB008" all identify the analog wide-band
+            channel number 8.
         spikes: List of Numpy arrays; each array holds the spike timestamps (in seconds during Omniplex recording)
             for a distinct neural unit recorded on the specified analog channel. It is assumed that each array
             contains at least two spike times.
@@ -1556,28 +1565,32 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
     if _background_job_update(job_id, msg):
         return None
 
-    # if narrow band channel SPKC<num> specified, use wide band channel WB<num> instead IF it is available
+    # wide-band or narrow-band channel. Extract Plexon-assigned channel number (a positive integer)
     is_wide_band = (len(channel_id) > 2) and (channel_id[0:2].lower() == 'wb')
     is_narrow_band = (len(channel_id) > 4) and (channel_id[0:4].lower() == 'spkc')
     if not (is_wide_band or is_narrow_band):
         raise Exception(f"Bad Omniplex channel ID: {channel_id}")
-    ch_index = -1
+    channel_num = -1   # this is the Plexon-assigned channel number
     try:
-        if is_narrow_band:
-            ch_index = [ch['name'] for ch in info['analog_channels']].index(channel_id)
-            alt_id = "WB" + channel_id[-2:]
-            ch_index = [ch['name'] for ch in info['analog_channels']].index(alt_id)
-            is_wide_band = True
-        else:
-            ch_index = [ch['name'] for ch in info['analog_channels']].index(channel_id)
-    except ValueError:
+        channel_num = int(channel_id[(2 if is_wide_band else 4):])
+    except Exception:
         pass
-    if ch_index == -1:
+    if channel_num < 1:
+        raise Exception(f"Bad channel number in Omniplex channel ID: {channel_id}")
+
+    # find zero-based index of the channel record in the Plexon file's list of analog channel records. If narrow-band
+    # channel SPKC<num> was specified, try to use corresponding wide band channel WB<num>, IF it is available
+    idx = get_analog_channel_record_index(info, is_wide_band=True, channel_number=channel_num)
+    if idx > -1:
+        is_wide_band = True
+    elif is_narrow_band:
+        idx = get_analog_channel_record_index(info, is_wide_band=False, channel_number=channel_num)
+    if idx < 0:
         raise Exception(f"Did not find Omniplex analog channel data for channel ID: {channel_id}")
 
-    num_blocks = len(info["analog_channels"][ch_index]["block_num_items"])
-    samples_per_sec: float = info['analog_channels'][ch_index]['samples_per_second']
-    to_volts: float = info['analog_channels'][ch_index]['coeff_to_convert_to_units']
+    num_blocks = len(info["analog_channels"][idx]["block_num_items"])
+    samples_per_sec: float = info['analog_channels'][idx]['samples_per_second']
+    to_volts: float = info['analog_channels'][idx]['coeff_to_convert_to_units']
     samples_in_template = int(samples_per_sec * 0.01)
     block_medians = np.zeros(num_blocks)
     num_clips = [0] * len(spikes)
@@ -1596,7 +1609,7 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
     t0 = time.time()
     while block_idx < num_blocks:
         # read in next block of samples and bandpass-filter it if signal is wide-band
-        curr_block = PL2.load_analog_channel_block(fp, ch_index, block_idx, info)
+        curr_block = PL2.load_analog_channel_block(fp, idx, block_idx, info)
         if is_wide_band:
             curr_block, filter_ic = scipy.signal.lfilter(b, a, curr_block, axis=-1, zi=filter_ic)
 
