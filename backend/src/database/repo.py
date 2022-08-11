@@ -459,8 +459,9 @@ class _TransferProgressCallback(object):
     """
     Callback object reports progress for an S3 object tranfer -- either upload or download. The callback may be
     configured to overwrite a progress message to STDOUT (which is appropriate only in the __main__ test script, when no
-    other threads/processes are writing to the console), or to write to the portal application log once after the
-    transfer has started and once after the transfer surpasses 50% completion.
+    other threads/processes are writing to the console), or to write to the portal application log each time another 10%
+    of the transfer has completed. Of course, depending on how frequently the callback is invoked, the reported
+    completion percentage will not necessarily be in exact 10% increments.
     """
     def __init__(self, file_path: Path,  log: bool = True, download_size: Optional[int] = None):
         """
@@ -476,10 +477,10 @@ class _TransferProgressCallback(object):
         """
         self._path: Path = file_path
         self._to_log: bool = log
-        self._num_updates = 0
         self._msg_prefix = "Downloading" if isinstance(download_size, int) else "Uploading"
         self._size = download_size if isinstance(download_size, int) else file_path.stat().st_size
         self._size_so_far = 0
+        self._pct_last_update = -20
         self._lock = threading.Lock()
 
     def __call__(self, num_bytes):
@@ -487,10 +488,10 @@ class _TransferProgressCallback(object):
             self._size_so_far += num_bytes
             percentage = (self._size_so_far / float(self._size)) * 100
             if self._to_log:
-                if (self._num_updates == 0) or ((self._num_updates == 1) and (percentage >= 50)):
+                if (percentage - self._pct_last_update) >= 10:
+                    self._pct_last_update = percentage
                     app_log.get_application_logger().info(
                         f"{self._msg_prefix} {self._path.name}  {self._size_so_far}/{self._size} ({percentage:.2f}%)")
-                    self._num_updates += 1
             else:
                 sys.stdout.write(
                     f"\r{self._msg_prefix} {self._path.name}  {self._size_so_far}/{self._size} ({percentage:.2f}%)")
@@ -589,11 +590,11 @@ def _process_command(bucket_name: str) -> Tuple[bool, Optional[str]]:
                 error_msg = "Download failed."
     elif command == 'g':
         obj_key = input('Enter object key in full > ')
-        ok, url = _presigned_url_for_file(bucket_name, obj_key)
-        if ok:
+        url = _presigned_url_for_file(bucket_name, obj_key)
+        if isinstance(url, str):
             print(f"\nDownload URL is: {url}")
         else:
-            error_msg = url
+            error_msg = "Unable to generate presigned URL; consult application logs"
     elif command == 'x':
         obj_key = input('Enter object key in full > ')
         if not _delete_file_in_bucket(bucket_name, obj_key):

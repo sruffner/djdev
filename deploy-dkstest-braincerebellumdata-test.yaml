@@ -1,0 +1,415 @@
+# This YAML defines the deployment of the Lisberger lab portal application to the Duke Azure beta-test cluster in the
+# braincerebellumdata-test namespace. This namespace is used solely to test and evaluate the application whenever the
+# implementation changes in any way (bug fixes, new features, etc).
+#
+# Duke is in the process of transitioning from the OpenShift to Azure. The first step is to verify that customer apps
+# can be deployed successfully on the beta-test Azure cluster, and to make the necessary changes in the deployment
+# specs required because of differences in the Azure and OpenShift Kubernetes implementations.
+#
+# The application now consists of 3 interdependent deployments:
+#   1) data-store: A single-pod deployment with the application's two persistence mechanisms: the MariaDB server and its
+#      underlying database files; and a Redis instance for Redis worker queueing and temporary storage of information
+#      during a long-running experiment commit workflow.
+#   2) web-server: A 2-replica deployment of the GUnicorn-based Python/Flask/Dash web backend.
+#   3) web-worker: A 2-replica deployment of the Redis Queue workers that handle background tasks for the experiment
+#      session commit workflow.
+# The web-server backend replicas use Redis to store information on in-progress session commit jobs (so that the backend
+# itself remains stateless), and the RQ workers handle various background tasks that are queued by the web server
+# because they require extensive processing time (preprocessing a session archive; committing a session to the database
+# and saving it to the backup repository; preparing a data download file; backing up the database operations log).
+#
+# NOTES -- TODO: These apply to the OpenShift deployment. They need to be updated for the Azure deployment.
+#  1) The PVCs listed were created on the Duke OCP console. The PVs are dynamically provisioned.
+#  2) The Route resource named 'inbound-route' provides TLS edge termination to the Service portal-server, a ClusterIP
+#     type service that routes to the GUnicorn-served Dash/Flask backend listening on the node's 8050 port. With this
+#     configuration, you access the portal at https://braincerebellumdata-test.ocp.dhe.duke.edu -- BUT you must be on
+#     the Duke VPN. We'll want to configure this differently for production.
+#  3) Take note of the image names for the backend, mariadb, and redis containers. These images are built in Gitlab
+#     whenever we push changes to the 'devel' branch. The image tags end in 'devel-<sha>', where <sha> is a shortened
+#     version of the commit SHA for that image. This is important. Previously, there was just the 'devel' tag, which
+#     was overwritten each time a commit to the devel branch was pushed. If a pod failed or was kicked out on the
+#     cluster, OpenShift pulled from Gitlab when recreating the pod. This meant loss of control of what is running on
+#     the cluster. THIS MEANS THAT EVERY TIME WE WANT TO DEPLOY A NEW VERSION, WE MUST UPDATE THE <sha> TAG EVERYHWERE
+#     IN THIS FILE.
+#  4) Secrets. Several environment variables are defined in an opaque Kubernetes Secret, sgl-secret, which must be
+#     deployed prior to deploying the application. The YAML that defines the secret is excluded from the Git repo to
+#     protect those secrets.
+#
+# To deploy the portal "from scratch" in the braincerebellumdata-test namespace on the Duke OpenShift cluster, I
+# followed these steps:
+#  1) Create the two required PVCs (pvc-backend and pvc-db) on the OpenShift web console (see "Create Storage" on the
+#     console's "Storage" tab). The underlying PVs are automatically provisitioned. NOTE: If the PVCs already exist
+#     because the portal was running previously, there's no need to reprovision. But you'll have to be sure to reset
+#     the MariaDB and remove any existing content in the portal workspace directory (/portal_ws), as there reside on
+#     the persistent volumnes.
+#  2) Open a Mac OS Terminal and switch to the djdev directory. Then oc login to the OpenShift console.
+#  3) Deploy the portal secrets: oc apply -f environment/deploy-sgl-secret.yaml.
+#  4) Deploy the image pull secret so that the container images required for the portal app can be pulled from the
+#     sgl-portal Gitlab project: oc apply -f environment/gitlab-sgl-portal-pull-secret.yaml.
+#  5) Deploy the portal application: oc apply -f deploy-braincerebellumdata-test.yaml.
+#  6) Reset and seed database.
+#     a) On OpenShift web console, go to the "Terminal" tab on one of the "webserver" pods. This is effectively a
+#         terminal running within the backend container. The terminal comes up in the code/ directory, the equivalent of
+#         the backend/src folder in the djdev Pycharm project. The portal workspace directory is at ../portal_ws.
+#     b) Run python -m admin.reset to reset the database. This cleans out any old content we care about in pvc_db.
+#     c) Remove old content in the portal workspace directory -- particularly everything in the logs/ directory. You
+#        won't need to do this if the PVC 'pvc_backend' is brand-new.
+#     d) Run python -m admin.seed to seed the database with initial content. You'll be prompted to enter initial
+#        passwords for each user added to the database.
+#   Note that the portal is "alive" during these set of operations, but no one should be using it. It would probably
+#   be a good idea to disable the route until after the database is reset and seeded.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sgl-portal-dkstest-in
+  namespace: braincerebellumdata-test
+  labels:
+    app.kubernetes.io/instance: sgl-portal-dkstest
+    app.kubernetes.io/name: sgl-portal
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 10g
+spec:
+  ingressClassName: dhe-nginx
+  rules:
+    - host: braincerebellumdata-test.dkstest.dhe.duke.edu
+      http:
+        paths:
+          - path: /
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: portal-server
+                port:
+                  number: 8050
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-backend
+spec:
+  accessModes:
+  - ReadWriteMany
+  storageClassName: private-azfile-standard-lrs
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-db
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: default
+  resources:
+    requests:
+      storage: 200Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: portal-server
+  labels:
+    app: sgl-portal
+    tier: web
+spec:
+  type: ClusterIP
+  selector:
+    app: sgl-portal
+    tier: web
+  ports:
+    - protocol: TCP
+      port: 8050
+      targetPort: 8050
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-store
+  labels:
+    app: sgl-portal
+    tier: data
+spec:
+  type: ClusterIP
+  selector:
+    app: sgl-portal
+    tier: data
+  ports:
+    - protocol: TCP
+      name: redis
+      port: 6379
+      targetPort: 6379
+    - protocol: TCP
+      name: mariadb
+      port: 3306
+      targetPort: 3306
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-store
+  labels:
+    app: sgl-portal
+    tier: data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sgl-portal
+      tier: data
+  strategy:
+    type: Recreate   # we must NOT have two MariaDB containers running at once, accessing the same PVC!
+  template:
+    metadata:
+      labels:
+        app: sgl-portal
+        tier: data
+    spec:
+      imagePullSecrets:
+      - name: sgl-portal-pull-secret
+      initContainers:
+      - name: fix-permissions
+        image: busybox
+        command: [ 'sh', '-c', 'chmod -R g+rwX /bitnami/mariadb' ]
+        volumeMounts:
+          - name: db-data
+            mountPath: /bitnami/mariadb
+      containers:
+      - name: sgl-db
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel-9fe786cb
+        imagePullPolicy: Always
+        volumeMounts:
+          - name: db-data
+            mountPath: /bitnami/mariadb
+        env:
+          - name: MARIADB_ROOT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: mariadb_root_password
+        ports:
+          - containerPort: 3360
+        livenessProbe:
+          exec:
+            command: ["sh", "-c", "exec mariadb-admin status -uroot -p$MARIADB_ROOT_PASSWORD"]
+          initialDelaySeconds: 20
+          periodSeconds: 5
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "exec mariadb-admin status -uroot -p$MARIADB_ROOT_PASSWORD"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      - name: sgl-redis
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel-9fe786cb
+        imagePullPolicy: Always
+        ports:
+          - containerPort: 6379
+        livenessProbe:
+          exec:
+            command: ["sh", "-c", 'RES=$(redis-cli ping); if [ "$RES" != "PONG" ]; then echo "$RES"; exit 1; fi']
+          initialDelaySeconds: 20
+          periodSeconds: 5
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", 'RES=$(redis-cli ping); if [ "$RES" != "PONG" ]; then echo "$RES"; exit 1; fi']
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+        - name: db-data
+          persistentVolumeClaim:
+            claimName: pvc-db
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-worker
+  labels:
+    app: sgl-portal
+    tier: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sgl-portal
+      tier: worker
+  template:
+    metadata:
+      labels:
+        app: sgl-portal
+        tier: worker
+    spec:
+      imagePullSecrets:
+      - name: sgl-portal-pull-secret
+      initContainers:
+      - name: wait-for-redis
+        image: busybox
+        command: ['sh', '-c', 'echo Waiting for Redis; until nc -z $(REDIS_HOST) $(REDIS_PORT); do printf "."; sleep 1; done; echo Ready!']
+        env:
+          - name: REDIS_HOST
+            value: data-store.braincerebellumdata-test.svc.cluster.local
+          - name: REDIS_PORT
+            value: "6379"
+      containers:
+      - name: sgl-worker
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-9fe786cb
+        imagePullPolicy: Always
+        command: ["rq"]
+        args: ["worker", "--with-scheduler", "--url", "redis://$(REDIS_HOST):$(REDIS_PORT)"]
+        volumeMounts:
+          - name: backend-workspace
+            mountPath: /portal_ws
+        env:
+          - name: REDIS_HOST
+            value: data-store.braincerebellumdata-test.svc.cluster.local
+          - name: REDIS_PORT
+            value: "6379"
+          - name: MARIADB_HOSTNAME
+            value: data-store.braincerebellumdata-test.svc.cluster.local
+          - name: WORKSPACE_DIR
+            value: /portal_ws
+          - name: APP_CONTAINER
+            value: sgl-worker
+          - name: AWS_REGION_NAME
+            value: us-east-1
+          - name: REPO_S3_BUCKET_NAME
+            value: dh-braincerebellumdata-test
+          - name: MARIADB_ROOT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: mariadb_root_password
+          - name: FLASK_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: flask_secret_key
+          - name: JWT_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: jwt_secret_key
+          - name: AWS_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: aws_access_key_id
+          - name: AWS_ACCESS_KEY_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: aws_access_key_secret
+        livenessProbe:
+          exec:
+            command: [ "sh", "-c", 'H=$(hostname); rq info -W | grep -c $H' ]
+          initialDelaySeconds: 20
+          periodSeconds: 5
+        readinessProbe:
+          exec:
+            command: [ "sh", "-c", 'H=$(hostname); rq info -W | grep -c $H' ]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+        - name: backend-workspace
+          persistentVolumeClaim:
+            claimName: pvc-backend
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-server
+  labels:
+    app: sgl-portal
+    tier: web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sgl-portal
+      tier: web
+  template:
+    metadata:
+      labels:
+        app: sgl-portal
+        tier: web
+    spec:
+      imagePullSecrets:
+      - name: sgl-portal-pull-secret
+      initContainers:
+      - name: wait-for-redis
+        image: busybox
+        command: ['sh', '-c', 'echo Waiting for Redis; until nc -z $(DATA_HOST) 6379; do printf "."; sleep 1; done; echo Ready!']
+        env:
+          - name: DATA_HOST
+            value: data-store.braincerebellumdata-test.svc.cluster.local
+      - name: wait-for-mariadb
+        image: busybox
+        command: ['sh', '-c', 'echo Waiting for MariaDB; until nc -z $(DATA_HOST) 3306; do printf "."; sleep 1; done; echo Ready!']
+        env:
+          - name: DATA_HOST
+            value: data-store.braincerebellumdata-test.svc.cluster.local
+      containers:
+      - name: sgl-server
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-9fe786cb
+        imagePullPolicy: Always
+        ports:
+          - containerPort: 8050
+        volumeMounts:
+          - name: backend-workspace
+            mountPath: /portal_ws
+        env:
+          - name: REDIS_HOST
+            value: data-store.braincerebellumdata-test.svc.cluster.local
+          - name: REDIS_PORT
+            value: "6379"
+          - name: MARIADB_HOSTNAME
+            value: data-store.braincerebellumdata-test.svc.cluster.local
+          - name: WORKSPACE_DIR
+            value: /portal_ws
+          - name: APP_CONTAINER
+            value: sgl-server
+          - name: AWS_REGION_NAME
+            value: us-east-1
+          - name: REPO_S3_BUCKET_NAME
+            value: dh-braincerebellumdata-test
+          - name: MARIADB_ROOT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: mariadb_root_password
+          - name: FLASK_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: flask_secret_key
+          - name: JWT_SECRET_KEY
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: jwt_secret_key
+          - name: AWS_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: aws_access_key_id
+          - name: AWS_ACCESS_KEY_SECRET
+            valueFrom:
+              secretKeyRef:
+                name: sgl-secret
+                key: aws_access_key_secret
+        livenessProbe:
+          exec:
+            command: [ "sh", "-c", 'pidof -x gunicorn' ]
+          initialDelaySeconds: 20
+          periodSeconds: 5
+        readinessProbe:
+          httpGet:
+            port: 8050
+            path: /
+          initialDelaySeconds: 20
+          periodSeconds: 5
+      volumes:
+        - name: backend-workspace
+          persistentVolumeClaim:
+            claimName: pvc-backend

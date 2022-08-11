@@ -150,7 +150,7 @@ class _RedisLogBackupHandler(logging.Handler):
     large, truncate it to 0 after backing it up in the S3-based portal repository.
     """
     def __init__(self):
-        logging.Handler.__init__(self, level=logging.INFO)
+        logging.Handler.__init__(self, level=logging.DEBUG)
         self.formatter = custom_application_log_formatter()
         """ The handler's customized formatter. """
         self.redis_conn = config.config.get_config().redis_conn
@@ -252,6 +252,29 @@ def force_flush_application_message_log() -> None:
             if database.repo.upload_file(save_path, save_key):
                 save_path.unlink(missing_ok=True)
     except Exception:
+        pass
+
+
+def push_orhaned_application_message_log_to_repo() -> None:
+    """
+    When the current application log file in the portal workspace directory gets big enough, it is renamed as
+    "$APPLOGNAME-<datetime>.log" and moved to the portal backup repository in S3, and a new empty log file remains in
+    the workspace directory. However, if an error occurs while uploading the renamed log file to S3, then that file
+    will be left in the workspace.
+
+    This method will check the portal workspace logs directory for any such orphased application log files and try
+    again to upload them to S3. It is recommended that this method be invoked only at portal startup.
+    """
+    try:
+        cfg = config.config.get_config()
+        log_dir = Path(cfg.workspace_dir, _APPMSGLOG_DIR_NAME)
+        base = f"{_APPMSGLOG_FILE_NAME}-"
+        for p in log_dir.iterdir():
+            if p.is_file() and p.name.startswith(base) and (len(p.name) > len(base)):
+                save_key = f"/{_APPMSGLOG_DIR_NAME}/{p.name}"
+                if database.repo.upload_file(p, save_key):
+                    p.unlink(missing_ok=True)
+    except Exception as e:
         pass
 
 

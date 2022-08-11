@@ -9,11 +9,14 @@ timeout = 120
 worker_tmp_dir = '/dev/shm'
 
 import config.app_logging as app_log
+from database.log_ops import schedule_log_backup_if_necessary
 
 
 # noinspection PyUnusedLocal
 def when_ready(server):
     app_log.get_application_logger().info(f"The GUnicorn-served backend has started.")
+    schedule_log_backup_if_necessary(soon=True)
+    app_log.push_orhaned_application_message_log_to_repo()
 
 
 # noinspection PyUnusedLocal
