@@ -194,6 +194,10 @@ class CommitStateEnum(DocEnum):
         """
         return self not in [CommitStateEnum.PREPROCESS, CommitStateEnum.CANCEL, CommitStateEnum.COMMIT]
 
+    def after_preprocessing(self) -> bool:
+        """ Does this commit job state represent any state after the preprocessing phase? """
+        return self not in [CommitStateEnum.UPLOADING, CommitStateEnum.PREPROCESS]
+
 
 class CommitJobStatus:
     """ Status information for a session commit job in progress on the lab portal server. """
@@ -948,7 +952,7 @@ def cancel_or_remove_commit_job(job_id: str) -> Tuple[bool, str, Optional[Commit
             # all the job-specific keys that may need to be deleted. After preprocessing, there are keys holding info
             # used during subsequent phases. But if a session is behavioral only, the two neural unit keys won't exist.
             delete_keys = [progress_key]
-            if job_status.state.value > CommitStateEnum.PREPROCESS.value:
+            if job_status.state.after_preprocessing():
                 delete_keys.extend([f"{INFO_NS}{job_id}", f"{PROTONAMES_NS}{job_id}", f"{PROTODEFS_NS}{job_id}"])
                 if job_status.units and job_status.units > 0:
                     delete_keys.extend([f"{UNITMETRICS_NS}{job_id}", f"{UNITTYPES_NS}{job_id}"])
@@ -2214,6 +2218,12 @@ def finish_commit_job(job_id: str) -> bool:
     before committing the session to the database. It includes attributes from the Session and Session.EPhys tables.
     """
 
+    def _upload_progress(pct: float) -> None:
+        try:
+            _background_job_update(job_id, f"Uploading session archive to portal repository... {pct:.1f}%")
+        except Exception:
+            pass
+
     try:
         # verify job status, existence of ZIP archive and preprocessing results file in staging directory
         job_status = commit_job_status(job_id)
@@ -2326,9 +2336,9 @@ def finish_commit_job(job_id: str) -> bool:
         with zipfile.ZipFile(zip_path, 'a') as f:
             f.write(preproc_path, PREPROC_FNAME)
 
-        if _background_job_update(job_id, "Uploading session archive to portal repository..."):
+        if _background_job_update(job_id, "Starting archive upload to portal repository..."):
             raise Exception("Operation cancelled")
-        if not repo.upload_file(zip_path, key):
+        if not repo.upload_file(zip_path, key, log_func=_upload_progress):
             raise Exception(f"Unable to push committed session archive [{key}] to portal repository")
         archive_uploaded = True
 
@@ -2763,7 +2773,7 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
         recon_dir.mkdir(parents=True, exist_ok=False)
         zip_path = Path(recon_dir, f"{log_entry['subj_id']}_{str(log_entry['date'])}_{log_entry['suffix']}.zip")
         print(f"  > Downloading session archive from repository at {key}...", file=sys.stdout, flush=True)
-        if not repo.download_file(key, zip_path, log=False):
+        if not repo.download_file(key, zip_path, log_func=False):
             raise Exception("Failed while downloading session archive from repository.")
 
         # load pre-processing results from binary file in session archive

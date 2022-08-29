@@ -40,7 +40,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional, List, Union, Dict, Any, Tuple
+from typing import Optional, List, Union, Dict, Any, Tuple, Callable
 
 from boto3 import Session
 from boto3.s3.transfer import TransferConfig
@@ -84,7 +84,7 @@ def listing() -> Optional[Dict[str, List[Dict[str, Any]]]]:
     return folders
 
 
-def upload_file(file_path: Path, key: str, log: bool = True) -> bool:
+def upload_file(file_path: Path, key: str, log_func: Union[bool, Callable] = True) -> bool:
     """
     Upload the specified file to the portal's backing repository.
 
@@ -95,8 +95,12 @@ def upload_file(file_path: Path, key: str, log: bool = True) -> bool:
     Args:
         file_path: File system path for the target file. Must exist.
         key: The S3 object key under which the file should be stored. Must satisfy portal constraints on key format.
-        log: If True, progress updates are posted to the portal application log once the upload begins and after 50%
-            completion. Else a progress message is updated in-place on STDOUT. Default = True.
+        log_func: If this argument is True or is a callable function, a progress message is written to the portal app
+            log to report 10% increments in progress. If the argument is a callable function, it is assumed to have the
+            form `fn(pct: float)`, and the function is invoked after writing to the app log. (Of course, actual reported
+            completion percentage will not necessarily be in exact 10% increments, depending on the total transfer size
+            and update frequency. If the argument is False, progress is reported by overwriting a line on STDOUT each
+            time the callback is invoked. Default = True.
     Returns:
         True if successful, False otherwise. Check application log for error desciription.
     Raises:
@@ -104,7 +108,7 @@ def upload_file(file_path: Path, key: str, log: bool = True) -> bool:
     """
     if not (_validate_key_format(key) and file_path.is_file()):
         raise ValueError("Bad repository file object key, or target file not found")
-    return _upload_file_to_bucket(file_path, app_cfg.get_config().repo_bucket, key, log)
+    return _upload_file_to_bucket(file_path, app_cfg.get_config().repo_bucket, key, log_func=log_func)
 
 
 def _validate_key_format(key: str) -> bool:
@@ -128,19 +132,23 @@ def _validate_key_format(key: str) -> bool:
     return ok
 
 
-def download_file(key: str, dst: Path, log: bool = True) -> bool:
+def download_file(key: str, dst: Path, log_func: Union[bool, Callable] = True) -> bool:
     """
     Download a file stored in the portal repository.
 
     Args:
         key: The file object key.
         dst: The file system destination path for the file object.
-        log: If True, progress updates are posted to the portal application log once the download begins and after 50%
-            completion. Else a progress message is updated in-place on STDOUT. Default = True.
+        log_func: If this argument is True or is a callable function, a progress message is written to the portal app
+            log to report 10% increments in progress. If the argument is a callable function, it is assumed to have the
+            form `fn(pct: float)`, and the function is invoked after writing to the app log. (Of course, actual reported
+            completion percentage will not necessarily be in exact 10% increments, depending on the total transfer size
+            and update frequency. If the argument is False, progress is reported by overwriting a line on STDOUT each
+            time the callback is invoked. Default = True.
     Returns:
         True if successful; False otherwise. Error message is written to the portal application log.
     """
-    return _download_file_from_bucket(app_cfg.get_config().repo_bucket, key, dst, log)
+    return _download_file_from_bucket(app_cfg.get_config().repo_bucket, key, dst, log_func=log_func)
 
 
 def read_text_file(key: str) -> Optional[str]:
@@ -243,7 +251,7 @@ def _bucket_exists(bucket_name: str) -> bool:
         return False
 
 
-def _upload_file_to_bucket(file_path: Path, bucket_name: str, key: str, log: bool = True) -> bool:
+def _upload_file_to_bucket(file_path: Path, bucket_name: str, key: str, log_func: Union[bool, Callable]) -> bool:
     """
     Upload a file to the specified key in the specified bucket in AWS S3.
 
@@ -251,8 +259,12 @@ def _upload_file_to_bucket(file_path: Path, bucket_name: str, key: str, log: boo
         file_path: Path to file. Must exist.
         bucket_name: The name of the target S3 bucket.
         key: The key under which the file object should be stored.
-        log: If True, progress updates are posted to the portal application log once the upload begins and after 50%
-            completion. Else a progress message is updated in-place on STDOUT (only for testing). Default = True.
+        log_func: If this argument is True or is a callable function, a progress message is written to the portal app
+            log to report 10% increments in progress. If the argument is a callable function, it is assumed to have the
+            form `fn(pct: float)`, and the function is invoked after writing to the app log. (Of course, actual reported
+            completion percentage will not necessarily be in exact 10% increments, depending on the total transfer size
+            and update frequency. If the argument is False, progress is reported by overwriting a line on STDOUT each
+            time the callback is invoked.
     Returns:
         True if successful; False otherwise. Error message is written to the portal application log.
     """
@@ -262,11 +274,11 @@ def _upload_file_to_bucket(file_path: Path, bucket_name: str, key: str, log: boo
         session = _aws_session()
         s3_resource = session.resource('s3')
         bucket = s3_resource.Bucket(bucket_name)
-        if log:
+        if log_func:
             logger.info(f"Starting upload: {file_path.name} to S3 bucket {bucket_name} at {key}")
         bucket.upload_file(Filename=str(file_path), Key=key,
-                           Callback=_TransferProgressCallback(file_path, log=log), Config=xfer_cfg)
-        if log:
+                           Callback=_TransferProgressCallback(file_path, log_func=log_func), Config=xfer_cfg)
+        if log_func:
             logger.info(f"Successfully uploaded {file_path.name} to S3.")
         return True
     except Exception:
@@ -298,7 +310,7 @@ def _presigned_url_for_file(bucket_name: str, key: str, expires: int = 3600) -> 
         return None
 
 
-def _download_file_from_bucket(bucket_name: str, key: str, dst: Path, log: bool = True) -> bool:
+def _download_file_from_bucket(bucket_name: str, key: str, dst: Path, log_func: Union[bool, Callable]) -> bool:
     """
     Download a file from the specified key in the specified bucket in AWS S3.
 
@@ -306,8 +318,12 @@ def _download_file_from_bucket(bucket_name: str, key: str, dst: Path, log: bool 
         bucket_name: The name of the source S3 bucket.
         key: The key under which the file object is stored within that bucket.
         dst: The file system destination path for the file object.
-        log: If True, progress updates are posted to the portal application log once the download begins and after 50%
-            completion. Else a progress message is updated in-place on STDOUT (only for testing). Default = True.
+        log_func: If this argument is True or is a callable function, a progress message is written to the portal app
+            log to report 10% increments in progress. If the argument is a callable function, it is assumed to have the
+            form `fn(pct: float)`, and the function is invoked after writing to the app log. (Of course, actual reported
+            completion percentage will not necessarily be in exact 10% increments, depending on the total transfer size
+            and update frequency. If the argument is False, progress is reported by overwriting a line on STDOUT each
+            time the callback is invoked.
     Returns:
         True if successful; False otherwise. Error message is written to the portal application log.
     """
@@ -318,14 +334,14 @@ def _download_file_from_bucket(bucket_name: str, key: str, dst: Path, log: bool 
         s3_resource = session.resource('s3')
         obj = s3_resource.Object(bucket_name, key)
         obj.load()
-        if log:
+        if log_func:
             logger.info(f"Starting download from S3 bucket {bucket_name} at {key} to {dst.name}")
         s3_resource.Object(bucket_name, key).download_file(
             Filename=str(dst),
-            Callback=_TransferProgressCallback(dst, log=log, download_size=obj.content_length),
+            Callback=_TransferProgressCallback(dst, log_func=log_func, download_size=obj.content_length),
             Config=xfer_cfg
         )
-        if log:
+        if log_func:
             logger.info(f"Successfully downloaded S3 object at {key}.")
         if dst.is_file():
             return True
@@ -457,26 +473,33 @@ def _bucket_contents(bucket_name: str) -> Optional[List]:
 
 class _TransferProgressCallback(object):
     """
-    Callback object reports progress for an S3 object tranfer -- either upload or download. The callback may be
-    configured to overwrite a progress message to STDOUT (which is appropriate only in the __main__ test script, when no
-    other threads/processes are writing to the console), or to write to the portal application log each time another 10%
-    of the transfer has completed. Of course, depending on how frequently the callback is invoked, the reported
-    completion percentage will not necessarily be in exact 10% increments.
+    Callback object reports progress for an S3 object tranfer -- either upload or download. The callback behavior is
+    configured to report progress in one of three ways:
+     - Overwrite a progress message to STDOUT, which is appropriate only in the __main__ test script, when no other
+       threads/processes are writing to the console.
+     - Write to the portal application log each time another 10% of the transfer has completed. Of course, depending
+       on how frequently the callback is invoked, the reported completion percentage will not necessarily be in exact
+       10% increments.
+     - If a callable is supplied of the form `progress(pct: float) -> None`, the supplied callable is invoked with the
+       transfer completion percentage. This provides additional flexibility in reporting progress.
     """
-    def __init__(self, file_path: Path,  log: bool = True, download_size: Optional[int] = None):
+    def __init__(self, file_path: Path, log_func: Union[bool, Callable], download_size: Optional[int] = None):
         """
         Initialize the S3 object transfer callback.
 
         Args:
             file_path: The path of file being uploaded (must exist), or the location to which file is downloaded.
-            log: If True, a progress message is written to the portal application log shortly after the transfer has
-                started, and again once it surpasses 50% completion. If False, progress is reported by overwriting a
-                line on STDOUT each time the callback is invoked. Default = True.
+            log_func: If this argument is True or is a callable function, a progress message is written to the portal
+                application log to report 10% increments in progress. If the argument is a callable function, it is
+                assumed to have the form `fn(pct: float)`, and the function is invoked after writing to the application
+                log. (Of course, actual reported completion percentage will not necessarily be in exact 10% increments,
+                depending on the total transfer size and update frequency. If the argument is False, progress is
+                reported by overwriting a line on STDOUT each time the callback is invoked.
             download_size: If specified, the transfer is a download and this specifies the download file size. Else,
                 the transfer is an upload and file_path must exist. Default = None.
         """
         self._path: Path = file_path
-        self._to_log: bool = log
+        self._log_func = log_func
         self._msg_prefix = "Downloading" if isinstance(download_size, int) else "Uploading"
         self._size = download_size if isinstance(download_size, int) else file_path.stat().st_size
         self._size_so_far = 0
@@ -487,11 +510,16 @@ class _TransferProgressCallback(object):
         with self._lock:
             self._size_so_far += num_bytes
             percentage = (self._size_so_far / float(self._size)) * 100
-            if self._to_log:
+            if self._log_func:
                 if (percentage - self._pct_last_update) >= 10:
                     self._pct_last_update = percentage
-                    app_log.get_application_logger().info(
-                        f"{self._msg_prefix} {self._path.name}  {self._size_so_far}/{self._size} ({percentage:.2f}%)")
+                    app_log.get_application_logger().info(f"{self._msg_prefix} {self._path.name}  "
+                                                          f"{self._size_so_far}/{self._size} ({percentage:.2f}%)")
+                    try:
+                        if callable(self._log_func):
+                            self._log_func(percentage)
+                    except Exception:
+                        pass
             else:
                 sys.stdout.write(
                     f"\r{self._msg_prefix} {self._path.name}  {self._size_so_far}/{self._size} ({percentage:.2f}%)")
@@ -569,7 +597,7 @@ def _process_command(bucket_name: str) -> Tuple[bool, Optional[str]]:
             error_msg = 'Sorry, file size must be less than 3GB'
         else:
             t_start = time.time()
-            ok = _upload_file_to_bucket(file_path, bucket_name, f"{prefix}{file_path.name}", log=False)
+            ok = _upload_file_to_bucket(file_path, bucket_name, f"{prefix}{file_path.name}", log_func=False)
             t = time.time() - t_start
             if ok:
                 print(f"\nDone. {file_path.stat().st_size/MB:.1f}MB uploaded in {t:.3f} seconds.")
@@ -582,7 +610,7 @@ def _process_command(bucket_name: str) -> Tuple[bool, Optional[str]]:
             error_msg = 'Cannot overwrite existing file, or parent directory does not exist'
         else:
             t_start = time.time()
-            ok = _download_file_from_bucket(bucket_name, obj_key, dst_file, log=False)
+            ok = _download_file_from_bucket(bucket_name, obj_key, dst_file, log_func=False)
             t = time.time() - t_start
             if ok:
                 print(f"\nDone. {dst_file.stat().st_size/MB:.1f}MB downloaded in {t:.3f} seconds.")

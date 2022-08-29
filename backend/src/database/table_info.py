@@ -199,7 +199,8 @@ class DBTable(DocEnum):
     def allow_delete(self) -> bool:
         """ Return True if user-initiated deletions from table are permitted. User-initiated deletions are not
         permitted for the Session, Trial, and TrialProtocol tables (and their part tables), nor for DataDownload. """
-        return self.value < DBTable.SESSION.value
+        return self.value in [DBTable.USER, DBTable.SUBJECT, DBTable.IMPLANT, DBTable.RIG, DBTable.BRAIN_AREA,
+                              DBTable.NEURON_TYPE, DBTable.STUDY, DBTable.PUB, DBTable.STUDY_TO_PUB]
 
 
 @dataclass(frozen=True)

@@ -186,13 +186,15 @@ def flush_application_message_log_cache() -> bool:
         conn.ltrim(_APPMSGLOG_BUF_KEY, start=len(messages), end=-1)
         log_path = Path(cfg.workspace_dir, _APPMSGLOG_DIR_NAME, _APPMSGLOG_FILE_NAME)
         if len(messages) > 0:
+            now = datetime.now()
             with open(log_path, 'a+') as f:
-                f.write(f"Flushing {len(messages)} cached messages to application log...\r\n")
+                f.write(f"*** [{now.strftime('%Y-%m-%d %H.%M.%s')}] Flushing {len(messages)} cached messages to "
+                        f"application log...\r\n")
                 for message in messages:
                     f.write(f"{message.decode()}\r\n")
             logger.info(f"Flushed {len(messages)} application log messages to file")
             if log_path.stat().st_size > _APPMSGLOG_FILE_SIZE_LIMIT:
-                now = datetime.now()
+
                 save_path = Path(cfg.workspace_dir, _APPMSGLOG_DIR_NAME,
                                  f"{_APPMSGLOG_FILE_NAME}-{now.strftime('%Y%b%d-%H.%M')}")
                 log_path.rename(save_path)
@@ -235,16 +237,18 @@ def force_flush_application_message_log() -> None:
 
     log_path = Path(cfg.workspace_dir, _APPMSGLOG_DIR_NAME, _APPMSGLOG_FILE_NAME)
     try:
+        now = datetime.now()
         with open(log_path, 'a+') as f:
             if err_msg:
-                f.write(f"Application log cache flush operation failed: {err_msg}\r\n")
+                f.write(f"*** [{now.strftime('%Y-%m-%d %H.%M.%s')}] Application log cache flush operation failed: "
+                        f"{err_msg}\r\n")
             elif messages and (len(messages) > 0):
-                f.write(f"Flushing {len(messages)} cached messages to application log...\r\n")
+                f.write(f"*** [{now.strftime('%Y-%m-%d %H.%M.%s')}] Flushing {len(messages)} cached messages to "
+                        f"application log...\r\n")
                 for message in messages:
                     f.write(f"{message.decode()}\r\n")
 
         if log_path.stat().st_size > _APPMSGLOG_FILE_SIZE_LIMIT:
-            now = datetime.now()
             save_path = Path(cfg.workspace_dir, _APPMSGLOG_DIR_NAME,
                              f"{_APPMSGLOG_FILE_NAME}-{now.strftime('%Y%b%d-%H.%M')}")
             log_path.rename(save_path)
@@ -274,7 +278,7 @@ def push_orhaned_application_message_log_to_repo() -> None:
                 save_key = f"/{_APPMSGLOG_DIR_NAME}/{p.name}"
                 if database.repo.upload_file(p, save_key):
                     p.unlink(missing_ok=True)
-    except Exception as e:
+    except Exception:
         pass
 
 
