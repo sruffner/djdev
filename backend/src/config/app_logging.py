@@ -21,10 +21,10 @@ multi-process application.
 
 Two handlers are attached to the 'portal' logger, a StreamHandler that delivers all log records to STDOUT and a custom
 handler that logs to file. The StreamHandler is important for aggregating log messages in both the Docker-Compose test
-environment and when the application is deployed to Duke's OpenShift cluster. However, we have found that it is rather
+environment and when the application is deployed to a Kubernetes cluster. However, we have found that it is rather
 difficult to view the aggregated log messages in the latter case. You have to switch among the various pods comprising
 the distributed application, when it would be more helpful to see all the log messages in one place -- as they appear on
-the console in the Docker-Compose deployment. Another issue with the OpenShift deploymnent is that pods are occasionally
+the console in the Docker-Compose deployment. Another issue with the Kubernetes deploymnent is that pods are sometimes
 evicted for whatever reason, and when that happens the associated logs are lost.
 
 Therefore, we decided to add a custom file handler that writes all 'portal' logger records to a file in the portal
@@ -33,15 +33,12 @@ workers, and any RQ workhorse process forked to handle a queued background task)
 that will garble the messages written to the file. Our solution is to post the messages to a single LIST key on the
 Redis server. That server is single-threaded, so the log messages won't be garbled (although they may not end up in
 chronological order). Basically, we cache log messages to Redis and every once in a while flush the cache to the log
-file. The flush operation is handled by queuing a background task to do the work. That task pulls the oldest N messages
-from Redis and appends them to the log file. Furthermore, once that file surpasses a certain size, it is renamed as
-'appmessages.log-<TS>', where <TS> is a timestamp in the form 'YYYYMonDD-HH.MM', then pushed into the portal repository
-in S3 under the /logs prefix. Thus, if the portal crashes, the most recent log messages should be found in the
-portal workspace volume at /logs/appmessages.log, while older log messages will be found in the datetime-stamped files
-in the portal repository in S3.
-
-@created: apr2022
-@author: sruffner
+file. The flush operation is handled by queuing a background task to do the work. That task pulls all the cached log
+messages from Redis and appends them to the log file. Furthermore, once that file surpasses a certain size, it is
+renamed as 'appmessages.log-<TS>', where <TS> is a timestamp in the form 'YYYYMonDD-HH.MM', then pushed into the portal
+repository in S3 under the /logs prefix. Thus, if the portal crashes, the most recent log messages should be found in
+the portal workspace volume at /logs/appmessages.log, while older log messages will be found in the datetime-stamped
+files in the portal repository in S3.
 """
 import logging
 import logging.config
@@ -133,7 +130,10 @@ _APPMSGLOG_FILE_NAME: str = 'appmessages.log'
 _APPMSGLOG_BUF_KEY: str = 'applogbuf'
 """ Redis LIST key in which application log messages (coming from multiple processes and containers) are cached. """
 _APPMSGLOG_FLUSH_KEY: str = 'applogflush'
-""" Redis STRING key exists for 30 seconds after a background task is queued to flush the log message cache to file. """
+""" 
+Redis STRING key exists for 10 seconds after a background task is queued to flush the log message cache to file to
+disable queueing additional flushes while that task completes its work.
+"""
 _APPMSGLOG_FLUSH_LIMIT: int = 50
 """ Application log message cache is flushed to the log file whenever it exceeds this size. """
 _APPMSGLOG_FILE_SIZE_LIMIT: int = 100*KB
@@ -160,7 +160,7 @@ class _RedisLogBackupHandler(logging.Handler):
         try:
             n = self.redis_conn.rpush(_APPMSGLOG_BUF_KEY, self.format(record))
             if isinstance(n, int) and (n > _APPMSGLOG_FLUSH_LIMIT):
-                if self.redis_conn.set(_APPMSGLOG_FLUSH_KEY, 'pending', ex=30, nx=True):
+                if self.redis_conn.set(_APPMSGLOG_FLUSH_KEY, 'pending', ex=10, nx=True):
                     job_queue = Queue(connection=self.redis_conn)
                     job_queue.enqueue(flush_application_message_log_cache, job_id=f"flush-app-log-messages")
         except RedisError:
@@ -169,9 +169,10 @@ class _RedisLogBackupHandler(logging.Handler):
 
 def flush_application_message_log_cache() -> bool:
     """
-    Flush up to _APPMSGLOG_FLUSH_LIMIT application log messages from the dedicated Redis key _APPMSGLOG_BUF_KEY to the
-    application log file in the portal workspace directory. If that file exceeds _APPMSGLOG_FILE_SIZE_LIMIT bytes,
-    it is truncated to 0 bytes after backing up its content to file in the portal repository on S3.
+    Flush application log messages from the dedicated Redis key _APPMSGLOG_BUF_KEY to the application log file in the
+    portal workspace directory. If that file exceeds _APPMSGLOG_FILE_SIZE_LIMIT bytes, it is renamed to include the
+    current date/time stamp and moved to the portal repository on S3. The next flush will recreate the application log
+    file in the workspace.
 
     This method is intended ONLY to be called in a background process via RQ.
 
@@ -182,17 +183,19 @@ def flush_application_message_log_cache() -> bool:
     try:
         cfg = config.config.get_config()
         conn = cfg.redis_conn
-        messages = conn.lrange(_APPMSGLOG_BUF_KEY, start=0, end=_APPMSGLOG_FLUSH_LIMIT-1)
-        conn.ltrim(_APPMSGLOG_BUF_KEY, start=len(messages), end=-1)
+        with conn.pipeline() as pipe:
+            pipe.lrange(_APPMSGLOG_BUF_KEY, start=0, end=-1)
+            pipe.ltrim(_APPMSGLOG_BUF_KEY, start=1, end=0)   # NOTE: This deletes the key.
+            res = pipe.execute()
+            messages = res[0]
         log_path = Path(cfg.workspace_dir, _APPMSGLOG_DIR_NAME, _APPMSGLOG_FILE_NAME)
         if len(messages) > 0:
             now = datetime.now()
             with open(log_path, 'a+') as f:
                 f.write(f"*** [{now.strftime('%Y-%m-%d %H.%M.%s')}] Flushing {len(messages)} cached messages to "
-                        f"application log...\r\n")
+                        f"application log *** \r\n")
                 for message in messages:
                     f.write(f"{message.decode()}\r\n")
-            logger.info(f"Flushed {len(messages)} application log messages to file")
             if log_path.stat().st_size > _APPMSGLOG_FILE_SIZE_LIMIT:
 
                 save_path = Path(cfg.workspace_dir, _APPMSGLOG_DIR_NAME,
@@ -215,46 +218,45 @@ def force_flush_application_message_log() -> None:
 
     This method is intended to be called in a signal handler when the GUnicorn-served backend is about to exit, so that
     the latest log messages (which might capture an error that has led to the termination) are hopefully preserved in
-    the log file for later examination. In addition, if that log file has grown large enough, an attempt is made to
-    back it up to S3.
+    the log file for later examination. No attempt is made to backup the log file to the portal repository in S3,
+    because that operation is relatively slow, and this method must minimize execution time since it is called from
+    a GUnicorn exit hook.
 
-    When this method is called it is possible that a Redis background task is currently performing a periodic flush, or
-    even that the Redis server has gone down, so that the application log cache is no longer available. In these
-    scenarios, the method will at least try to write a message directly into the log file indicating the error.
+    If an error occurs while trying to flush the Redis cache, then some application log messages may have been lost. In
+    this case, the method writes an explanatory error message directly into the log file. It is also possible that a
+    RQ background worker is currently performing a periodic flush. In this case, some application log messages may be
+    duplicated in the log file.
+
+    This method does not emit any log messages itself. Since the portal application is presumably shutting down, those
+    messages would be lost anyway.
     """
     cfg = config.config.get_config()
     messages: Optional[List] = None
-    err_msg = None
+    warn_msg = None
     try:
         conn = cfg.redis_conn
-        if conn.set(_APPMSGLOG_FLUSH_KEY, 'pending', ex=30, nx=True):
-            messages = conn.lrange(_APPMSGLOG_BUF_KEY, start=0, end=-1)
-            conn.ltrim(_APPMSGLOG_BUF_KEY, start=0, end=-1)
-        else:
-            err_msg = "Flush operation already pending"
+        with conn.pipeline() as pipe:
+            pipe.exists(_APPMSGLOG_FLUSH_KEY)
+            pipe.lrange(_APPMSGLOG_BUF_KEY, start=0, end=-1)
+            pipe.ltrim(_APPMSGLOG_BUF_KEY, start=1, end=0)    # NOTE: This deletes the key.
+            res = pipe.execute()
+            if res[0]:
+                warn_msg = "Periodic flush in progress. May see duplicate messages in log."
+            messages = res[1]
     except RedisError as e:
-        err_msg = f"Failed to retrieve application log message cache contents from Redis server: {str(e)}"
+        warn_msg = f"Error flushing Redis cache; some log messages may be lost: {str(e)}"
 
     log_path = Path(cfg.workspace_dir, _APPMSGLOG_DIR_NAME, _APPMSGLOG_FILE_NAME)
     try:
         now = datetime.now()
         with open(log_path, 'a+') as f:
-            if err_msg:
-                f.write(f"*** [{now.strftime('%Y-%m-%d %H.%M.%s')}] Application log cache flush operation failed: "
-                        f"{err_msg}\r\n")
-            elif messages and (len(messages) > 0):
-                f.write(f"*** [{now.strftime('%Y-%m-%d %H.%M.%s')}] Flushing {len(messages)} cached messages to "
-                        f"application log...\r\n")
+            f.write(f"*** [{now.strftime('%Y-%m-%d %H.%M.%s')}] Force flush {len(messages)} application "
+                    f"log messages at exit ***\r\n")
+            if warn_msg:
+                f.write(f"*** WARNING: {warn_msg}\r\n")
+            if messages and (len(messages) > 0):
                 for message in messages:
                     f.write(f"{message.decode()}\r\n")
-
-        if log_path.stat().st_size > _APPMSGLOG_FILE_SIZE_LIMIT:
-            save_path = Path(cfg.workspace_dir, _APPMSGLOG_DIR_NAME,
-                             f"{_APPMSGLOG_FILE_NAME}-{now.strftime('%Y%b%d-%H.%M')}")
-            log_path.rename(save_path)
-            save_key = f"/{_APPMSGLOG_DIR_NAME}/{save_path.name}"
-            if database.repo.upload_file(save_path, save_key):
-                save_path.unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -262,9 +264,9 @@ def force_flush_application_message_log() -> None:
 def push_orhaned_application_message_log_to_repo() -> None:
     """
     When the current application log file in the portal workspace directory gets big enough, it is renamed as
-    "$APPLOGNAME-<datetime>.log" and moved to the portal backup repository in S3, and a new empty log file remains in
-    the workspace directory. However, if an error occurs while uploading the renamed log file to S3, then that file
-    will be left in the workspace.
+    "$APPLOGNAME-<datetime>.log" and moved to the portal backup repository in S3, and the default log file is recreated
+    in the workspace directory the next time log messages are flushed from the Redis cache. However, if an error occurs
+    while uploading the renamed log file to S3, then that file will be left in the workspace directory.
 
     This method will check the portal workspace logs directory for any such orphased application log files and try
     again to upload them to S3. It is recommended that this method be invoked only at portal startup.
