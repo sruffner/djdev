@@ -71,6 +71,8 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-body-size: 10g
 spec:
   ingressClassName: dhe-nginx
+  tls:
+    - host: braincerebellumdata-test.dkstest.dhe.duke.edu
   rules:
     - host: braincerebellumdata-test.dkstest.dhe.duke.edu
       http:
