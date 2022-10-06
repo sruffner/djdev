@@ -42,6 +42,7 @@ import time
 from pathlib import Path
 from typing import Optional, List, Union, Dict, Any, Tuple, Callable
 
+import requests
 from boto3 import Session
 from boto3.s3.transfer import TransferConfig
 
@@ -214,6 +215,124 @@ def delete_file(key: str) -> bool:
         True if successful or object not found; False otherwise. Error message is written to the portal application log.
     """
     return _delete_file_in_bucket(app_cfg.get_config().repo_bucket, key)
+
+
+def initialize_multipart_upload(file_sz: int, key: str) -> Tuple[bool, str, int, List[str]]:
+    """
+    Initiate a multipart upload to the portal repository.
+
+    Use a multipart upload to push large files directly to the portal repository without first uploading them to the
+    portal server itself. This method assigns an upload ID to the multipart upload and prepares a list of presigned URLs
+    for uploading the file parts in order.
+
+    Once a multipart upload is initiated on S3, it is imperative that the operation is either aborted (if an error has
+    occurred) or completed (so that the uploaded file chunks are reconstituted into the original file). Otherwise, any
+    uploaded parts will remain in S3. The upload ID is used to identify the multipart upload to abort or complete.
+    As each part is uploaded, the part number and ETag must be saved, as this information must be supplied to S3 in
+    order to complete the upload. The following code snippet suggests how this may be done, using the Python requests
+    library to upload the file chunks::
+
+        ok, upload_id, chunk_size, urls = initialize_multipart_upload(file_sz, key)
+        for num, url in enumerate(urls):
+            part = num + 1
+            file_data = f.read(chunk_size)
+            res = requests.put(url, data=file_data)
+            if res.status_code != 200:
+                abort_multipart_upload(key, upload_id)
+                return None
+            etag = res.headers['ETag']
+            parts.append((etag, part))
+        parts_list = [{'ETag': eval(x), 'PartNumber': int(y)} for x,y in parts]
+        finish_multipart_upload(key, upload_id, parts_list)
+
+    Note the calls to the associated methods `abort_multipart_upload` and `finish_multipart_upload`.
+
+    The method only supports uploading a file >= 10MB in size. (For a smaller file, acquire a single presigned URL to
+    upload the entire file in one transfer.) Chunk size will depend on the total file size, but will  max out at 100MB
+    for file uploads of 300MB or more. The presigned URLs will expire in one hour, so the file must be uploaded in its
+    entirety within that time frame.
+
+    Args:
+        file_sz: The size of the file object to be uploaded. Must be >= 10MB.
+        key: The S3 object key under which the file should be stored. Must satisfy portal constraints on key format.
+    Returns:
+        A 4-tuple (S, U, K, L). If an error occurred, S=False and U is an error message. Otherwise, U is the upload ID,
+            K is the file chunk size in bytes (use for all file chunks except the last), and L is the list of presigned
+            part upload URLs.
+    """
+    # TODO: Validate key
+    if file_sz < 10*MB:
+        return False, "File size is too small for multipart upload", -1, []
+    logger = app_log.get_application_logger()
+    try:
+        session = _aws_session()
+        bucket_name = app_cfg.get_config().repo_bucket
+        s3_client = session.client('s3')
+        response = s3_client.create_multipart_upload(Bucket=bucket_name, Key=key)
+        upload_id = response['UploadId']
+        chunk_size = int(file_sz/2) if file_sz < 50*MB else (100*MB if file_sz >= 300*MB else 50*MB)
+        num_parts = int(file_sz/chunk_size) + 1
+        presigned_urls: List[str] = []
+        for part_num in range(1, num_parts+1):
+            url = s3_client.generate_presigned_url(
+                ClientMethod='upload_part',
+                Params={'Bucket': bucket_name, 'Key': key, 'UploadId': upload_id, 'PartNumber': part_num},
+                ExpiresIn=3600
+            )
+            presigned_urls.append(url)
+        logger.info(f"Initialized multipart upload of {file_sz/MB:.1f} file object in {num_parts} parts to "
+                    f"{bucket_name}:{key}; upload ID = {upload_id}")
+        return True, upload_id, chunk_size, presigned_urls
+    except Exception as e:
+        logger.error(f"Failed to initiate multipart upload: {str(e)}")
+        return False, str(e), -1, []
+
+
+def abort_multipart_upload(key: str, upload_id: str) -> bool:
+    """
+    Abort a previously started multipart upload to the portal repository. See `initialize_multipart_upload`.
+
+    Args:
+        key: The destination key for the multipart upload.
+        upload_id: The multipart upload ID.
+    Returns:
+        True if successful, False otherwise. See application log for error description.
+    """
+    logger = app_log.get_application_logger()
+    try:
+        s3_client = _aws_session().client('s3')
+        bucket_name = app_cfg.get_config().repo_bucket
+        s3_client.abort_multipart_upload(Bucket=bucket_name, Key=key, UploadId=upload_id)
+        logger.info(f"Aborted multipart upload (ID={upload_id}) to {bucket_name}:{key}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to abort multipart upload: {str(e)}")
+        return False
+
+
+def finish_multipart_upload(key: str, upload_id: str, parts_list: List[Dict]) -> bool:
+    """
+    Complete a previously started multipart upload to the portal repository. See `initialize_multipart_upload`.
+
+    Args:
+        key: The destination key for the multipart upload.
+        upload_id: The multipart upload ID.
+        parts_list: List of completed upload parts. Each entry is a dictionary {'ETag': str, 'PartNumber': int}
+            holding the upload part's entity tag (returned in response header when part is uploaded) and part number.
+    Returns:
+        True if successful, False otherwise. See application log for error description.
+    """
+    logger = app_log.get_application_logger()
+    try:
+        s3_client = _aws_session().client('s3')
+        bucket_name = app_cfg.get_config().repo_bucket
+        s3_client.complete_multipart_upload(
+            Bucket=bucket_name, Key=key, MultipartUpload={'Parts': parts_list}, UploadId=upload_id)
+        logger.info(f"Completed multipart upload (ID={upload_id}) to {bucket_name}:{key}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to complete multipart upload: {str(e)}")
+        return False
 
 
 def _aws_session() -> Optional[Session]:
@@ -546,6 +665,48 @@ def _get_lifecycle_configuration_rules_for_bucket(bucket_name: str) -> Union[Lis
         return str(e)
 
 
+def _do_multipart_upload(file_path: Path, key: str) -> Optional[str]:
+    """
+    Uses the Python requests library and the multipart upload support in this module to upload a file object to the
+    specified key in the portal repository.
+
+    Args:
+        file_path: The file to upload.
+        key: Destination key in the S3 bucket encapsulating the portal repository.
+    Returns:
+        None if successful, else an error description.
+    """
+    try:
+        file_sz = file_path.stat().st_size
+        ok, upload_id, chunk_size, urls = initialize_multipart_upload(file_sz, key)
+        if not ok:
+            return upload_id
+        parts = []
+        with file_path.open('rb') as f:
+            sys.stdout.write("\nStarting upload...")
+            for num, url in enumerate(urls):
+                part = num + 1
+                t = time.time()
+                file_data = f.read(chunk_size)
+                t_read = time.time() - t
+                res = requests.put(url, data=file_data)
+                t_elapsed = time.time() - t
+                if res.status_code != 200:
+                    aborted = abort_multipart_upload(key, upload_id)
+                    return f"Error ({res.status_code}) uploading part {part}, aborted successfully={aborted}"
+                etag = res.headers['ETag']
+                parts.append({'ETag': etag, 'PartNumber': part})
+                sys.stdout.write(
+                    f"\rUploaded {part} of {len(urls)} chunks in {t_elapsed:.3f} seconds [read={t_read:.3f}]...")
+                sys.stdout.flush()
+            sys.stdout.write(" finishing up.\n")
+        ok = finish_multipart_upload(key, upload_id, parts)
+        if not ok:
+            return f"Failed to finish multipart upload; be sure to remove any uploaded parts in bucket"
+    except Exception as e:
+        return f"Multipart upload failed: {str(e)}"
+
+
 def _print_usage() -> None:
     print("\nAvailable commands:\n"
           "   b = Switch buckets.\n"
@@ -556,12 +717,13 @@ def _print_usage() -> None:
           "   g = Generate a presigned URL to download a file object from bucket.\n"
           "   x = Delete a file object in bucket.\n"
           "   r = Remove ALL file objects in bucket.\n"
+          "   m = Test multipart upload.\n"
           "   h = Print this usage message.\n"
           "   q = Quit.\n\n", file=sys.stdout, flush=True)
 
 
 def _process_command(bucket_name: str) -> Tuple[bool, Optional[str]]:
-    command = input(f"[{bucket_name}] Enter command (b, l, c, u, d, g, x, r, h, q) > ")
+    command = input(f"[{bucket_name}] Enter command (b, l, c, u, d, g, x, r, m, h, q) > ")
     error_msg = None
     if command == 'b':
         return False, None
@@ -633,6 +795,21 @@ def _process_command(bucket_name: str) -> Tuple[bool, Optional[str]]:
             error_msg = "Operation cancelled."
         elif not _delete_all_files_in_bucket(bucket_name, print_progress=True):
             error_msg = "Delete-ALL operation failed"
+    elif command == 'm':
+        file_path = Path(input('Enter full path to file to be uploaded > '))
+        key = input('Enter path-like key, eg "/repo/folder1/filename.ext" > ')
+        if (key is None) or not key.startswith('/'):
+            error_msg = 'Bad key.'
+        elif not file_path.is_file():
+            error_msg = 'Bad file path.'
+        elif file_path.stat().st_size > 3*GB:
+            error_msg = 'Sorry, file size must be less than 3GB'
+        else:
+            t_start = time.time()
+            error_msg = _do_multipart_upload(file_path, key)
+            t = time.time() - t_start
+            if error_msg is None:
+                print(f"\nDone. {file_path.stat().st_size/MB:.1f}MB uploaded in {t:.3f} seconds.")
     elif command == 'h':
         _print_usage()
     elif command == 'q':
@@ -647,6 +824,8 @@ def _process_command(bucket_name: str) -> Tuple[bool, Optional[str]]:
 # To run this module on the backend container: 'docker-compose run backend python -m database.repo
 if __name__ == '__main__':
     _print_usage()
+
+    print(f"\nCurrent working directory = {str(Path.cwd())}\n", file=sys.stdout, flush=True)
 
     done = False
     _bucket_name = None

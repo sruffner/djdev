@@ -199,7 +199,7 @@ def _retrieve_session_info(experimenter: Optional[str], subj_id: Optional[str], 
     if len(restrictions) == 0:
         restrictions = None
 
-    rows = fetch_restrict_proj([ti.DBTable.SESSION], [restrictions], ['study_id', 'num_units', 'num_trials'])
+    rows = fetch_restrict_proj([ti.DBTable.SESSION], [restrictions], [])
     ephys_rows = fetch_restrict_proj([ti.DBTable.SESSION_EPHYS], [restrictions], [])
     studies = fetch_restrict_proj([ti.DBTable.STUDY], None, ['study_title'])
     brain_areas = fetch_rows(ti.DBTable.BRAIN_AREA)
@@ -213,7 +213,7 @@ def _retrieve_session_info(experimenter: Optional[str], subj_id: Optional[str], 
     # behavior-only sessions, all EPhys-related fields are set to None.
     for r in rows:
         r['study_title'] = study_map[r['study_id']]
-        r.pop('study_id', None)
+        r.pop('committed')   # not exposed in SessionInfo.
         found = -1
         for i, ephys in enumerate(ephys_rows):
             if (ephys['experimenter'] == r['experimenter']) and (ephys['subj_id'] == r['subj_id']) and \
@@ -222,14 +222,14 @@ def _retrieve_session_info(experimenter: Optional[str], subj_id: Optional[str], 
                 break
         if found > -1:
             ephys = ephys_rows.pop(found)
-            r['brain_area'] = area_map[ephys['ba_id']]
             r['ephys_src'] = ephys['ephys_src']
             r['probe_type'] = ephys['probe_type']
             r['sampling_rate'] = ephys['sampling_rate']
             r['probe_x'] = ephys['probe_x']
             r['probe_y'] = ephys['probe_y']
             r['probe_depth'] = ephys['probe_depth']
-
+            r['brain_area'] = area_map[ephys['ba_id']]
+            r['ba_id'] = ephys['ba_id']
         if isinstance(r['session_date'], date):
             r['session_date'] = r['session_date'].isoformat()
 
