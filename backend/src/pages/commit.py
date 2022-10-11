@@ -1,16 +1,18 @@
 """
 commit.py: The "commit session" page in web-based interface to the Lisberger laboratory database.
 
-This web page displays all pending session commit jobs for the current login user with 'commit' level access. The user
-can check the status of any pending jobs, initiate a new job by uploading an experiment session archive to the server,
-review a candidate session after the archive has been pre-processed, submit the reviewed session to be committed to the
-database, cancel any failed or in-progress commit, or remove any completed commit jobs.
+This web page displays all pending session commit jobs initiated by the current login user with 'commit' level access.
+The user can check the status of any pending jobs, initiate a new commit, review a candidate session after the archive
+has been pre-processed, submit the reviewed session to be committed to the database, cancel any failed or in-progress
+commit, or remove any completed commit jobs.
 
 Preprocessing very large session archives and committing the data to the portal database can take many seconds or even
-minutes, depending on the archive size. In between is a user-interactive "review" stage in which the user must review
-the results of the preprocessing stage and possibly add some additional information before committing the session to
-the database. To keep the web front end responsive, the server queues background "workers" (Redis Queue, or RQ) to
-handle the pre-processing and final commit stages.
+minutes, depending on the archive size. In between is a user-interactive "review" stage -- necessary only if the
+preprocessed session includes one or more trial protocols requiring manual validation. To keep the web front end
+responsive, the server queues background "workers" (Redis Queue, or RQ) to handle the pre-processing and final commit
+stages. When the review phase can be skipped, the job proceeds to completion without any user intervention.
+
+TODO: COMPLETE DESCRIPTION. Also, drop description of issue with dash_uploader -- if our new approach works!
 
 TODO: IMPLEMENTATION ISSUES --
  - Working with dash_uploader is a real pain in the ass. The problem is that you can't easily give it a new "upload_id"
@@ -30,8 +32,7 @@ TODO: IMPLEMENTATION ISSUES --
 @author: sruffner
 @created: 18oct2021
 """
-import uuid
-from datetime import datetime, date
+from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
 from dash import callback_context, callback, exceptions as dash_exc, no_update, dash_table as dt, html, dcc, Input, \
@@ -39,33 +40,79 @@ from dash import callback_context, callback, exceptions as dash_exc, no_update, 
 import dash_bootstrap_components as dbc
 import dash_uploader as du
 import flask_login
-import plotly.express as px
 
 from app import load_authorized_user
 from config.app_logging import get_application_logger
 from database.commit_ops import CommitStateEnum, initiate_session_commit, get_pending_commit_jobs_for, \
-    cancel_or_remove_commit_job, update_commit_job_on_archive_upload, commit_job_progress, CommitJobStatus, \
-    SessionMetaData, session_metadata, update_session_metadata, ready_to_commit, protocol_names, protocol_definition, \
-    add_rv_to_protocol, validate_protocol, OmniplexUnit, metrics_for_neural_unit, set_unit_type, commit_to_database
+    cancel_or_remove_commit_job, CommitJobStatus, ready_to_commit, protocol_names, protocol_definition, \
+    add_rv_to_protocol, validate_protocol, commit_to_database, commit_job_status, on_archive_uploaded_to_workspace
 from sglportalapi.maestro import Protocol, SegParam, SegParamType, Target, Point2D
 from database.table_info import Column, DBTable, attribute_info
-from database.table_ops import fetch_restrict_proj, fetch_attribute_values, fetch_rows
+from database.table_ops import fetch_restrict_proj, fetch_attribute_values
 
 
-_JOBS_TABLE_COLS: List[Column] = [
-    Column('job', 'Job ID/Archive File', '170px', True),
-    Column('started', 'Started', '100px', True),
-    Column('status_desc', 'Status', '100px', True),
-    Column('last_update', 'Last Update', '330px', True)
-]
-""" Defined columns for the pending commit jobs table. """
+def serve_layout() -> html.Div:
+    """
+    Serve the layout for the "commit" page displaying the queue of pending commit jobs initiated by the currently
+    authenticated user. The page includes a means of starting a new commit job. Status information on pending jobs are
+    displayed in tabular form. Button contols above the table let the user refresh the table contents, show the message
+    history of a selected job, cancel/remove a selected job, and -- if necessary -- review and validate trial protocols
+    from a preprocessed commit prior to committing the experiment session to the database.
 
-_JOBS_TABLE_ID = 'jobs-table'
-""" A Dash DataTable listing all pending commit jobs for the currently authenticated user. """
+    Returns:
+        An HTML Div rendering the "commit" page.
+    """
+    err_msg, jobs = _commit_jobs_for_current_user()
+
+    jobs_table = _table_of_pending_commit_jobs(jobs)
+    alert = dbc.Alert(err_msg if err_msg else "", id=_ALERT_ID, color="danger", dismissable=True, fade=True,
+                      duration=10000, is_open=(err_msg is not None))
+    err1_div = html.Div("", id=_ERR_DIV1_ID, style=dict(display='none'))
+    err2_div = html.Div("", id=_ERR_DIV2_ID, style=dict(display='none'))
+    refresh_btn = dbc.Button("Refresh", id=_REFRESH_BTN_ID, n_clicks=0, class_name='me-4')
+    start_btn = dbc.Button("New commit...", id=_START_BTN_ID, n_clicks=0)
+    message_btn = dbc.Button("Messages...", id=_MESSAGE_BTN_ID, n_clicks=0, disabled=True, class_name='me-2')
+    next_btn = dbc.Button("Review & Commit", id=_REVIEW_BTN_ID, n_clicks=0, disabled=True, class_name='me-2')
+    remove_btn = dbc.Button("Cancel/Remove", id=_REMOVE_BTN_ID, n_clicks=0, disabled=True)
+    button_row = dbc.Row([
+        dbc.Col([refresh_btn, start_btn], width='auto', class_name="me-4"),
+        dbc.Col([message_btn, next_btn, remove_btn], width='auto')
+    ], justify='between', class_name="mt-2 mb-2")
+
+    commit_modal = _create_commit_modal()
+    upload_modal = _create_upload_modal()
+    review_modal = dbc.Modal(_layout_review_modal(), id=_REVIEW_ID, backdrop="static", size="xl", is_open=False)
+    messages_modal = dbc.Modal(
+        [
+            dbc.ModalHeader(id=_HISTORY_HEADER_ID),
+            dbc.ModalBody(dcc.Markdown(id=_HISTORY_MARKDOWN_ID)),
+            dbc.ModalFooter(dbc.Row([dbc.Button("Close", id=_CLOSE_HISTORY_ID, n_clicks=0)]))
+        ],
+        id=_HISTORY_ID, backdrop=False, size="lg", is_open=False
+    )
+
+    card = dbc.Card([
+        dbc.CardHeader("Experiment session commits in progress"),
+        dbc.CardBody([alert, err1_div, err2_div, button_row, jobs_table]),
+    ], class_name='mx-5 my-5')
+
+    return html.Div([card, commit_modal, upload_modal, review_modal, messages_modal])
+
+
 _ALERT_ID = 'commit-alert'
-""" ID of Bootstrap Alert that is used to display an error message if a request on this page fails. """
+""" ID of Bootstrap Alert located at top of page that displays an error message if a request on this page fails. """
+_ERR_DIV1_ID = 'commit-error1'
+"""
+ID of a hidden Div that is populated with an error message if an error occurs during the callback associated
+with the 'Refresh' or 'Remove' buttons.
+"""
+_ERR_DIV2_ID = 'commit-error2'
+"""
+ID of a hidden Div that is populated with an error message if an error occurs during the callback associated
+with the Modal component that uploads the experiment archive via Dash uploader.
+"""
 _START_BTN_ID = 'commit-start-btn'
-""" ID of the button that initiates a new session commit job and reveals the uploader component. """
+""" ID of the button that raises the Modal component that initiates a session commit job. """
 _REFRESH_BTN_ID = 'jobs-refresh'
 """ User presses this button to refresh status information on all pending commit jobs. """
 _MESSAGE_BTN_ID = 'job-messages'
@@ -73,46 +120,19 @@ _MESSAGE_BTN_ID = 'job-messages'
 _REVIEW_BTN_ID = 'job-review'
 """
 User presses this button to review a job after preprocessing. This raises a modal by which user interactively
-adds or edits selected session information, then starts the actual database commit.
+validates any trial protocols requiring it, then starts the actual database commit.
 """
 _REMOVE_BTN_ID = 'job-remove'
 """ User presses this button to cancel and/or remove the currently selected commit job. """
-_UPLOAD_ID = 'commit-upload-modal'
-""" ID of Modal component by which user uploads the data archive for a new session commit job. """
-_UPLOADER_ID = 'commit-uploader'
-""" ID of the Dash Uploader component that manages the uploading of a session archive ZIP. """
-_CLOSE_UPLOAD_ID = 'upload-modal-close'
-"""
-ID of button that closes the Modal component by which a new session archive is uploaded to server. The Modal should
-never be closed WHILE an upload is in progress, as that will mess up the Uploader. If the upload finishes, the Modal
-is closed automatically.
-"""
+
 _HISTORY_ID = 'message-history'
 """ ID of Modal component displaying the progress message history for a pending commit job. """
 _HISTORY_HEADER_ID = 'message-history-header'
 """ ID of the header of the Modal component displaying the progress message history. The commit job ID goes here. """
 _HISTORY_MARKDOWN_ID = 'message-history-markdown'
-""" ID of the Dash Markdown component in which the progress message history fo ra pending commit job is listed. """
+""" ID of the Dash Markdown component in which the progress message history for a pending commit job is listed. """
 _CLOSE_HISTORY_ID = 'message-history-close'
 """ ID of button that closes the Modal component displaying the progress message history for a pending commit job. """
-
-
-def _get_current_username() -> Optional[str]:
-    """
-    Helper method retrieves the username for the currently authenticated user from Flask Login. That user must have
-    the required privileges to access this page.
-
-    Returns:
-        The username, or None if client is not authenticate or lacks the required privileges to access this page
-    """
-    username = None
-    if flask_login.current_user.is_authenticated:
-        portal_user = load_authorized_user(flask_login.current_user.get_id())
-        if portal_user and portal_user.can_commit_to_database():
-            username = portal_user.get_id()
-        else:
-            get_application_logger().debug("On commit page, but client not authenticated or lacks commit access.")
-    return username
 
 
 def _commit_jobs_for_current_user() -> Tuple[Optional[str], List[Dict[str, Any]]]:
@@ -133,13 +153,30 @@ def _commit_jobs_for_current_user() -> Tuple[Optional[str], List[Dict[str, Any]]
     return err_msg, job_rows
 
 
+def _get_current_username() -> Optional[str]:
+    """
+    Helper method retrieves the username for the currently authenticated user from Flask Login. That user must have
+    the required privileges to access this page.
+
+    Returns:
+        The username, or None if client is not authenticate or lacks the required privileges to access this page
+    """
+    username = None
+    if flask_login.current_user.is_authenticated:
+        portal_user = load_authorized_user(flask_login.current_user.get_id())
+        if portal_user and portal_user.can_commit_to_database():
+            username = portal_user.get_id()
+        else:
+            get_application_logger().debug("On commit page, but client not authenticated or lacks commit access.")
+    return username
+
+
 def _job_table_row_from_job_status_info(job: CommitJobStatus) -> Dict[str, Any]:
     start_ts = datetime.fromtimestamp(job.started).strftime("%Y-%m-%d %I:%M:%S %p")
     update_ts = datetime.fromtimestamp(job.updated).strftime("%Y-%m-%d %I:%M:%S %p")
-    file_name = "---" if job.state == CommitStateEnum.UPLOADING else job.zip
     return {
-        'id': job.id, 'state': job.state.value,  # these two fields are not displayed
-        'job': f"{job.id}\nArchive: **{file_name}**",
+        'id': job.id,
+        'state': job.state.value,  # this field is not displayed
         'started': f"{start_ts}",
         'status_desc': f"**{job.state.get_state_descriptor()}**",
         'last_update': f"[**{update_ts}**] {job.msg}"
@@ -166,96 +203,133 @@ def _table_of_pending_commit_jobs(job_rows: List[Dict[str, Any]]) -> dt.DataTabl
     return jobs_table
 
 
-def serve_layout() -> html.Div:
-    """
-    Serve the layout for the "commit" page displaying the queue of commit jobs belonging to the currently authenticated
-    user. The page includes a means of starting a new commit job by uploading the session archive (ZIP file) to the
-    portal. Status information on pending jobs are displayed in tabular form. Button contols under the table let the
-    user refresh the table contents, show the message history of a selected job, cancel/remove a selected job, review
-    the results of a pre-processed commit, and submit the commit to the database after review.
+_JOBS_TABLE_ID = 'jobs-table'
+""" A Dash DataTable listing all pending commit jobs for the currently authenticated user. """
 
-    Returns:
-        An HTML Div rendering the "commit" page.
-    """
-    err_msg, jobs = _commit_jobs_for_current_user()
-    upload_in_progress = any([j['state'] == CommitStateEnum.UPLOADING.value for j in jobs])
+_JOBS_TABLE_COLS: List[Column] = [
+    Column('id', 'Job ID', '170px', True),
+    Column('started', 'Started', '100px', True),
+    Column('status_desc', 'Status', '100px', True),
+    Column('last_update', 'Last Update', '330px', True)
+]
+""" Defined columns for the pending commit jobs table. """
 
-    jobs_table = _table_of_pending_commit_jobs(jobs)
-    alert = dbc.Alert(err_msg if err_msg else "", id=_ALERT_ID, color="danger", dismissable=True, fade=True,
-                      duration=10000, is_open=(err_msg is not None))
-    refresh_btn = dbc.Button("Refresh", id=_REFRESH_BTN_ID, n_clicks=0, class_name='me-4')
-    start_btn = dbc.Button("New commit...", id=_START_BTN_ID, n_clicks=0, disabled=upload_in_progress)
-    message_btn = dbc.Button("Messages...", id=_MESSAGE_BTN_ID, n_clicks=0, disabled=True, class_name='me-2')
-    next_btn = dbc.Button("Review & Commit", id=_REVIEW_BTN_ID, n_clicks=0, disabled=True, class_name='me-2')
-    remove_btn = dbc.Button("Cancel/Remove", id=_REMOVE_BTN_ID, n_clicks=0, disabled=True)
-    button_row = dbc.Row([
-        dbc.Col([refresh_btn, start_btn], width='auto', class_name="me-4"),
-        dbc.Col([message_btn, next_btn, remove_btn], width='auto')
-    ], justify='between', class_name="mt-2 mb-2")
 
-    # NOTE that we assign a UUID as the upload ID. SO, if user reloads the page, that will change!
-    upload_modal = dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle("Upload session data archive")),
-        dbc.ModalBody([
-            dcc.Markdown('''
-            * Before you begin, all session data files (Maestro and Omniplex) must be compressed into a single, flat
-            ZIP archive (no subdirectories). Maximum supported file size is 10GB.
-            * If the session includes behavioral data only, the archive should contain only the Maestro data files.
-            * There is no support at this time for automatic spike sorting. For electrophysiological recordings, the
-            experimenter must supply neural unit data (spike trains) in a pickle file (.pkl or .pickle). This must be
-            the only pickle file in the archive.
-            * The pickle file must contain a single dictionary with 3 keys: 'filename', 'channel', and 'spiketimes'.
-            Each key value is a list of length N = the number of neural units. These contain the Omniplex PL2
-            filenames, the source channel IDs ('WBnn' or 'SPKCnn'), and the spike timestamps (in seconds since the
-            Omniplex recording started) for each neural unit. The 'filename' field may be omitted if all units were
-            recorded in a single Omniplex file.
+@callback(
+    [Output(_MESSAGE_BTN_ID, 'disabled'), Output(_REVIEW_BTN_ID, 'disabled'), Output(_REMOVE_BTN_ID, 'disabled')],
+    [Input(_JOBS_TABLE_ID, 'selected_rows'), Input(_REFRESH_BTN_ID, "n_clicks")],
+    [State(_JOBS_TABLE_ID, 'selected_rows'), State(_JOBS_TABLE_ID, 'data')]
+)
+def select_row_callback(*args):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise dash_exc.PreventUpdate
+    trigger = ctx.triggered[0]['prop_id'].split('.')[0]
+    arg_idx = 2 if trigger == _REFRESH_BTN_ID else 0
+    idx = args[arg_idx][0] if isinstance(args[arg_idx], list) and (len(args[arg_idx]) > 0) else -1
+    row = args[3][idx] if isinstance(args[3], list) and (-1 < idx < len(args[3])) else None
+    disable_review = (row is None) or (row['state'] != CommitStateEnum.REVIEW.value)
+    return row is None, disable_review, row is None
 
-            *Drag and drop the ZIP file onto the upload component below, or click on the component to browse the file
-            system for the file. The upload should start automatically. Large (>1GB) archives will take a significant
-            amount of time to upload, depending on network speed. This pop-up window will close automatically when the
-            upload finishes. **Do NOT close this pop-up window and do NOT close the browser tab while the upload is in
-            progress**.*
-            '''),
-            html.Div(du.Upload(id=_UPLOADER_ID, max_file_size=10000, chunk_size=100, max_files=1, cancel_button=True,
-                               filetypes=['zip'], upload_id=str(uuid.uuid1())), className="mt-2")
-        ]),
-        dbc.ModalFooter(dbc.Row([dbc.Button("Close", id=_CLOSE_UPLOAD_ID, n_clicks=0)]))
-    ], id=_UPLOAD_ID, backdrop="static", size="xl", is_open=False)
 
-    messages_modal = dbc.Modal(
-        [
-            dbc.ModalHeader(id=_HISTORY_HEADER_ID),
-            dbc.ModalBody(dcc.Markdown(id=_HISTORY_MARKDOWN_ID)),
-            dbc.ModalFooter(dbc.Row([dbc.Button("Close", id=_CLOSE_HISTORY_ID, n_clicks=0)]))
-        ],
-        id=_HISTORY_ID, backdrop=False, size="lg", is_open=False
-    )
+@callback(
+    [Output(_HISTORY_ID, 'is_open'), Output(_HISTORY_HEADER_ID, "children"), Output(_HISTORY_MARKDOWN_ID, "children")],
+    [Input(_MESSAGE_BTN_ID, 'n_clicks'), Input(_CLOSE_HISTORY_ID, 'n_clicks')],
+    [State(_JOBS_TABLE_ID, 'data'), State(_JOBS_TABLE_ID, 'selected_rows')]
+)
+def display_hide_progress_history(*args):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise dash_exc.PreventUpdate
+    trigger = ctx.triggered[0]['prop_id'].split('.')[0]
+    if trigger == _CLOSE_HISTORY_ID:
+        return False, no_update, no_update
+    else:  # _MESSAGE_BTN_ID
+        selection = args[-1]
+        idx = selection[0] if (selection is not None) and (len(selection) > 0) else -1
+        job_rows = args[-2]
+        sel_row = job_rows[idx] if ((job_rows is not None) and (-1 < idx < len(job_rows))) else None
+        if sel_row is None:
+            raise dash_exc.PreventUpdate
+        job_status = commit_job_status(sel_row['id'])
+        if isinstance(job_status, str):
+            # A server error happened. Display the error message in the modal.
+            markdown = f"**{job_status}**. Try again later or contact portal administrator."
+        else:
+            # Display progress message list in markdown
+            markdown = "* " + "\n* ".join(job_status.message_history)
+        header = f"Progress history for: {sel_row['id']}"
+        return True, header, markdown
 
-    review_modal = dbc.Modal(_layout_review_modal(None), id=_REVIEW_ID, backdrop=False, size="xl", is_open=False)
 
-    card = dbc.Card([
-        dbc.CardHeader("Experiment session commits in progress"),
-        dbc.CardBody([alert, button_row, jobs_table]),
-    ], class_name='mx-5 my-5')
+@callback(
+    [Output(_ALERT_ID, 'is_open'), Output(_ALERT_ID, "children")],
+    [Input(_ERR_DIV1_ID, 'children'), Input(_ERR_DIV2_ID, 'children')]
+)
+def raise_page_alert(err_msg1, err_msg2):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise dash_exc.PreventUpdate
+    trigger = ctx.triggered[0]['prop_id'].split('.')[0]
+    if (trigger == _ERR_DIV1_ID) and isinstance(err_msg1, str) and (len(err_msg1) > 0):
+        return True, err_msg1
+    elif (trigger == _ERR_DIV2_ID) and isinstance(err_msg2, str) and (len(err_msg2) > 0):
+        return True, err_msg2
+    else:
+        return no_update, no_update
 
-    return html.Div([card, upload_modal, messages_modal, review_modal])
+
+# Must define this constant prior to the callback that uses it as an Input.
+_UPLOAD_ID = 'commit-upload-modal'
+""" ID of Bootstrap Modal component by which user uploads the experiment archive for a new commit job. """
+
+
+@callback(
+    [Output(_JOBS_TABLE_ID, "data"), Output(_JOBS_TABLE_ID, "selected_rows"), Output(_ERR_DIV1_ID, "children")],
+    [Input(_REFRESH_BTN_ID, "n_clicks"), Input(_REMOVE_BTN_ID, "n_clicks"), Input(_UPLOAD_ID, "is_open")],
+    [State(_JOBS_TABLE_ID, "data"), State(_JOBS_TABLE_ID, "selected_rows")]
+)
+def update_jobs_table(*args):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise dash_exc.PreventUpdate
+
+    # there must be a logged-in user with 'commit' access
+    username = _get_current_username()
+    if not username:
+        return no_update, no_update, "Access denied. You must be logged into portal with commit privileges."
+
+    trigger = ctx.triggered[0]['prop_id'].split('.')[0]
+    if (trigger == _REFRESH_BTN_ID) or (trigger == _UPLOAD_ID):
+        # refresh jobs table when Refresh button clicked or upload modal is opened or closed
+        err_msg, jobs = _commit_jobs_for_current_user()
+        if err_msg is not None:
+            return no_update, no_update, err_msg
+        else:
+            return jobs, no_update, ""
+    elif trigger == _REMOVE_BTN_ID:
+        job_rows = args[-2]
+        selection = args[-1]
+        idx = selection[0] if (isinstance(selection, list)) and (len(selection) > 0) else -1
+        sel_row = job_rows[idx] if ((job_rows is not None) and (-1 < idx < len(job_rows))) else None
+        job_id = sel_row['id'] if sel_row else None
+        if job_id is None:
+            raise dash_exc.PreventUpdate
+        removed, err_msg, job_info = cancel_or_remove_commit_job(job_id)
+        if len(err_msg) > 0:
+            return no_update, no_update, err_msg
+        elif removed:
+            job_rows.pop(idx)
+        else:
+            job_rows[idx] = _job_table_row_from_job_status_info(job_info)
+        return job_rows, [] if removed else no_update, ""
+
+    get_application_logger().debug(f"Failed to identify callback trigger: {trigger}")
+    raise dash_exc.PreventUpdate
 
 
 def _layout_review_modal(job_id: Optional[str] = None) -> Tuple[dbc.ModalHeader, dbc.ModalBody, dbc.ModalFooter]:
-    info_tab_content, num_units, err_msg = _layout_session_info_tab_content(job_id)
-    proto_tab_content, err_temp = _layout_trial_protocol_tab_content(job_id)
-    if (not err_msg) and err_temp:
-        err_msg = err_temp
-    unit_tab_content, err_temp = _layout_neural_units_tab_content(job_id, num_units)
-    if (not err_msg) and err_temp:
-        err_msg = err_temp
-    tabs = dbc.Tabs(
-        [
-            dbc.Tab(info_tab_content, label="General Info"),
-            dbc.Tab(proto_tab_content, label="Trial Protocols"),
-            dbc.Tab(unit_tab_content, label="Neural Units", disabled=(num_units == 0))
-        ]
-    )
+    proto_card, err_msg = _layout_protocol_review_card(job_id)
 
     if err_msg:
         alert_color, alert_msg = 'danger', err_msg
@@ -269,13 +343,12 @@ def _layout_review_modal(job_id: Optional[str] = None) -> Tuple[dbc.ModalHeader,
 
     # we use these hidden DIVs to trigger updates to the Bootstrap Alert and the "Commit" button enable state in
     # response to user interactions on the Review modal.
-    meta_alert_div = html.Div("", id=_META_ALERT_DIV, style=dict(display='none'))
-    proto_alert_div = html.Div("", id=_PROTO_ALERT_DIV, style=dict(display='none'))
-    unit_alert_div = html.Div("", id=_UNIT_ALERT_DIV, style=dict(display='none'))
-    commit_alert_div = html.Div("", id=_COMMIT_ALERT_DIV, style=dict(display='none'))
+    proto_alert_div = html.Div("", id=_REVIEW_PROTO_ALERT_DIV, style=dict(display='none'))
+    commit_alert_div = html.Div("", id=_REVIEW_COMMIT_ALERT_DIV, style=dict(display='none'))
 
-    header = dbc.ModalHeader(dbc.ModalTitle(f"Review & commit: {job_id}", id=_REVIEW_TITLE_ID))
-    body = dbc.ModalBody([alert, tabs, meta_alert_div, proto_alert_div, unit_alert_div, commit_alert_div])
+    header = dbc.ModalHeader(dbc.ModalTitle(f"Validate selected trial protocols for commit job: {job_id}",
+                                            id=_REVIEW_TITLE_ID))
+    body = dbc.ModalBody([alert, proto_card, proto_alert_div, commit_alert_div])
     footer = dbc.ModalFooter([
         dbc.Button("Commit", id=_REVIEW_COMMIT_ID, n_clicks=0, disabled=(alert_color != 'success'), class_name='mr-2'),
         dbc.Button("Close", id=_REVIEW_CLOSE_ID, n_clicks=0)
@@ -285,225 +358,30 @@ def _layout_review_modal(job_id: Optional[str] = None) -> Tuple[dbc.ModalHeader,
 
 _REVIEW_ID = 'review-modal'
 """ 
-ID of Modal "Review" component by which user reviews and edits session information for a pending commit job, then
+ID of Modal "Review" component by which user reviews and validates trial protocols for a pending commit job, then
 initiates the actual commit.
 """
 _REVIEW_TITLE_ID = 'review-title'
 """ ID of the ModalTitle inside the header of the Modal "Review" component. The title text contains the job ID. """
-_REVIEW_BODY_ID = 'review-body'
-""" ID of the body of the Modal "Review" component. """
 _REVIEW_CLOSE_ID = 'review-close-btn'
 """ ID of button that closes the Modal "Review" component. """
 _REVIEW_COMMIT_ID = 'review-commit-btn'
 """ ID of button that triggers the actual commit of the experiment session to the database. """
-
-_META_ALERT_DIV = "meta-alert-div"
+_REVIEW_PROTO_ALERT_DIV = "review-proto-alert-div"
 """
 Hidden DIV used to trigger refresh of the Alert content and Commit button enable state when something changes (or
-an error occurs) while user interacts with the General Info tab of the Review modal.
+an error occurs) while user is validating trial protocols in the Review modal.
 """
-_PROTO_ALERT_DIV = "proto-alert-div"
-"""
-Hidden DIV used to trigger refresh of the Alert content and Commit button enable state when something changes (or
-an error occurs) while user interacts with the Trial Protocols tab of the Review modal.
-"""
-_UNIT_ALERT_DIV = "unit-alert-div"
-"""
-Hidden DIV used to trigger refresh of the Alert content and Commit button enable state when something changes (or
-an error occurs) while user interacts with the Neural Units tab of the Review modal.
-"""
-_COMMIT_ALERT_DIV = 'commit-alert-div'
+_REVIEW_COMMIT_ALERT_DIV = 'review-commit-alert-div'
 """
 Hidden DIV used to trigger refresh of the Alert content and Commit button enable state when the user clicks the 
 Commit button on the Review modal to finalize a commit, but something goes wrong on the server.
 """
-
 _REVIEW_ALERT_ID = 'review-alert'
 """ ID of Bootstrap alert that displays messages in the body of the Modal "Review" component. """
-_EXPERIMENTER_SELECT_ID = 'review-experimenter-select'
-""" ID of the Bootstrap Select that chooses the session experimenter (a username) for the commit job under review. """
-_SUBJECT_SELECT_ID = 'review-subject-select'
-""" ID of the Bootstrap Select that chooses the ID of the experiment subject for the commit job under review. """
-_RIG_SELECT_ID = 'review-rig-select'
-""" ID of the Bootstrap Select that chooses the ID of the experiment rig for the commit job under review. """
-_STUDY_SELECT_ID = 'review-study-select'
-""" ID of the Bootstrap Select that chooses the ID of the research study for the commit job under review. """
-_RECORD_DATE_ID = 'review-date-picker'
-""" ID of the Dash DatePicker component that sets the session recording date for the commit job under review. """
-_SUFFIX_INPUT_ID = 'review-suffix-input'
-""" ID of the Bootstrap Input component that sets the session suffix for the commit job under review. """
-_NOTES_AREA_ID = 'review-notes-area'
-""" ID of the Bootstrap TextArea component displaying session notes for the commit job under review. """
-_RECORDING_SRC_SELECT_ID = 'review-rec-src-select'
-""" ID of the Bootstrap Select that chooses the EPhys recording source for the commit job under review. """
-_PROBE_TYPE_SELECT_ID = 'review-probe-type-select'
-""" ID of the Bootstrap Select that chooses the EPhys probe type for the commit job under review. """
-_PROBE_RATE_INPUT_ID = 'review-probe-rate-input'
-""" ID of the Bootstrap Input component that sets the electrode sampling rate for the commit job under review. """
-_PROBE_X_INPUT_ID = 'review-probe-x-input'
-""" ID of the Bootstrap Input component that sets the probe x-coordinate for the commit job under review. """
-_PROBE_Y_INPUT_ID = 'review-probe-y-input'
-""" ID of the Bootstrap Input component that sets the probe y-coordinate for the commit job under review. """
-_PROBE_Z_INPUT_ID = 'review-probe-z-input'
-""" ID of the Bootstrap Input component that sets the probe depth for the commit job under review. """
-_AREA_SELECT_ID = 'review-area-select'
-""" ID of the Bootstrap Select that chooses the relevant brain region for the commit job under review. """
-
-_UPDATE_META_ID = 'review-update-meta-btn'
-""" ID of button that triggers an update of session metadata, harvesting values in the "Review" modal. """
 
 
-def _layout_session_info_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card, int, Optional[str]]:
-    info: Optional[SessionMetaData] = None
-    err_msg: Optional[str] = None
-    if job_id:
-        info = session_metadata(job_id)
-        if not info:
-            err_msg = "Error - Failed to retrieve cached session metadata from server"
-
-    experimenters = fetch_attribute_values(DBTable.USER, 'username')
-    experimenters.sort()
-    if (not err_msg) and (len(experimenters) == 0):
-        err_msg = "Error - Falied to retrieve user list from database."
-    subjects = fetch_attribute_values(DBTable.SUBJECT, "subj_id")
-    subjects.sort()
-    if (not err_msg) and (len(subjects) == 0):
-        err_msg = "Error - Failed to retrieve subject list from database."
-    rigs = fetch_attribute_values(DBTable.RIG, "rig_id")
-    rigs.sort()
-    if (not err_msg) and (len(rigs) == 0):
-        err_msg = "Error - Failed to retrieve rig list from database."
-    studies = fetch_restrict_proj([DBTable.STUDY], None, ['study_title'])
-    if studies is None:
-        studies = []
-        if not err_msg:
-            err_msg = "Error - Failed to retrieve study list from database."
-    studies.sort(key=lambda x: x['study_title'])
-    brain_areas = fetch_restrict_proj([DBTable.BRAIN_AREA], None, ['ba_name'])
-    if brain_areas is None:
-        brain_areas = []
-        if not err_msg:
-            err_msg = "Error - Failed to retrieve brain area list from database."
-    brain_areas.sort(key=lambda x: x['ba_name'])
-
-    # Widgets for attributes in Session table... NOTE that this has to work even if an error occurs above while
-    # retrieving information.
-    initial_value = info.experimenter if (info and info.experimenter) \
-        else (experimenters[0] if (len(experimenters) > 0) else None)
-    experimenter_group = dbc.InputGroup([
-        dbc.InputGroupText("Experimenter"),
-        dbc.Select(id=_EXPERIMENTER_SELECT_ID, options=[{"label": user, "value": user} for user in experimenters],
-                   value=initial_value)
-    ], size='sm')
-    initial_value = info.subj_id if (info and info.subj_id) else (subjects[0] if (len(subjects) > 0) else None)
-    subject_group = dbc.InputGroup([
-        dbc.InputGroupText("Subject"),
-        dbc.Select(id=_SUBJECT_SELECT_ID, options=[{"label": subject, "value": subject} for subject in subjects],
-                   value=initial_value)
-    ], size='sm')
-    initial_value = info.rig_id if (info and info.rig_id) else (rigs[0] if (len(rigs) > 0) else None)
-    rig_group = dbc.InputGroup([
-        dbc.InputGroupText("Rig"),
-        dbc.Select(id=_RIG_SELECT_ID, options=[{"label": rig, "value": rig} for rig in rigs], value=initial_value)
-    ], size='sm')
-    initial_value = info.study_id if (info and info.study_id) \
-        else (studies[0]['study_id'] if (len(studies) > 0) else None)
-    study_group = dbc.InputGroup([
-        dbc.InputGroupText("Study"),
-        dbc.Select(id=_STUDY_SELECT_ID,
-                   options=[{"label": opt['study_title'], "value": opt['study_id']} for opt in studies],
-                   value=initial_value)
-    ], size='sm')
-    date_group = dbc.InputGroup([
-        dbc.InputGroupText("Recorded On"),
-        dcc.DatePickerSingle(id=_RECORD_DATE_ID, date=(info and info.session_date),
-                             display_format='YYYY-MM-DD')
-    ], size='sm')
-    suffix_group = dbc.InputGroup([
-        dbc.InputGroupText("Suffix (0-9)"),
-        dbc.Input(id=_SUFFIX_INPUT_ID, type='number', minlength=1, maxlength=1,
-                  value=info.session_sfx if (info and info.session_sfx) else 1)
-    ], size='sm')
-    notes_group = dbc.InputGroup([
-        dbc.InputGroupText("Session Notes"),
-        dbc.Textarea(id=_NOTES_AREA_ID, minlength=0, maxlength=2048, rows=4,
-                     value=(info and info.session_notes),
-                     placeholder='Enter any notes about this particular session (optional, up to 2048 chars)')
-    ], size='sm')
-
-    row_1 = dbc.Row([dbc.Col(date_group, width=3), dbc.Col(suffix_group, width=2),
-                     dbc.Col(subject_group, width=3), dbc.Col(rig_group, width=2)], className='mx-1 mt-2 mb-2')
-    row_2 = dbc.Row([dbc.Col(experimenter_group, width=4), dbc.Col(study_group, width=8)], className='mx-1 mb-2')
-    row_3 = dbc.Row(dbc.Col(notes_group, width=12), className='mx-1 mb-3')
-
-    # Widgets for attributes in Session.EPhys....
-    no_ephys = (info is None) or (info.num_units <= 0)
-    source_options = attribute_info(DBTable.SESSION_EPHYS, 'ephys_src').options
-    rec_src_group = dbc.InputGroup([
-        dbc.InputGroupText("Recording Source"),
-        dbc.Select(id=_RECORDING_SRC_SELECT_ID, disabled=no_ephys,
-                   options=[{"label": opt, "value": opt} for opt in source_options],
-                   value=info.ephys_src if (info and info.ephys_src) else source_options[0])
-    ], size='sm')
-    probe_type_options = attribute_info(DBTable.SESSION_EPHYS, 'probe_type').options
-    probe_type_group = dbc.InputGroup([
-        dbc.InputGroupText("Probe Type"),
-        dbc.Select(id=_PROBE_TYPE_SELECT_ID, disabled=no_ephys,
-                   options=[{"label": opt, "value": opt} for opt in probe_type_options],
-                   value=info.probe_type if (info and info.probe_type) else probe_type_options[0])
-    ], size='sm')
-    rate_group = dbc.InputGroup([
-        dbc.InputGroupText("Sampling Rate (Hz)"),
-        dbc.Input(id=_PROBE_RATE_INPUT_ID, disabled=no_ephys, type='number', minlength=2, maxlength=10,
-                  value=(info and info.sampling_rate))
-    ], size='sm')
-    probe_x_group = dbc.InputGroup([
-        dbc.InputGroupText("Probe Location: "),
-        dbc.InputGroupText("X (mm)"),
-        dbc.Input(id=_PROBE_X_INPUT_ID, disabled=no_ephys, type='number', minlength=2, maxlength=10,
-                  value=(info and info.probe_x))
-    ], size='sm')
-    probe_y_group = dbc.InputGroup([
-        dbc.InputGroupText("Y (mm)"),
-        dbc.Input(id=_PROBE_Y_INPUT_ID, disabled=no_ephys, type='number', minlength=2, maxlength=10,
-                  value=(info and info.probe_y))
-    ], size='sm')
-    probe_z_group = dbc.InputGroup([
-        dbc.InputGroupText("Depth (mm)"),
-        dbc.Input(id=_PROBE_Z_INPUT_ID, disabled=no_ephys, type='number', minlength=2, maxlength=10,
-                  value=(info and info.probe_depth))
-    ], size='sm')
-    initial_value = info.ba_id if (info and info.ba_id) \
-        else (brain_areas[0]['ba_id'] if (len(brain_areas) > 0) else None)
-    brain_area_group = dbc.InputGroup([
-        dbc.InputGroupText("Brain Area"),
-        dbc.Select(id=_AREA_SELECT_ID, disabled=no_ephys,
-                   options=[{"label": opt['ba_name'], "value": opt['ba_id']} for opt in brain_areas],
-                   value=initial_value)
-    ], size='sm')
-
-    ephys_label = f"Electrophysiology{' (NOT APPLICABLE - no neural unit recordings found)' if no_ephys else ''}"
-    divider = dbc.Row([
-        dbc.Col(dbc.Label(ephys_label, size='sm'), width=5 if no_ephys else 1),
-        dbc.Col(html.Hr(), width=7 if no_ephys else 11)
-    ], class_name='mx-1 mb-2')
-
-    row_4 = dbc.Row([dbc.Col(rec_src_group, width=4), dbc.Col(probe_type_group, width=4), dbc.Col(rate_group, width=4)],
-                    class_name='mx-1 mb-2')
-    row_5 = dbc.Row([dbc.Col(probe_x_group, width=4), dbc.Col(probe_y_group, width=2), dbc.Col(probe_z_group, width=3)],
-                    class_name='mx-1 mb-2')
-    row_6 = dbc.Row(dbc.Col(brain_area_group, width=4), class_name='mx-1 mb-3')
-
-    update_btn = dbc.Button("Update", id=_UPDATE_META_ID, size='sm')
-    update_tip = dbc.Tooltip("Be sure to press this button to confirm any changes on this tab!", target=_UPDATE_META_ID,
-                             placement='right', delay=dict(show=100, hide=100))
-    row_7 = dbc.Row([dbc.Col(update_btn, width=1), update_tip], class_name='mx-1 mb-2')
-
-    n = 0 if no_ephys else info.num_units
-    return dbc.Card([row_1, row_2, row_3, divider, row_4, row_5, row_6, row_7], class_name='mt-2'), n, err_msg
-
-
-def _layout_trial_protocol_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card, Optional[str]]:
+def _layout_protocol_review_card(job_id: Optional[str]) -> Tuple[dbc.Card, Optional[str]]:
     proto_names: List[str]
     initial_proto: Optional[Protocol] = None
     err_msg: Optional[str] = None
@@ -531,7 +409,7 @@ def _layout_trial_protocol_tab_content(job_id: Optional[str]) -> Tuple[dbc.Card,
 
 
 _PROTO_DIV_ID = "review-proto-div"
-""" ID of HTML Div on which a trial protocols are displayed and edited during review phase. """
+""" ID of HTML Div on which trial protocols are displayed and edited during review phase. """
 _PROTO_SELECT_ID = "review-proto-select"
 """ ID of Bootstrap Select by which user selects which trial protocol to display for review and validation. """
 _PROTO_VALID_BTN_ID = "review-proto-valid"
@@ -549,7 +427,7 @@ _PROTO_RV_GROUP_ID = "review--proto-rv-form"
 
 
 def _layout_protocol_div(proto: Optional[Protocol]) -> List[Any]:
-    # NOTE: This has to work even if argumentsis None, so that all widgets are realized -- since they appear
+    # NOTE: This has to work even if argument is None, so that all widgets are realized -- since they appear
     # in callbacks.
     needs_validation = False if (proto is None) else proto.is_candidate
     valid_btn = dbc.Button("Validate" if needs_validation else "\u2713 Validated", id=_PROTO_VALID_BTN_ID,
@@ -752,226 +630,6 @@ def display_trial_protocol_definition(proto: Protocol) -> List[Any]:
     return [html.Div(badges, className='mt-3 mb-1'), segment_table]
 
 
-def _layout_neural_units_tab_content(job_id: Optional[str], num_units: int) -> Tuple[dbc.Card, Optional[str]]:
-    num_units = num_units if job_id and (num_units > 0) else 0
-    err_msg: Optional[str] = None
-    first_unit: Optional[OmniplexUnit] = None
-    if job_id:
-        first_unit = metrics_for_neural_unit(job_id, 0)
-        if not first_unit:
-            err_msg = "Error - Failed to retrieve cached neural unit metrics from server"
-    select_unit = dbc.Select(
-        id=_UNIT_SELECT_ID,
-        options=[{'label': f"Unit {i + 1}", 'value': str(i)} for i in range(num_units)],
-        value="0" if first_unit else None
-    )
-    select_unit_row = dbc.Row(dbc.Col(select_unit, width='auto'))
-    unit_div = html.Div(_layout_unit_div(first_unit), id=_UNIT_DIV_ID)
-    return dbc.Card(dbc.CardBody([select_unit_row, unit_div]), class_name="mt-3"), err_msg
-
-
-_UNIT_DIV_ID = "review-unit-div"
-""" ID of HTML Div in which a selected neural unit is displayed during the review phase. """
-_UNIT_SELECT_ID = "review-unit-select"
-""" ID of Bootstrap Select by which user selects which neural unit to display for review and validation. """
-_UNIT_TYPE_SELECT_ID = "review-unit-type-select"
-""" ID of Bootstrap Select component by which user selects the type for the currently displayed neural unit. """
-_UNIT_TYPE_APPLY_ALL_ID = "review-unit-type-apply-all"
-""" ID of button that, when clicked, applies currently selected neuron type to all recorded neural units. """
-
-
-def _layout_unit_div(unit: Optional[OmniplexUnit]) -> List[Any]:
-    # dropdown lets user assign neuron type to the unit
-    neuron_types = fetch_rows(DBTable.NEURON_TYPE)
-    if neuron_types is None:
-        neuron_types = list()
-
-    initial = None
-    if unit and (unit.neuron_type in [nt['nt_id'] for nt in neuron_types]):
-        initial = str(unit.neuron_type)
-    select_type = dbc.InputGroup(
-        [
-            dbc.InputGroupText("Neuron Type"),
-            dbc.Select(
-                id=_UNIT_TYPE_SELECT_ID,
-                options=[{'label': nt['nt_name'], 'value': str(nt['nt_id'])} for nt in neuron_types],
-                value=initial
-            )
-        ])
-    apply_all_btn = dbc.Button("Apply selected type to all units", id=_UNIT_TYPE_APPLY_ALL_ID)
-    header_kids = [html.Hr(),
-                   dbc.Row([dbc.Col(select_type, width='auto'), dbc.Col(apply_all_btn, width=4)],
-                           class_name='mb-3')]
-
-    peak_to_peak = max(unit.template) - min(unit.template) if unit else 0
-    header_kids.extend([
-        dbc.Badge(f"Omniplex Channel: {unit.channel if unit else '--'}", color="primary", class_name="me-3"),
-        dbc.Badge(f"Mean firing rate: {unit.firing_rate if unit else 0:.1f} Hz", color="primary", class_name="me-3"),
-        dbc.Badge(f"#Spikes: {unit.num_spikes if unit else 0}", color="primary", class_name="me-3"),
-        dbc.Badge(f"SNR: {unit.snr if unit else 0:.2f}", color="primary", class_name="me-3"),
-        dbc.Badge(f"Peak-to-peak: {peak_to_peak:.1f} \u00B5V", color="primary", class_name="me-3"),
-    ])
-
-    # simple graph of template waveform. Note I'm assuming 40KHz sampling rate here!
-    template = unit.template if unit else [0 for _ in range(20)]  # provide dummy template if none provided
-    graph = dcc.Graph(figure=px.line(x=[i / 40.0 for i in range(len(template))], y=template,
-                                     labels={'x': 'time (ms)', 'y': '\u00B5V'},
-                                     title='Average spike waveform (1-ms pre, 9-ms post)'))
-
-    return [html.Div(header_kids, className='mt-3 mb-1'), graph]
-
-
-@callback(
-    [Output(_MESSAGE_BTN_ID, 'disabled'), Output(_REVIEW_BTN_ID, 'disabled'), Output(_REMOVE_BTN_ID, 'disabled')],
-    [Input(_JOBS_TABLE_ID, 'selected_rows'), Input(_REFRESH_BTN_ID, "n_clicks")],
-    [State(_JOBS_TABLE_ID, 'selected_rows'), State(_JOBS_TABLE_ID, 'data')]
-)
-def select_row_callback(*args):
-    ctx = callback_context
-    if not ctx.triggered:
-        raise dash_exc.PreventUpdate
-    trigger = ctx.triggered[0]['prop_id'].split('.')[0]
-    arg_idx = 2 if trigger == _REFRESH_BTN_ID else 0
-    idx = args[arg_idx][0] if isinstance(args[arg_idx], list) and (len(args[arg_idx]) > 0) else -1
-    row = args[3][idx] if isinstance(args[3], list) and (-1 < idx < len(args[3])) else None
-    disable_review = (row is None) or (row['state'] != CommitStateEnum.REVIEW.value)
-    return row is None, disable_review, row is None
-
-
-# noinspection PyTypeChecker
-@callback(
-    [Output(_START_BTN_ID, 'disabled'), Output(_JOBS_TABLE_ID, "data"), Output(_JOBS_TABLE_ID, "selected_rows"),
-     Output(_UPLOAD_ID, "is_open"), Output(_ALERT_ID, "children"), Output(_ALERT_ID, "is_open")],
-    [Input(_START_BTN_ID, "n_clicks"), Input(_REFRESH_BTN_ID, "n_clicks"), Input(_REMOVE_BTN_ID, "n_clicks"),
-     Input(_CLOSE_UPLOAD_ID, "n_clicks"), Input(_UPLOADER_ID, 'isCompleted'), Input(_UPLOADER_ID, 'fileNames')],
-    [State(_UPLOADER_ID, "upload_id"), State(_JOBS_TABLE_ID, "data"), State(_JOBS_TABLE_ID, "selected_rows")]
-)
-def all_in_one_callback(*args):
-    ctx = callback_context
-    if not ctx.triggered:
-        raise dash_exc.PreventUpdate
-
-    # is an upload in progress -- that determines whether or not we can start a new commit job
-    job_rows: List[Any] = args[-2]
-    uploading = isinstance(job_rows, list) and any([j['state'] == CommitStateEnum.UPLOADING.value for j in job_rows])
-    upload_id = args[-3]
-
-    # there must be a logged-in user with 'commit' access
-    username = _get_current_username()
-    if not username:
-        return uploading, no_update, no_update, no_update, \
-               "Access denied. You must be logged into portal with commit privileges.", True
-
-    trigger = ctx.triggered[0]['prop_id'].split('.')[0]
-    if trigger == _START_BTN_ID:
-        job_status = initiate_session_commit(username, upload_id)
-        if isinstance(job_status, str):
-            # operation failed on server; inform user
-            return False, no_update, no_update, no_update, str(job_status), True
-        else:
-            job_row = _job_table_row_from_job_status_info(job_status)
-            if not isinstance(job_rows, list):
-                job_rows = [job_row]
-            else:
-                job_rows.insert(0, job_row)
-            return True, job_rows, no_update, True, "", False
-    elif trigger == _REFRESH_BTN_ID:
-        err_msg, jobs = _commit_jobs_for_current_user()
-        uploading = isinstance(jobs, list) and any([j['state'] == CommitStateEnum.UPLOADING.value for j in jobs])
-        if err_msg is not None:
-            return no_update, no_update, no_update, False, err_msg, True
-        else:
-            return uploading, jobs, no_update, False, "", False
-    elif trigger == _REMOVE_BTN_ID or trigger == _CLOSE_UPLOAD_ID:
-        # hitting "Cancel" button while Upload Modal is raised removes the relevant job. The currently selected job
-        # should be the one that was in the uploading phase, but we don't take that for granted
-        idx = -1
-        job_id = None
-        if trigger == _REMOVE_BTN_ID:
-            selection = args[-1]
-            idx = selection[0] if (selection is not None) and (len(selection) > 0) else -1
-            job_id = job_rows[idx]['id'] if ((job_rows is not None) and (-1 < idx < len(job_rows))) else None
-        else:
-            if uploading:
-                try:
-                    idx = [j['state'] for j in job_rows].index(CommitStateEnum.UPLOADING.value)
-                    job_id = job_rows[idx]['id']
-                except ValueError:
-                    pass
-        if job_id is None:
-            raise dash_exc.PreventUpdate
-        removed, err_msg, job_info = cancel_or_remove_commit_job(job_id)
-        if len(err_msg) > 0:
-            return no_update, no_update, no_update, False, err_msg, True
-        elif removed:
-            job_rows.pop(idx)
-        else:
-            job_rows[idx] = _job_table_row_from_job_status_info(job_info)
-        uploading = any([j['state'] == CommitStateEnum.UPLOADING.value for j in job_rows])
-        return uploading, job_rows, [] if removed else no_update, False, "", False
-    elif trigger == _UPLOADER_ID:
-        is_completed = args[-5]
-        file_names = args[-4]
-        upload_id = args[-3]
-        if not is_completed:
-            if file_names is not None:
-                get_application_logger().debug(f"Upload initiated on client, upload_id={upload_id}, "
-                                               f"file_names={file_names}")
-            raise dash_exc.PreventUpdate
-        else:
-            get_application_logger().debug(f"Upload completed, upload_id={upload_id}, file={file_names}")
-            fname = str(file_names[0] if isinstance(file_names, list) else file_names)
-            upload_job_idx = -1
-            for i, r in enumerate(job_rows):
-                if r['state'] == CommitStateEnum.UPLOADING.value:
-                    upload_job_idx = i
-                    break
-            if upload_job_idx == -1:
-                get_application_logger().error(
-                    f"Upload just completed, but no current commit job is in the uploading phase!")
-                err_msg = f"Internal error - no commit job is currently uploading"
-                return False, no_update, no_update, False, err_msg, True
-
-            job_status = update_commit_job_on_archive_upload(job_rows[upload_job_idx]['id'], fname)
-            if isinstance(job_status, str):
-                err_msg = f"Upload failed: {str(job_status)}"
-                return True, no_update, no_update, False, err_msg, True
-            job_rows[upload_job_idx] = _job_table_row_from_job_status_info(job_status)
-            return False, job_rows, no_update, False, "", False
-    get_application_logger().debug(f"On commit page, failed to identify trigger for all-in-one callback: {trigger}")
-    raise dash_exc.PreventUpdate
-
-
-@callback(
-    [Output(_HISTORY_ID, 'is_open'), Output(_HISTORY_HEADER_ID, "children"), Output(_HISTORY_MARKDOWN_ID, "children")],
-    [Input(_MESSAGE_BTN_ID, 'n_clicks'), Input(_CLOSE_HISTORY_ID, 'n_clicks')],
-    [State(_JOBS_TABLE_ID, 'data'), State(_JOBS_TABLE_ID, 'selected_rows')]
-)
-def display_hide_progress_history(*args):
-    ctx = callback_context
-    if not ctx.triggered:
-        raise dash_exc.PreventUpdate
-    trigger = ctx.triggered[0]['prop_id'].split('.')[0]
-    if trigger == _CLOSE_HISTORY_ID:
-        return False, no_update, no_update
-    else:  # _MESSAGE_BTN_ID
-        selection = args[-1]
-        idx = selection[0] if (selection is not None) and (len(selection) > 0) else -1
-        job_rows = args[-2]
-        sel_row = job_rows[idx] if ((job_rows is not None) and (-1 < idx < len(job_rows))) else None
-        if sel_row is None:
-            raise dash_exc.PreventUpdate
-        messages = commit_job_progress(sel_row['id'])
-        if isinstance(messages, str):
-            # A server error happened. Display the error message in the modal.
-            markdown = f"**{messages}**. Try again later or contact portal administrator."
-        else:
-            # Display progress message list in markdown
-            markdown = "* " + "\n* ".join(messages)
-        header = f"Progress history for {sel_row['id']}"
-        return True, header, markdown
-
-
 @callback(
     [Output(_REVIEW_ID, 'is_open'), Output(_REVIEW_ID, "children")],
     [Input(_REVIEW_BTN_ID, 'n_clicks'), Input(_REVIEW_CLOSE_ID, 'n_clicks')],
@@ -998,8 +656,7 @@ def display_hide_session_review(*args):
 
 @callback(
     [Output(_REVIEW_ALERT_ID, 'children'), Output(_REVIEW_ALERT_ID, 'color'), Output(_REVIEW_COMMIT_ID, 'disabled')],
-    [Input(_META_ALERT_DIV, 'children'), Input(_PROTO_ALERT_DIV, 'children'), Input(_UNIT_ALERT_DIV, 'children'),
-     Input(_COMMIT_ALERT_DIV, 'children')]
+    [Input(_REVIEW_PROTO_ALERT_DIV, 'children'), Input(_REVIEW_COMMIT_ALERT_DIV, 'children')]
 )
 def update_review_modal_alert(*args):
     ctx = callback_context
@@ -1007,62 +664,19 @@ def update_review_modal_alert(*args):
         raise dash_exc.PreventUpdate
     trigger = ctx.triggered[0]['prop_id'].split('.')[0]
     try:
-        idx = [_META_ALERT_DIV, _PROTO_ALERT_DIV, _UNIT_ALERT_DIV, _COMMIT_ALERT_DIV].index(trigger)
+        idx = [_REVIEW_PROTO_ALERT_DIV, _REVIEW_COMMIT_ALERT_DIV].index(trigger)
     except ValueError:
         raise dash_exc.PreventUpdate
     pos = args[idx].find('-') if isinstance(args[idx], str) else -1
     if pos > -1:
         alert_color = args[idx][0:pos]
         return args[idx][pos + 1:], alert_color, alert_color != 'success'
-
-
-@callback(
-    Output(_META_ALERT_DIV, 'children'),
-    [Input(_UPDATE_META_ID, 'n_clicks')],
-    [State(_EXPERIMENTER_SELECT_ID, "value"), State(_SUBJECT_SELECT_ID, "value"), State(_RIG_SELECT_ID, "value"),
-     State(_RECORD_DATE_ID, "date"), State(_SUFFIX_INPUT_ID, "value"), State(_STUDY_SELECT_ID, "value"),
-     State(_NOTES_AREA_ID, "value"), State(_RECORDING_SRC_SELECT_ID, "value"), State(_PROBE_TYPE_SELECT_ID, "value"),
-     State(_PROBE_RATE_INPUT_ID, "value"), State(_PROBE_X_INPUT_ID, "value"), State(_PROBE_Y_INPUT_ID, "value"),
-     State(_PROBE_Z_INPUT_ID, "value"), State(_AREA_SELECT_ID, "value"), State(_REVIEW_TITLE_ID, "children")]
-)
-def update_session_data(*args):
-    ctx = callback_context
-    if not ctx.triggered:
+    else:
         raise dash_exc.PreventUpdate
-    trigger = ctx.triggered[0]['prop_id'].split('.')[0]
-    if trigger == _UPDATE_META_ID:
-        # job ID is in the modal header title text
-        idx = args[-1].find(":")
-        job_id = args[-1][idx + 2:]
-        ofs = 1
-        session_dict = dict(experimenter=args[ofs], subj_id=args[ofs + 1], rig_id=args[ofs + 2],
-                            session_sfx=int(args[ofs + 4]), study_id=int(args[ofs + 5]), session_notes=args[ofs + 6],
-                            ephys_src=args[ofs + 7], probe_type=args[ofs + 8], ba_id=int(args[ofs + 13]))
-        try:
-            session_dict['session_date'] = date.fromisoformat(args[ofs + 3])
-            if args[ofs + 9]:
-                session_dict['sampling_rate'] = float(args[ofs + 9])
-            if args[ofs + 10]:
-                session_dict['probe_x'] = float(args[ofs + 10])
-            if args[ofs + 11]:
-                session_dict['probe_y'] = float(args[ofs + 11])
-            if args[ofs + 12]:
-                session_dict['probe_depth'] = float(args[ofs + 12])
-        except Exception:
-            pass
-
-        ok = update_session_metadata(job_id, session_dict)
-        if not ok:
-            alert_msg, alert_color = 'Error - Failed to update session metadata on server', 'danger'
-        else:
-            ok, ready, alert_msg = ready_to_commit(job_id)
-            alert_color = 'danger' if (not ok) else ('success' if ready else 'warning')
-        return f"{alert_color}-{alert_msg}"
-    return no_update
 
 
 @callback(
-    [Output(_PROTO_DIV_ID, 'children'), Output(_PROTO_ALERT_DIV, 'children'),
+    [Output(_PROTO_DIV_ID, 'children'), Output(_REVIEW_PROTO_ALERT_DIV, 'children'),
      Output(_PROTO_VALID_BTN_ID, 'children'), Output(_PROTO_VALID_BTN_ID, 'disabled'),
      Output(_PROTO_RV_GROUP_ID, 'style'), Output(_PROTO_SELECT_ID, 'options'), Output(_PROTO_SELECT_ID, 'value')],
     [Input(_PROTO_SELECT_ID, 'value'), Input(_PROTO_ADD_RV_BTN_ID, 'n_clicks'), Input(_PROTO_VALID_BTN_ID, 'n_clicks')],
@@ -1129,47 +743,8 @@ def update_proto(*args):
 
 
 @callback(
-    [Output(_UNIT_DIV_ID, 'children'), Output(_UNIT_ALERT_DIV, 'children'), Output(_UNIT_SELECT_ID, 'value')],
-    [Input(_UNIT_SELECT_ID, 'value'), Input(_UNIT_TYPE_SELECT_ID, "value"), Input(_UNIT_TYPE_APPLY_ALL_ID, "n_clicks")],
-    [State(_UNIT_TYPE_SELECT_ID, 'value'), State(_UNIT_SELECT_ID, 'value'), State(_UNIT_SELECT_ID, 'options'),
-     State(_REVIEW_TITLE_ID, "children")]
-)
-def update_unit(*args):
-    ctx = callback_context
-    if not ctx.triggered:
-        raise dash_exc.PreventUpdate
-    # job ID is in the modal header title text
-    idx = args[-1].find(":")
-    job_id = args[-1][idx + 2:]
-    trigger = ctx.triggered[0]['prop_id'].split('.')[0]
-    if trigger == _UNIT_SELECT_ID:
-        unit: OmniplexUnit = metrics_for_neural_unit(job_id, int(args[0]))
-        if unit:
-            return _layout_unit_div(unit), no_update, no_update
-        else:
-            return no_update, "danger-An error occurred while retrieving neural unit metrics from server", no_update
-    elif (trigger == _UNIT_TYPE_SELECT_ID) or (trigger == _UNIT_TYPE_APPLY_ALL_ID):
-        unit_idx = -1 if (trigger == _UNIT_TYPE_APPLY_ALL_ID) else int(args[-3])
-        nt_id = int(args[1] if trigger == _UNIT_TYPE_SELECT_ID else args[-4])
-        ok = set_unit_type(job_id, unit_idx, nt_id)
-        if ok:
-            ok, ready, msg = ready_to_commit(job_id)
-            msg = f"{'danger' if not ok else ('success' if ready else 'warning')}-{msg}"
-            if ok and trigger == _UNIT_TYPE_SELECT_ID:
-                # Automatically move forward to the next unit in list, if there is one
-                num_units = len(args[-2]) if isinstance(args[-2], list) else 0
-                if (unit_idx + 1) < num_units:
-                    unit: OmniplexUnit = metrics_for_neural_unit(job_id, unit_idx+1)
-                    if unit is not None:
-                        return _layout_unit_div(unit), msg, str(unit_idx+1)
-        else:
-            msg = "danger-An error occurred while updating neural unit type on server"
-        return no_update, msg, no_update
-    return no_update, no_update, no_update
-
-
-@callback(
-    [Output(_COMMIT_ALERT_DIV, 'children'), Output(_REVIEW_CLOSE_ID, 'n_clicks'), Output(_REFRESH_BTN_ID, 'n_clicks')],
+    [Output(_REVIEW_COMMIT_ALERT_DIV, 'children'), Output(_REVIEW_CLOSE_ID, 'n_clicks'),
+     Output(_REFRESH_BTN_ID, 'n_clicks')],
     [Input(_REVIEW_COMMIT_ID, 'n_clicks')],
     [State(_REVIEW_CLOSE_ID, 'n_clicks'), State(_REFRESH_BTN_ID, 'n_clicks'), State(_REVIEW_TITLE_ID, 'children')]
 )
@@ -1177,21 +752,420 @@ def on_trigger_commit_to_database(*args):
     ctx = callback_context
     if not ctx.triggered:
         raise dash_exc.PreventUpdate
+
+    # Each time the review modal is shown, it is laid out again. So this method will be invoked on initial load,
+    # but the "n_clicks" attribute will be at its initial value of 0. In this case, do nothing. This is
+    # imperative!
+    if args[0] == 0:
+        raise dash_exc.PreventUpdate
+    # get job ID from the Review modal header title text
+    idx = args[-1].find(":")
+    job_id = args[-1][idx + 2:]
+    err_msg = commit_to_database(job_id)
+    if err_msg:
+        return f"danger-{err_msg}", no_update, no_update
+    else:
+        n_close = (args[-3] + 1) if args[-3] else 1
+        n_refresh = (args[-2] + 1) if args[-2] else 1
+        return no_update, n_close, n_refresh
+
+
+def _create_commit_modal() -> dbc.Modal:
+    hdr = dbc.ModalHeader(dbc.ModalTitle("Enter required information to commit a new experiment session"))
+    card, err_msg = _layout_session_metadata_card()
+    alert = dbc.Alert(err_msg, id=_COMMIT_ALERT_ID, color='danger', is_open=(err_msg is not None), class_name='mb-1')
+    jobid_div = html.Div("", id=_COMMIT_JOBID_DIV, style=dict(display='none'))
+    cancel_btn = dbc.Button("Cancel", id=_COMMIT_CANCEL_BTN, n_clicks=0, class_name='mr-2')
+    submit_btn = dbc.Button("Submit", id=_COMMIT_SUBMIT_BTN, n_clicks=0)
+    return dbc.Modal([hdr, dbc.ModalBody([alert, jobid_div, card]), dbc.ModalFooter([cancel_btn, submit_btn])],
+                     id=_COMMIT_ID, backdrop="static", size="xl", is_open=False)
+
+
+_COMMIT_ID = 'commit-modal'
+""" ID of Bootstrap 'new commit' Modal component, by which user initiates a new experiment session commit job. """
+_COMMIT_ALERT_ID = 'commit-modal-alert'
+""" ID of Bootstrap Alert for displaying an error message within the 'new commit' modal. """
+_COMMIT_JOBID_DIV = 'commit-jobid-div'
+""" 
+ID of hidden Div in which the job ID for a newly created commit job is stored temporarily. Setting the job ID here
+triggers raising the upload modal so that user can upload session archive for the new commit.
+"""
+_COMMIT_CANCEL_BTN = 'commit-modal-cancel'
+""" ID of 'Cancel' button in the footer of the 'new commit' modal. """
+_COMMIT_SUBMIT_BTN = 'commit-modal-submit'
+""" ID of 'Submit' button in the footer of the 'new commit' modal. """
+
+
+def _layout_session_metadata_card() -> Tuple[dbc.Card, Optional[str]]:
+    err_msg: Optional[str] = None
+
+    experimenters = fetch_attribute_values(DBTable.USER, 'username')
+    experimenters.sort()
+    if len(experimenters) == 0:
+        err_msg = "Error - Falied to retrieve user list from database."
+    subjects = fetch_attribute_values(DBTable.SUBJECT, "subj_id")
+    subjects.sort()
+    if (not err_msg) and (len(subjects) == 0):
+        err_msg = "Error - Failed to retrieve subject list from database."
+    rigs = fetch_attribute_values(DBTable.RIG, "rig_id")
+    rigs.sort()
+    if (not err_msg) and (len(rigs) == 0):
+        err_msg = "Error - Failed to retrieve rig list from database."
+    studies = fetch_restrict_proj([DBTable.STUDY], None, ['study_title'])
+    if studies is None:
+        studies = []
+        if not err_msg:
+            err_msg = "Error - Failed to retrieve study list from database."
+    studies.sort(key=lambda x: x['study_title'])
+    brain_areas = fetch_restrict_proj([DBTable.BRAIN_AREA], None, ['ba_name'])
+    if brain_areas is None:
+        brain_areas = []
+        if not err_msg:
+            err_msg = "Error - Failed to retrieve brain area list from database."
+    brain_areas.sort(key=lambda x: x['ba_name'])
+    neuron_types = fetch_attribute_values(DBTable.NEURON_TYPE, "nt_name")
+    if len(neuron_types) == 0:
+        err_msg = "Error - Failed to retreive neuron types list from database."
+
+    # Widgets for attributes in Session table... NOTE that this has to work even if an error occurs above while
+    # retrieving information.
+    initial_value = experimenters[0] if (len(experimenters) > 0) else None
+    experimenter_group = dbc.InputGroup([
+        dbc.InputGroupText("Experimenter"),
+        dbc.Select(id=_EXPERIMENTER_SELECT_ID, options=[{"label": user, "value": user} for user in experimenters],
+                   value=initial_value)
+    ], size='sm')
+    initial_value = subjects[0] if (len(subjects) > 0) else None
+    subject_group = dbc.InputGroup([
+        dbc.InputGroupText("Subject"),
+        dbc.Select(id=_SUBJECT_SELECT_ID, options=[{"label": subject, "value": subject} for subject in subjects],
+                   value=initial_value)
+    ], size='sm')
+    initial_value = rigs[0] if (len(rigs) > 0) else None
+    rig_group = dbc.InputGroup([
+        dbc.InputGroupText("Rig"),
+        dbc.Select(id=_RIG_SELECT_ID, options=[{"label": rig, "value": rig} for rig in rigs], value=initial_value)
+    ], size='sm')
+    initial_value = studies[0]['study_id'] if (len(studies) > 0) else None
+    study_group = dbc.InputGroup([
+        dbc.InputGroupText("Study"),
+        dbc.Select(id=_STUDY_SELECT_ID,
+                   options=[{"label": opt['study_title'], "value": opt['study_id']} for opt in studies],
+                   value=initial_value)
+    ], size='sm')
+    date_group = dbc.InputGroup([
+        dbc.InputGroupText("Recorded On"),
+        dcc.DatePickerSingle(id=_RECORD_DATE_ID, display_format='YYYY-MM-DD')
+    ], size='sm')
+    suffix_group = dbc.InputGroup([
+        dbc.InputGroupText("Suffix (0-9)"),
+        dbc.Input(id=_SUFFIX_INPUT_ID, type='number', minlength=1, maxlength=1, value=1)
+    ], size='sm')
+    notes_group = dbc.InputGroup([
+        dbc.InputGroupText("Session Notes"),
+        dbc.Textarea(id=_NOTES_AREA_ID, minlength=0, maxlength=2048, rows=4,
+                     value=None,
+                     placeholder='Enter any notes about this particular session (optional, up to 2048 chars)')
+    ], size='sm')
+
+    row_1 = dbc.Row([dbc.Col(date_group, width=3), dbc.Col(suffix_group, width=2),
+                     dbc.Col(subject_group, width=3), dbc.Col(rig_group, width=2)], className='mx-1 mt-2 mb-2')
+    row_2 = dbc.Row([dbc.Col(experimenter_group, width=4), dbc.Col(study_group, width=8)], className='mx-1 mb-2')
+    row_3 = dbc.Row(dbc.Col(notes_group, width=12), className='mx-1 mb-3')
+
+    # Widgets for attributes in Session.EPhys, plus an editable Datatable to specify the neuron type for each recorded
+    # neural unit. All EPhys attribute widgets are disabled when # of recorded units is 0.
+    num_units_group = dbc.InputGroup([
+        dbc.InputGroupText("# Units Recorded"),
+        dbc.Input(id=_NUM_UNITS_INPUT_ID,  type='number', minlength=1, maxlength=3, value=0)
+    ], size='sm')
+    nt_table = dt.DataTable(
+        id=_NT_TABLE_ID,
+        columns=[
+            {"name": "Unit", "id": "index", "presentation": "input", "editable": False},
+            {"name": "Neuron Type", "id": "nt_name", "presentation": "dropdown"}
+        ],
+        data=[],
+        dropdown={
+            "nt_name": {
+                "clearable": False,
+                "options": [{'label': t, 'value': t} for t in neuron_types]
+            }
+        },
+        editable=True,
+        row_selectable='single',
+        cell_selectable=False,
+        selected_rows=[],
+        style_header={'fontWeight': 'bold'},
+        style_cell={'textAlign': 'left', 'whiteSpace': 'normal', 'height': 'auto', 'lineHeight': '18px'},
+        style_data={'whiteSpace': 'pre-wrap'},
+        style_cell_conditional=[
+            {'if': {'column_id': 'index'}, 'width': 100},
+            {'if': {'column_id': 'nt_name'}, 'width': 300}
+        ],
+        tooltip_data=None, tooltip_duration=None,
+        css=[],
+        style_table={'height': '300px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
+    )
+
+    source_options = attribute_info(DBTable.SESSION_EPHYS, 'ephys_src').options
+    rec_src_group = dbc.InputGroup([
+        dbc.InputGroupText("Recording Source"),
+        dbc.Select(id=_RECORDING_SRC_SELECT_ID, disabled=True,
+                   options=[{"label": opt, "value": opt} for opt in source_options], value=source_options[0])
+    ], size='sm')
+    probe_type_options = attribute_info(DBTable.SESSION_EPHYS, 'probe_type').options
+    probe_type_group = dbc.InputGroup([
+        dbc.InputGroupText("Probe Type"),
+        dbc.Select(id=_PROBE_TYPE_SELECT_ID, disabled=True,
+                   options=[{"label": opt, "value": opt} for opt in probe_type_options], value=probe_type_options[0])
+    ], size='sm')
+    rate_group = dbc.InputGroup([
+        dbc.InputGroupText("Sampling Rate (Hz)"),
+        dbc.Input(id=_PROBE_RATE_INPUT_ID, disabled=True, type='number', minlength=2, maxlength=10, value=40000)
+    ], size='sm')
+    probe_x_group = dbc.InputGroup([
+        dbc.InputGroupText("Probe Location: "),
+        dbc.InputGroupText("X (mm)"),
+        dbc.Input(id=_PROBE_X_INPUT_ID, disabled=True, type='number', minlength=2, maxlength=10, value=10)
+    ], size='sm')
+    probe_y_group = dbc.InputGroup([
+        dbc.InputGroupText("Y (mm)"),
+        dbc.Input(id=_PROBE_Y_INPUT_ID, disabled=True, type='number', minlength=2, maxlength=10, value=10)
+    ], size='sm')
+    probe_z_group = dbc.InputGroup([
+        dbc.InputGroupText("Depth (mm)"),
+        dbc.Input(id=_PROBE_Z_INPUT_ID, disabled=True, type='number', minlength=2, maxlength=10, value=10)
+    ], size='sm')
+    initial_value = brain_areas[0]['ba_id'] if (len(brain_areas) > 0) else None
+    brain_area_group = dbc.InputGroup([
+        dbc.InputGroupText("Brain Area"),
+        dbc.Select(id=_AREA_SELECT_ID, disabled=True,
+                   options=[{"label": opt['ba_name'], "value": opt['ba_id']} for opt in brain_areas],
+                   value=initial_value)
+    ], size='sm')
+
+    ephys_label = "Electrophysiology (SKIP if no neural units were recorded)"
+    divider = dbc.Row([
+        dbc.Col(dbc.Label(ephys_label, size='sm'), width=5), dbc.Col(html.Hr(), width=7)
+    ], class_name='mx-1 mb-2')
+
+    unit_rows = [
+        dbc.Row(dbc.Col(num_units_group), class_name='mx-1 mb-2'),
+        dbc.Row(dbc.Col(nt_table), class_name='mx-1 mb-2')
+    ]
+    ephys_rows = [
+        dbc.Row(dbc.Col(brain_area_group), class_name='mx-1 mb-2'),
+        dbc.Row(dbc.Col(rec_src_group), class_name='mx-1 mb-2'),
+        dbc.Row(dbc.Col(probe_type_group), class_name='mx-1 mb-2'),
+        dbc.Row(dbc.Col(rate_group), class_name='mx-1 mb-2'),
+        dbc.Row(dbc.Col(probe_x_group), class_name='mx-1 mb-2'),
+        dbc.Row(dbc.Col(probe_y_group), class_name='mx-1 mb-2'),
+        dbc.Row(dbc.Col(probe_z_group), class_name='mx-1 mb-2')
+    ]
+
+    row_4 = dbc.Row([dbc.Col([unit_rows], width=3), dbc.Col([ephys_rows], width=9)], class_name='mx-1 mt-2')
+
+    return dbc.Card([row_1, row_2, row_3, divider, row_4], class_name='mt-2'), err_msg
+
+
+_EXPERIMENTER_SELECT_ID = 'commit-experimenter-select'
+""" ID of the Bootstrap Select that chooses the session experimenter (a username) for a new session commit job. """
+_SUBJECT_SELECT_ID = 'commit-subject-select'
+""" ID of the Bootstrap Select that chooses the ID of the experiment subject for a new session commit job. """
+_RIG_SELECT_ID = 'commit-rig-select'
+""" ID of the Bootstrap Select that chooses the ID of the experiment rig for a new session commit job. """
+_STUDY_SELECT_ID = 'commit-study-select'
+""" ID of the Bootstrap Select that chooses the ID of the research study for a new session commit job. """
+_RECORD_DATE_ID = 'commit-date-picker'
+""" ID of the Dash DatePicker component that sets the session recording date for a new session commit job.  """
+_SUFFIX_INPUT_ID = 'commit-suffix-input'
+""" ID of the Bootstrap Input component that sets the session suffix for a new session commit job. """
+_NOTES_AREA_ID = 'commit-notes-area'
+""" ID of the Bootstrap TextArea component for entering session notes for a new session commit job. """
+_NUM_UNITS_INPUT_ID = 'commit-numunits-input'
+""" ID of the Bootstrap Input that sets how many neural units were recorded in the session (0 = behavior only). """
+_NT_TABLE_ID = 'commit-ntype-table'
+""" ID of Dash Datatable in which user selects the neuron type assigned to each neural unit recorded during session. """
+_AREA_SELECT_ID = 'commit-area-select'
+""" ID of the Bootstrap Select that chooses the relevant brain region for a new session commit job. """
+_RECORDING_SRC_SELECT_ID = 'commit-rec-src-select'
+""" ID of the Bootstrap Select that chooses the EPhys recording source for a new session commit job. """
+_PROBE_TYPE_SELECT_ID = 'commit-probe-type-select'
+""" ID of the Bootstrap Select that chooses the EPhys probe type for a new session commit job. """
+_PROBE_RATE_INPUT_ID = 'commit-probe-rate-input'
+""" ID of the Bootstrap Input component that sets the electrode sampling rate for a new session commit job. """
+_PROBE_X_INPUT_ID = 'commit-probe-x-input'
+""" ID of the Bootstrap Input component that sets the probe x-coordinate for a new session commit job. """
+_PROBE_Y_INPUT_ID = 'commit-probe-y-input'
+""" ID of the Bootstrap Input component that sets the probe y-coordinate for a new session commit job. """
+_PROBE_Z_INPUT_ID = 'commit-probe-z-input'
+""" ID of the Bootstrap Input component that sets the probe depth for a new session commit job. """
+
+
+@callback(
+    [Output(_NT_TABLE_ID, 'data'), Output(_AREA_SELECT_ID, 'disabled'), Output(_RECORDING_SRC_SELECT_ID, 'disabled'),
+     Output(_PROBE_TYPE_SELECT_ID, 'disabled'), Output(_PROBE_RATE_INPUT_ID, 'disabled'),
+     Output(_PROBE_X_INPUT_ID, 'disabled'), Output(_PROBE_Y_INPUT_ID, 'disabled'),
+     Output(_PROBE_Z_INPUT_ID, 'disabled')],
+    [Input(_NUM_UNITS_INPUT_ID, 'value')], [State(_NT_TABLE_ID, 'data')]
+)
+def on_num_units_changed(*args):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise dash_exc.PreventUpdate
+    num_units: Optional[int] = None
+    try:
+        num_units = int(args[0])
+    except ValueError:
+        pass
+    if num_units is None:
+        raise dash_exc.PreventUpdate
+
+    table_rows: List[Dict] = args[1]
+    if len(table_rows) == num_units:
+        raise dash_exc.PreventUpdate
+
+    if len(table_rows) > num_units:
+        table_rows = table_rows[0:num_units]
+    else:
+        # we're assuming here that the database contains neuron type 'Unspecified'
+        table_rows.extend([{'index': i+1, 'nt_name': 'Unspecified'} for i in range(len(table_rows), num_units)])
+
+    out: List[Any] = [table_rows]
+    for _ in range(7):
+        out.append((num_units == 0))
+    return tuple(out)
+
+
+def _create_upload_modal() -> dbc.Modal:
+    hdr, body, footer = _layout_upload_modal()
+    return dbc.Modal([hdr, body, footer], id=_UPLOAD_ID, backdrop="static", size="xl", is_open=False)
+
+
+def _layout_upload_modal(job_id: Optional[str] = None) -> Tuple[dbc.ModalHeader, dbc.ModalBody, dbc.ModalFooter]:
+    hdr = dbc.ModalHeader(dbc.ModalTitle(f"Upload session archive for: {job_id}"))
+    body_kids = []
+    if isinstance(job_id, str) and (len(job_id) > 0):
+        body_kids = [
+            dcc.Markdown('''
+            * Before you begin, all session data files (Maestro and Omniplex) must be compressed into a single, flat
+            ZIP archive (no subdirectories). Maximum supported file size is 10GB.
+            * If the session includes behavioral data only, the archive should contain only the Maestro data files.
+            * There is no support at this time for automatic spike sorting. For electrophysiological recordings, the
+            experimenter must supply neural unit data (spike trains) in a pickle file (.pkl or .pickle). This must be
+            the only pickle file in the archive.
+            * The pickle file must contain a single dictionary with 3 keys: 'filename', 'channel', and 'spiketimes'.
+            Each key value is a list of length N = the number of neural units. These contain the Omniplex PL2
+            filenames, the source channel IDs ('WBnn' or 'SPKCnn'), and the spike timestamps (in seconds since the
+            Omniplex recording started) for each neural unit. The 'filename' field may be omitted if all units were
+            recorded in a single Omniplex file.
+
+            *Drag and drop the ZIP file onto the upload component below, or click on the component to browse the file
+            system for the file. The upload should start automatically. Large (>1GB) archives will take a significant
+            amount of time to upload, depending on network speed. This pop-up window will close automatically when the
+            upload finishes. **Do NOT close this pop-up window and do NOT close the browser tab while the upload is in
+            progress**.*
+            '''),
+            html.Div(du.Upload(id=_UPLOADER_ID, max_file_size=10000, chunk_size=100, max_files=1, cancel_button=False,
+                               filetypes=['zip'], upload_id=job_id), className="mt-2")
+        ]
+    body = dbc.ModalBody(body_kids)
+    footer = dbc.ModalFooter([
+        dbc.Button("Cancel", id=_UPLOAD_CANCEL_BTN, n_clicks=0, class_name='mr-2'),
+        dbc.Button("Done", id=_UPLOAD_DONE_BTN, n_clicks=0, disabled=True)
+    ])
+    return hdr, body, footer
+
+
+_UPLOAD_CANCEL_BTN = 'commit-upload-cancel'
+""" ID of 'Cancel' button in the footer of the 'upload archive' modal. """
+_UPLOAD_DONE_BTN = 'commit-upload-done'
+""" ID of 'Done' button in the footer of the 'upload archive' modal. """
+_UPLOADER_ID = 'commit-uploader'
+""" ID of the Dash Uploader component that manages the uploading of a session archive ZIP. """
+
+
+@callback(
+    [Output(_COMMIT_ID, 'is_open'), Output(_COMMIT_ALERT_ID, 'is_open'), Output(_COMMIT_ALERT_ID, 'children'),
+     Output(_COMMIT_JOBID_DIV, 'children')],
+    [Input(_START_BTN_ID, 'n_clicks'), Input(_COMMIT_CANCEL_BTN, 'n_clicks'), Input(_COMMIT_SUBMIT_BTN, 'n_clicks')],
+    [State(_EXPERIMENTER_SELECT_ID, "value"), State(_SUBJECT_SELECT_ID, "value"), State(_RIG_SELECT_ID, "value"),
+     State(_RECORD_DATE_ID, "date"), State(_SUFFIX_INPUT_ID, "value"), State(_STUDY_SELECT_ID, "value"),
+     State(_NOTES_AREA_ID, "value"), State(_RECORDING_SRC_SELECT_ID, "value"), State(_PROBE_TYPE_SELECT_ID, "value"),
+     State(_PROBE_RATE_INPUT_ID, "value"), State(_PROBE_X_INPUT_ID, "value"), State(_PROBE_Y_INPUT_ID, "value"),
+     State(_PROBE_Z_INPUT_ID, "value"), State(_AREA_SELECT_ID, "value"), State(_NT_TABLE_ID, "data")]
+)
+def update_commit_modal(*args):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise dash_exc.PreventUpdate
     trigger = ctx.triggered[0]['prop_id'].split('.')[0]
-    if trigger == _REVIEW_COMMIT_ID:
-        # Each time the review modal is shown, it is laid out again. So this method will be invoked on initial load,
-        # but the "n_clicks" attribute will be at its initial value of 0. In this case, do nothing. This is
-        # imperative!
-        if args[0] == 0:
-            raise dash_exc.PreventUpdate
-        # get job ID from the Review modal header title text
-        idx = args[-1].find(":")
-        job_id = args[-1][idx + 2:]
-        err_msg = commit_to_database(job_id)
-        if err_msg:
-            return f"danger-{err_msg}", no_update, no_update
+
+    # go ahead and close the commit modal if current user is not authorized to do commits. Should never happen!
+    committer = _get_current_username()
+    if committer is None:
+        return False, False, "", no_update
+
+    if trigger == _START_BTN_ID:
+        return True, False, "", no_update
+    elif trigger == _COMMIT_CANCEL_BTN:
+        return False, False, "", no_update
+    else:   # _COMMIT_SUBMIT_BTN -- submit request to start a new commit
+        rows = args[-1]
+        unit_types = [r['nt_name'] for r in rows]
+        ofs = 3
+        ok, job_id = initiate_session_commit(
+            is_api=False, committer=committer, unit_types=unit_types, experimenter=args[ofs], subject=args[ofs+1],
+            rec_date=args[ofs+3], suffix=int(args[ofs+4]), rig=args[ofs+2], study=int(args[ofs+5]), notes=args[ofs+6],
+            brain_area=int(args[ofs+13]), src=args[ofs+7], probe=args[ofs+8], rate=float(args[ofs+9]),
+            x=float(args[ofs+10]), y=float(args[ofs+11]), z=float(args[ofs+12])
+        )
+        if not ok:
+            return no_update, True, job_id, no_update
         else:
-            n_close = (args[-3] + 1) if args[-3] else 1
-            n_refresh = (args[-2] + 1) if args[-2] else 1
-            return no_update, n_close, n_refresh
-    raise dash_exc.PreventUpdate
+            return False, False, "", job_id
+
+
+@callback(
+    [Output(_UPLOAD_DONE_BTN, 'disabled'), Output(_UPLOAD_DONE_BTN, 'children')],
+    [Input(_UPLOADER_ID, 'isCompleted'), Input(_UPLOADER_ID, 'fileNames')], [State(_UPLOADER_ID, "upload_id")]
+)
+def on_upload_started_or_finished(is_completed, file_names, upload_id):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise dash_exc.PreventUpdate
+    if not is_completed:
+        if file_names is not None:
+            get_application_logger().debug(f"Upload initiated on client, upload_id={upload_id}, "
+                                           f"file_names={file_names}")
+        return True, "...Uploading..."
+    else:
+        get_application_logger().debug(f"Upload completed on client, upload_id={upload_id}, file={file_names}")
+        return False, "Done"
+
+
+@callback(
+    [Output(_UPLOAD_ID, "is_open"), Output(_UPLOAD_ID, "children"), Output(_ERR_DIV2_ID, "children")],
+    [Input(_COMMIT_JOBID_DIV, "children"), Input(_UPLOAD_CANCEL_BTN, "n_clicks"), Input(_UPLOAD_DONE_BTN, "n_clicks")],
+    [State(_COMMIT_JOBID_DIV, "children")]
+)
+def show_hide_upload_modal(*args):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise dash_exc.PreventUpdate
+    trigger = ctx.triggered[0]['prop_id'].split('.')[0]
+    if trigger == _COMMIT_JOBID_DIV:
+        job_id = args[0]
+        if not (isinstance(job_id, str) and (len(job_id) > 0)):
+            raise dash_exc.PreventUpdate
+        else:
+            return True, _layout_upload_modal(job_id), no_update
+    else:
+        job_id = args[-1]
+        if trigger == _UPLOAD_CANCEL_BTN:
+            _, err_msg, _ = cancel_or_remove_commit_job(job_id)
+            return False, [], err_msg if len(err_msg) > 0 else no_update
+        else:   # _UPLOAD_DONE_BTN
+            res = on_archive_uploaded_to_workspace(job_id)
+            return False, [], res if isinstance(res, str) else no_update
