@@ -9,62 +9,105 @@ Furthermore, it is important that the backend itself be "stateless" so that, whe
 replicas of the backend can run simultaneously in order to field requests from multiple clients. Committing an
 experimment session to the database is an inherently stateful workflow, so we need a way to maintain that state.
 
-The workflow for committing an experiment session has the following stages:
-    1) Uploading. During this phase, the session data archive (containing all Maestro and Omniplex files, as well as
-       a file with neural unit spike times from spike sorting) is uploaded to a staging directory in the repository.
-    2) Preprocessing. The session archive is preprocessed to collect timing information on trials, parse out trial
-       protocols presented, calculate neural unit metrics, etc. This phase does not require user interaction and can
-       occur in a background process. The preprocessing results must be cached somewhere so that the user can review
-       them in the next phase.
-    3) Review. In this interactive stage, the user (on the client) reviews the results of preprocessing, "fills in" any
-       required information that is missing, then requests that the session be actually committed to the database.
-    4) Commit. Here is where the experimental data is pushed into the various database tables in our schema. Again, the
-       work is performed in a background process with no user interaction.
-    5) Cancelling. The user should be able to cancel the job during any of the stages. In the preprocessing and commit
-       phases, it may be a little while before the background worker detects the cancellation and aborts.
-    6) Done/Fail. The session commit completed successfully, or failed for whatever reason.
-
 Rather than use our MySQL/MariaDB database to store state for in-progress session commit jobs, we decided to use a
 Redis server to cache this information. The Redis server does double-duty, since we use Redis Queue (RQ) workers to
-handle the work during the preprocessing and commit stages of the workflow.
+handle the work during the preprocessing and commit stages of the workflow. Additional information is kept in the
+staging directory for each pending commit job.
 
-Various Redis keys are used to stare status information, progress messages, and selected preprocessing results for an
-in-progress commit job. See the descriptions of the various Redis "namespace" prefixes defined in this module:
-    COMMIT_NS:<username> : Redis LIST of the job IDs for all pending commits owned by <username>.
-    STATUS_NS:<job_id> : Redis STRING holding latest status information for commit job <job_id>.
-    PROGRESS_NS:<job_id> : Redis LIST of the most recent 30 (or less) progress messages for <job_id>.
-    INFO_NS:<job_id> : Redis STRING holding session metadata for <job>id>. This key is created during preprocessing and
-        may be revised via client input during the review phase.
-    PROTONAMES_NS:<job_id> : Redis LIST of trial protocol names culled during preprocessing for commit job <job_id>.
-    PROTODEFS_NS:<job_id> : Redis LIST of trial protocol definitions found during preprocessing and possibly modified
-        via client input during the review phase. In same order as PROTONAMES_NS:<job_id>.
-    UNITMETRICS_NS:<job_id> : Redis LIST of neural unit metrics (SNR, 10-ms template, etc; but no spike times) objects,
-        one per unit recorded. Created during preprocessing stage and accessed during review stage; read-only, just used
-        to retrieve metrics to display on clientside UI.
-    UNITTYPES_NS:<job_id> : Redis LIST of neuron type IDs assigned to each recorded unit for a commit job. Created
-        during preprocessing and reviewed/revised during review phase. In same order as UNITMETRICS_NS:<job_id>.
-The last two keys will not exist for a given commit job if the experiment session did not record from neural units.
+Two Redis keys are dedicated to session commit jobs:
+   - COMMITS : Redis HASH set storing status information on all pending commit jobs. The fields (aka, keys) of the
+     hash set are the job IDs, and the corresponding values are CommitJobStatus objects (converted to byte strings).
+     The CommitJobStatus object holds essential job state information and a progress message history.
+   - PROTODEFS_NS:<job_id> : Redis LIST of trial protocol definitions found during preprocessing. This key is present
+     for the given job ONLY if that job enters the review phase because one or more of the trial protocols require
+     user validation.
 
-When a new session commit job is initiated, it is assigned a unique identifier of the form 'commit-<uid>' and enters the
-"uploading" phase. That stage is managed by the Dash Uploader component, which transfers the session data archive (a
-single ZIP file that could be up to 10GB in size) in chunks from the client machine to an upload folder in the portal
-repository (unique to that client's Flask session). After the archive is uploaded and ready for preprocessing, the
-upload subfolder is renamed to the job ID (so the client can reuse the original upload subfolder for the next upload --
-due to limitations of using Dash and the Dash Uploader component on the client). The results of pre-processing are also
-stored in a custom binary file in this directory.
+When the server starts a new session commit job, it initializes a CommitJobStatus object for the job and assigns it a
+unique job ID of the form "<experimenter>_<subject ID>_<session date>_<suffix>", where:
+   - <experimenter> is the registered username of the person that conducted the experiment.
+   - <subject ID> is the ID of the experiment subject.
+   - <session date> is the session recording date in ISO format, "YYYY-DD-MM".
+   - <suffix> is the session suffix, an integer in [1..9], to distinguish multiple sessions on the same date.
+Note that the registered user committing the session need not be the same user as the experimenter. Also note that the
+four components of the job ID form the primary key that uniquely identifies an experiment session in the portal
+database. These parameters are included in the session metadata that must accompany the client request to start a
+session commit job.
+
+The workflow for committing an experiment session has the following stages:
+    0) Initialization. A committer (a registered user with "commit"-level access on the portal) can initiate a session
+       commit in two ways: interactively through the portal website, or by using the `sglportalapi` package from a
+       Python script or the Python console (this package communicates with the portal server through a number of
+       REST-like API endpoints). The commit request must be accompanied by session metadata, plus a list of N neuron
+       types, one for each neural unit recorded during the session. The server will check this metadata for validity.
+       Providing the information in advance helps to automate the entire commit workflow.
+
+       Once the commit request is validated, the server creates a subfolder in local storage (not S3) at
+       `$PORTAL_WS/staging/<job_id>` and writes the session metadata and neuron types list to a file within that folder,
+       `commit_info.bin`. It also initializes the CommitJobStatus object and stores that under the job's ID in the
+       COMMIT_JOBS hash in Redis. The commit job now enters the upload phase.
+
+    1) Uploading. During this phase, the session data archive (containing all Maestro and Omniplex files, as well as
+       a file with neural unit spike times from spike sorting) is uploaded to the portal's backup repository in AWS S3,
+       at the key `/staging/<job_id>/archive.ZIP`. If the commit is initiated via the `sglportalapi` package, the
+       archive is uploaded directly to S3 via a multipart upload. If it is initiated on a browser client via the portal
+       web application, a Dash uploader component transfers the archive in chunks to an upload folder in the portal
+       server's workspace, at $PORTAL_WS/staging/<job_id>. Upon completion, the server queues a background task to
+       recompose the original file from the chunks and then transfer it to S3 at the key /staging/<job_id>/archive.ZIP.
+       Obviously, this is a slower route, but it will have to do until we can find a React-based solution to handle a
+       direct upload to S3.
+
+       In either scenario, once the upload to S3 is successfully completed, the server queues a background task to
+       begin preprocessing the commit job.
+
+    2) Preprocessing. The preprocessing task downloads the session archive from S3 to the job's staging directory in the
+       portal workspace, then analyzes the archive to collect timing information on trials, parse out trial protocols
+       presented, calculate neural unit metrics, etc. All of this information is added to the file `commit_info.bin` in
+       the staging directory. IF any trial protocols require user validation, then the workflow enters an interactive
+       review phase. Since the user may not be available to review the results immediately, the background task puts
+       the job in the review phase, deletes the session archive from the staging directory, and terminates. However, if
+       no protocols require validation, then the background task continues immediately to the final commit phase.
+
+    3) Review. In this interactive stage, the user (on the client) reviews the results of preprocessing, validates any
+       trial protocols that require it, then requests that the session be committed to the database. In response, the
+       server queues another background task. The review stage is handled only on the portal website; there's currently
+       no option to review the preprocessing results via the `sglportalapi` package.
+
+    4) Commit. Here is where the experimental data is pushed into the various database tables in our schema. Again, the
+       work is performed in a background process with no user interaction. If the workflow did not skip the review
+       phase, then the session archive must be downloaded again from S3 to the staging directory in the portal workspace
+       before the final commit can begin.
+
+       Once the data from an experiment session has been fully committed to the portal database, the session archive and
+       the preprocessing results are NOT discarded. Rather, the `commit_info.bin` file in the staging directory is added
+       to the archive ZIP and then this ZIP file is uploaded to the portal backing repository in S3, under the key
+       /repo/<experimenter>/<subject ID>_<session date>_<suffix>.zip. Note that the S3 key contains the four attributes
+       comprising the primary key for the experiment session.
+
+       Once the archive is safely backed up, the staging directory for the commit job is removed from the portal
+       workspace, the original archive file uploaded to S3 at /staging/<job_ID>/archive.ZIP is deleted, and the job
+       moves to the "Done" state.
+
+    5) Cancelling. The user should be able to cancel the job during any of the stages. In the preprocessing and commit
+       phases, it may be a little while before the background worker detects the cancellation and aborts.
+
+    6) Done/Fail. The session commit completed successfully, or failed for whatever reason.
+
+When a session is committed via the portal website and contains one or more trial protocols requiring user validation,
+the large session archive must be transferred between the portal's workspace in cluster local storage and its backing
+repository on S3 at least three times: (1) After chunked upload from the client browser, a background task reforms the
+archive file from the chunks, then uploads it to S3. (2) Another background worker downloads the archive to the local
+staging directory for preprocessing. (3) At some later time after successful review, a third task downloads the archive
+to do the final commit.
+
+There is a reason for this "wastefulness". Disk space on the portal server is MUCH more expensive than disk space on S3.
+If we kept all pending session archives on the portal server, it is conceivable that we would need hundreds of GB, even
+TB of space. With this scheme, the number of large archives stored on the portal server's volume is limited to the
+number of commit jobs actively being processed at the same time (plus any active uploads via the portal website). The
+number of active commit jobs is limited by the number of RQ worker processes running in the deployed portal application
+(currently there are 2 such workers).
 
 Session commits are restricted to registered users with the appropriate access level. Calls to this module should be
 protected by a mechanism that verifies the specified user is logged in with the access level required.
-
-Storing session archives in S3. Once the data from an experiment session has been committed to the portal database, the
-uploaded session archive and the preprocessing results are NOT discarded. Rather, the binary file containing all
-preprocessing results is added to the archive ZIP, and then this ZIP file is uploaded to the portal backing repository,
-which is maintained in a Amazon Web Services S3 "bucket". The archive's object key is like a file system path:
-/repo/<experimenter>/<subj_id>_<session_date>_<session_sfx>.zip, where <experimenter>, <subj_id>, <session_date> and
-<session_sfx> form the primary key for the experiment session.
-
-@author: sruffner
-@created: 14oct2021
 """
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
@@ -75,15 +118,14 @@ import shutil
 import struct
 import sys
 import time
-import uuid
 import zipfile
 
 import numpy as np
 import scipy.signal
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import date
 from pathlib import Path
-from typing import Union, List, Dict, Any, Optional, Tuple, IO, Set
+from typing import Union, List, Dict, Any, Optional, Tuple, IO
 
 from dash_uploader.httprequesthandler import get_chunk_name
 from rq import Queue
@@ -94,12 +136,13 @@ from config.config import get_config
 from database import repo
 from sglportalapi import maestro, PL2
 from database.log_ops import log_session_commit, read_log_entries
-from database.table_info import DBTable, AttributeValue, primary_key_of
-from database.table_ops import fetch_attribute_values, fetch_one_row, fetch_rows, check_row, fetch_restrict_proj, \
+from database.table_info import DBTable, AttributeValue
+from database.table_ops import fetch_attribute_values, fetch_rows, check_row, fetch_restrict_proj, \
     SessionCommitter, rollback_session_commit, database_empty, insert_into_table, delete_from_table, update_table_row, \
     update_mapping_table
 from database.user_ops import validate_username, PASSWORD_HASH_METHOD, validate_password
 from sglportalapi.PL2 import get_analog_channel_record_index
+from sglportalapi.data_containers import SessionInfo
 from sglportalapi.util import DocEnum
 
 _logger = get_application_logger()
@@ -109,67 +152,30 @@ job_queue = Queue(connection=get_config().redis_conn)
 """ Background jobs queue. """
 
 
-COMMIT_NS: str = 'commit:'
-""" Redis namepace for pending commit jobs. Append username to access LIST of the commit job IDs for that user. """
-STATUS_NS: str = 'status:'
-""" 
-Redis namespace for commit job status. Append job ID to retrieve status information for that job. The STRING key
-holds a serialized CommitJobStatus object summarizing the job's current status.
-"""
-PROGRESS_NS: str = 'progress:'
-"""
-Redis namespace for commit job progress  history. Append job ID to access a ZSET holding the most recent progress
-messages posted for that job, scored by message timestamp.
-"""
-INFO_NS: str = 'info:'
-"""
-Redis namespace for cached session metadata. Append job ID to access session metadata for a commit job. The STRING key
-is a serialized SessionMetaData object containing information to prepare the Session and -- if applicable -- 
-Session.EPhys table entries when the experiment session is committed to the database.
-"""
-PROTONAMES_NS: str = 'protonames:'
-"""
-Redis key namespace for the names of trial protocols presented during an experiment seesion. Append commit job ID to
-access the trial protocol names for that job. Each element in the LIST is the name of a different protocol -- prepended
-with '** ' if the protocol definition requires user validation and has not yet been validated. This key is present only
-after the preprocessing phase of the commit job has finished, and the order in the list matches the order in which the
-trial protocols were culled from the session data archive during that phase.
-"""
+COMMITS: str = 'commits'
+""" Redis HASH set storing status information and progress history for all pending commit jobs, keyed by job ID. """
 PROTODEFS_NS: str = 'protodefs:'
 """
 Redis key namespace for the definitions of all trial protocols presented during an experiment session. Append commit job
-ID to access the trial protocols for that job. Each element in the LIST is a serialized Protocol object; the order
-matches that in the corresponding PROTONAMES_NS key. This key is present only after the preprocessing phase of the
-commit job has finished.
+ID to access the trial protocols for that job. Each element in the LIST is a serialized Protocol object. This key is 
+present only after the preprocessing phase of the commit job has finished, but ONLY if user validation of one or more
+trial protocols is required, in which case the commit job must enter the review phase.
 """
-UNITMETRICS_NS: str = 'unitmetrics:'
-"""
-Redis key namespace for metrics of neural units recorded during an experiment session. Append commit job ID to access
-the unit metrics for that job. Each element in the LIST is a serialized OmniplexUnit object holding metrics for a
-distinct neural unit recorded during the session. The order in the list reflects the order in which units were culled
-from the data archive during preprocessing. The key is present only after the preprocessing phase of the commit job has
-finished, and only for experiment sessions in which neural units were recorded. NOTE that the unit spike times are
-excluded from the metrics because they are not needed during the review phase and could potentially require a lot of
-storage space. 
-"""
-UNITTYPES_NS: str = 'unittypes:'
-"""
-Redis key namespace for the neuron type assigned to each neural unit recorded during an experiment session. Append 
-commit job ID to access the neural unit types for that job. Each element in the LIST is an integer specifying the ID
-of the neuron type (NeuronType table in portal database) associated with the corresponding unit in the UNITMETRICS_NS
-key. If no type has been associated with a given unit, then the ID is -1. This key is present only after preprocessing
-of the commit job has finished, and only for experiment sessions in which neural units were recorded. The user can
-review and update the type of each neural unit during the review phase. 
-"""
-_STAGING_DIR_PREFIX: str = 'commit-'
-""" Commit staging directory prefix, followed by a generated UUID. """
 PROGRESS_HISTORY_SIZE: int = 30
 """ Maximum number of messages kept in a commit job's progress message history."""
-PREPROC_FNAME = 'preproc.bin'
+COMMIT_INFO_FNAME: str = 'commit_info.bin'
 """
-Results from preprocesing phase are stored in this binary file in the staging directory for a commit job. Some
-information in the file may be updated during the review phase. After session commit, this file is added to the
-original session archive ZIP so that database reconstruction can happen without user intervention.
+When a commit job is initiated, the user-supplied session metadata and neuron types list are stored in this binary file
+in the job's staging directory. After preprocessing, trial prototol definitions, trial timing information, and recorded
+neural unit metrics are added to the file. After the review phase (if necessary), validatated trial protocol definitions
+are updated in the file. Finally, after session commit, the file is added added to the original session archive ZIP so 
+that database reconstruction can happen without user intervention.
+"""
+ARCHIVE_FNAME: str = 'archive.zip'
+""" 
+Regardless the original name of the session archive file, this is the name given to the file when it resides in a
+dedicated staging area in the S3-based portal repository, or when being actively processed in the commit job's staging
+folder in the portal's local workspace.
 """
 
 
@@ -192,7 +198,7 @@ class CommitStateEnum(DocEnum):
         Can commit job be deleted immediately in this state? In any state where a background process could be
         working on the job, the job should NOT be deleted.
         """
-        return self not in [CommitStateEnum.PREPROCESS, CommitStateEnum.CANCEL, CommitStateEnum.COMMIT]
+        return self in [CommitStateEnum.REVIEW, CommitStateEnum.DONE, CommitStateEnum.FAIL]
 
     def after_preprocessing(self) -> bool:
         """ Does this commit job state represent any state after the preprocessing phase? """
@@ -200,32 +206,31 @@ class CommitStateEnum(DocEnum):
 
 
 class CommitJobStatus:
-    """ Status information for a session commit job in progress on the lab portal server. """
-    def __init__(self, job_id: str, owner: str, filename: str, started: Optional[float] = None,
+    """ Status information for a session commit job pending or in progress on the lab portal server. """
+    def __init__(self, job_id: str, committer: str, is_api: bool = False, started: Optional[float] = None,
                  updated: Optional[float] = None, state: CommitStateEnum = CommitStateEnum.UPLOADING,
-                 msg: str = "Waiting for ZIP archive upload from client...", num_units: Optional[int] = 0):
+                 messages: Optional[List[str]] = None):
         """
-        Construct a session commit job status object.
+        Construct a session commit job status object. The commit job ID reflects the primary key of the experiment
+        session being committed: <experimenter username>_<subject ID>_<session date ISO>_<session suffix>.
         Args:
             job_id: The job ID.
-            owner: Username of the committer.
-            filename: Before and during upload, this is the name of the subfolder (within portal's staging directory)
-                to which the session archive is uploaded. After upload, this is the archive filename.
+            committer: The registered portal user that initiated the commit job.
+            is_api: True if job was triggered by portal API endpoint, False if initiated on interactive web page.
             started: Timestamp (seconds since the Epoch) when job was started. If None, use the current time.
-            updated: Timestamp when job was last updated. If None, use the value of the 'started' argument
+            updated: Timestamp when job was last updated. If None, use the value of the 'started' argument.
             state: The current job state.
-            msg: Text of most recent progress message for this job.
-            num_units: The number of neural units recorded during the session. Default = 0.
+            messages: Progress message history for this job, in reverse chronological order. If None, then the message
+                list contains a single message indicating that archive is being uploaded from client.
         """
         self._definition: Dict[str, Any] = dict()
         self._definition['id'] = job_id
-        self._definition['owner'] = owner
-        self._definition['zip'] = filename
+        self._definition['committer'] = committer
+        self._definition['is_api'] = is_api
         self._definition['started'] = started if isinstance(started, float) else time.time()
         self._definition['updated'] = updated if isinstance(updated, float) else self._definition['started']
         self._definition['state'] = state
-        self._definition['msg'] = msg
-        self._definition['units'] = num_units
+        self._definition['messages'] = messages if isinstance(messages, list) else ["Awaiting archive upload..."]
 
     @property
     def id(self) -> str:
@@ -233,18 +238,14 @@ class CommitJobStatus:
         return self._definition['id']
 
     @property
-    def owner(self) -> str:
-        """ The username of the commit job owner. """
-        return self._definition['owner']
+    def committer(self) -> str:
+        """ The registered portal user that originated this commit job. """
+        return self._definition['committer']
 
     @property
-    def zip(self) -> str:
-        """
-        Before and during the upload phase of a session commit, this is the name of the subfolder (within the portal's
-        commit staging directory) to which the session data archive file is uploaded. After upload has finished and is
-        verified on the server side, this will be the archive filename.
-        """
-        return self._definition['zip']
+    def api_triggered(self) -> bool:
+        """ True if session commit job was triggered via portal API endpoint rather than via interactive web page. """
+        return self._definition['is_api']
 
     @property
     def started(self) -> float:
@@ -264,32 +265,34 @@ class CommitJobStatus:
     @property
     def msg(self) -> str:
         """ Text of the last progress message posted for the commit job. """
-        return self._definition['msg']
+        return self._definition['messages'][0]
 
     @property
-    def units(self) -> Optional[int]:
-        """ Number of neural units recorded in the session. Set during preprocessing; 0 for behavioral sessions. """
-        return self._definition['units']
+    def message_history(self) -> List[str]:
+        """ The progress message history for the commit job, in reverse chronological order. """
+        return self._definition['messages'].copy()
 
-    def on_update(self, msg: str, filename: Optional[str] = None, state: Optional[CommitStateEnum] = None,
-                  units: Optional[int] = None, updated: Optional[float] = None) -> None:
+    def on_update(self, msg: str, overwrite: bool = False, state: Optional[CommitStateEnum] = None,
+                  updated: Optional[float] = None) -> None:
         """
         Update this session commit job status.
 
         Args:
             msg: The latest progress message.
-            filename: The name of the session archive uploaded (set after upload finishes).
+            overwrite: If True, the most recent progress message in the message history is overwritten with the message
+                provided, rather than pushing the new message onto the history. This is useful when posting updates
+                about a long running task indicating percent complete.
             state: If not None, the updated job state.
-            units: If not None, the number of neural units recorded during session (set after preprocessing.
             updated: Timestamp for this update (seconds since Epoch). If None, use the current time.
         """
-        self._definition['msg'] = msg
-        if isinstance(filename, str):
-            self._definition['zip'] = filename
+        if overwrite:
+            self._definition['messages'][0] = msg
+        else:
+            self._definition['messages'].insert(0, msg)
+            if len(self._definition['messages']) > PROGRESS_HISTORY_SIZE:
+                self._definition['messages'].pop(PROGRESS_HISTORY_SIZE-1)
         if isinstance(state, CommitStateEnum):
             self._definition['state'] = state
-        if isinstance(units, int) and units >= 0:
-            self._definition['units'] = units
         self._definition['updated'] = updated if isinstance(updated, float) else time.time()
 
     def to_bytes(self) -> bytes:
@@ -312,9 +315,9 @@ class CommitJobStatus:
         """
         try:
             d = json.loads(raw.decode())
-            return CommitJobStatus(job_id=d['id'], owner=d['owner'], filename=d['zip'],
+            return CommitJobStatus(job_id=d['id'], committer=d['committer'], is_api=d['is_api'],
                                    started=float.fromhex(d['started']), updated=float.fromhex(d['updated']),
-                                   state=CommitStateEnum(d['state']), msg=d['msg'], num_units=d['units'])
+                                   state=CommitStateEnum(d['state']), messages=d['messages'])
         except Exception as e:
             raise ValueError(f"Failed to deserialize CommitJobStatus: {str(e)}")
 
@@ -503,232 +506,14 @@ class OmniplexUnit:
             raise ValueError(f"Failed to deserialize _OmniplexUnit record: {str(e)}")
 
 
-class SessionMetaData:
-    """
-    Metadata for an experiment session to be committed to the portal database. It includes all attributes of the Session
-    table and its Session.EPhys part table that may be updated by the user during the review phase of a session commit
-    job. It also includes the number of neural units recorded during the session. If zero, then the session is
-    behavioral only and the Session.EPhys attributes do not apply.
-    """
-    __REQUIRED_TYPES: Dict[str, type] = dict(
-        experimenter=str, subj_id=str, session_date=date, session_sfx=int, rig_id=str, study_id=int, session_notes=str,
-        num_units=int, num_trials=int
-    )
-    __EPHYS_TYPES: Dict[str, type] = dict(
-        ephys_src=str, probe_type=str, sampling_rate=float, probe_x=float, probe_y=float, probe_depth=float, ba_id=int
-    )
-
-    def __init__(self, **kwargs):
-        """
-        Construct a SessionMetaData object. Intended only for internal module use.
-
-        Args:
-            **kwargs: Metadata dictionary.
-        Raises:
-            ValueError: If any required parameters are missing from the keyword arguments.
-            TypeError: If any supplied parameter is the incorrect type.
-        """
-        self._definition = dict()
-        """ The session metata as a dictionary of parameter values keyed by parameter names. """
-
-        for k, t in SessionMetaData.__REQUIRED_TYPES.items():
-            if not (k in kwargs):
-                raise ValueError(f'Missing required parameter: {k}')
-            if not isinstance(kwargs[k], t):
-                raise TypeError(f'Invalid type for: {k}')
-            self._definition[k] = kwargs[k]
-        if kwargs['num_units'] > 0:
-            for k, t in SessionMetaData.__EPHYS_TYPES.items():
-                if not (k in kwargs):
-                    raise ValueError(f'Missing electrophysiology parameter: {k}')
-                if not isinstance(kwargs[k], t):
-                    raise TypeError(f'Invalid type for: {k}')
-                self._definition[k] = kwargs[k]
-        else:
-            for k in SessionMetaData.__EPHYS_TYPES.keys():
-                self._definition[k] = None
-
-    @property
-    def experimenter(self) -> str:
-        """ The user responsible for the experiment session (primary key into User table). """
-        return self._definition['experimenter']
-
-    @property
-    def subj_id(self) -> str:
-        """ ID of experiment subject (primary key into Subject table). """
-        return self._definition['subj_id']
-
-    @property
-    def session_date(self) -> date:
-        """ Recording date for session. """
-        return self._definition['session_date']
-
-    @property
-    def session_sfx(self) -> int:
-        """ Session suffix (in case multiple sessions were recorded with the same subject on the same day). """
-        return self._definition['session_sfx']
-
-    @property
-    def rig_id(self) -> str:
-        """ ID of the experiment rig (primary key into Rig table). """
-        return self._definition['rig_id']
-
-    @property
-    def study_id(self) -> int:
-        """ ID of the associated research study (primary key into Study table). """
-        return self._definition['study_id']
-
-    @property
-    def session_notes(self) -> str:
-        """ Session notes (could be an empty string if no session notes provided by user). """
-        return self._definition['session_notes']
-
-    @property
-    def num_units(self) -> int:
-        """ Number of neural units recorded during session; 0 for a behavior-only session. """
-        return self._definition['num_units']
-
-    @property
-    def num_trials(self) -> int:
-        """ Total number of trials presented during session. """
-        return self._definition['num_trials']
-
-    @property
-    def ephys_src(self) -> Optional[str]:
-        """ The electrophysiological recording method/source; None for behavior-only sessions. """
-        return self._definition['ephys_src']
-
-    @property
-    def probe_type(self) -> Optional[str]:
-        """ The electrophysiological recording probe type; None for behavior-only sessions. """
-        return self._definition['probe_type']
-
-    @property
-    def sampling_rate(self) -> Optional[float]:
-        """ Electrode signal sampling rate in Hz; None for behavior-only sessions. """
-        return self._definition['sampling_rate']
-
-    @property
-    def probe_x(self) -> Optional[float]:
-        """ X-coordinate of probe within the recording cylinder implant, in mm; None for behavior-only session. """
-        return self._definition['probe_x']
-
-    @property
-    def probe_y(self) -> Optional[float]:
-        """ Y-coordinate of probe within the recording cylinder implant, in mm; None for behavior-only session. """
-        return self._definition['probe_y']
-
-    @property
-    def probe_depth(self) -> Optional[float]:
-        """ Insertion depth of probe, in mm; None for behavior-only session. """
-        return self._definition['probe_depth']
-
-    @property
-    def ba_id(self) -> Optional[int]:
-        """ ID of brain area studied (primary key into BrainArea table); None for behavior-only sessions. """
-        return self._definition['ba_id']
-
-    def session_table_entry(self) -> Dict[str, Optional[AttributeValue]]:
-        """ Generate the entry for the lab database's Session Table from this session metadata. """
-        return dict(experimenter=self.experimenter, subj_id=self.subj_id, session_date=self.session_date,
-                    session_sfx=self.session_sfx, rig_id=self.rig_id, study_id=self.study_id,
-                    session_notes=self.session_notes, num_units=self.num_units, num_trials=self.num_trials)
-
-    def ephys_table_entry(self) -> Dict[str, Optional[AttributeValue]]:
-        """
-        Generate the entry for the lab database's Session.EPhys table from this session metadata. Returns an
-        empty dictionary for a behavior-only session!
-        """
-        if self.num_units <= 0:
-            return dict()
-        return dict(experimenter=self.experimenter, subj_id=self.subj_id, session_date=str(self.session_date),
-                    session_sfx=self.session_sfx, ephys_src=self.ephys_src, probe_type=self.probe_type,
-                    sampling_rate=self.sampling_rate, probe_x=self.probe_x, probe_y=self.probe_y,
-                    probe_depth=self.probe_depth, ba_id=self.ba_id)
-
-    def update(self, **kwargs) -> None:
-        """
-        Update one or more session metadata parameters. The number of trials and number of recorded units cannot be
-        changed here; any parameters related to electrophysiological recordings are ignored for a behavior-only
-        session (zero units recorded).
-
-        Args:
-            **kwargs: Parameter values to update, keyed by parameter name.
-        Raises:
-            TypeError: If any supplied parameter is the incorrect type.
-        """
-        for k, t in SessionMetaData.__REQUIRED_TYPES.items():
-            if k in kwargs:
-                if not isinstance(kwargs[k], t):
-                    raise TypeError(f"Invalid type for {k}")
-                self._definition[k] = kwargs[k]
-        if self.num_units > 0:
-            for k, t in SessionMetaData.__EPHYS_TYPES.items():
-                if k in kwargs:
-                    if not isinstance(kwargs[k], t):
-                        raise TypeError(f"Invalid type for {k}")
-                    self._definition[k] = kwargs[k]
-
-    def to_bytes(self) -> bytes:
-        """ Serialize this session metadata record as a byte sequence. """
-        out = dict()
-        for k, t in SessionMetaData.__REQUIRED_TYPES.items():
-            if t == date:
-                d: date = self._definition[k]
-                out[k] = d.isoformat()
-            elif t == float:
-                f: float = self._definition[k]
-                out[k] = f.hex()
-            else:
-                out[k] = self._definition[k]
-        if self.num_units > 0:
-            for k, t in SessionMetaData.__EPHYS_TYPES.items():
-                if t == float:
-                    f: float = self._definition[k]
-                    out[k] = f.hex()
-                else:
-                    out[k] = self._definition[k]
-        return json.dumps(out).encode()
-
-    @staticmethod
-    def from_bytes(raw: bytes) -> SessionMetaData:
-        """
-        Reconstruct an session metadata record previously serialized by to_bytes().
-
-        Args:
-            raw: The byte sequence.
-        Returns:
-            The reconstructed session metadata record.
-        Raises:
-            ValueError: If unable to parse byte sequence as a session metadata record, for whatever reason.
-        """
-        try:
-            rec: Dict[str, Any] = json.loads(raw.decode())
-            for k, t in SessionMetaData.__REQUIRED_TYPES.items():
-                if t == date:
-                    rec[k] = date.fromisoformat(rec[k])
-                elif t == float:
-                    rec[k] = float.fromhex(rec[k])
-            if rec['num_units'] > 0:
-                for k, t in SessionMetaData.__EPHYS_TYPES.items():
-                    if t == float:
-                        rec[k] = float.fromhex(rec[k])
-            return SessionMetaData(**rec)
-        except Exception as e:
-            raise ValueError(f"Failed to deserialize SessionMetaData record: {str(e)}")
+def _get_job_subfolder(job_id: str) -> Path:
+    """ The subfolder (in the portal workspace) in which key files are stored for the specified session commit job. """
+    return Path(get_config().dash_upload_dir, job_id)
 
 
-def _get_subfolder_in_staging_directory(subfolder: str) -> Path:
-    """
-    The file system path of a subfolder within the portal's temporary staging directory. Session ZIP archives are
-    uploaded to a subfolder in the staging directory. After upload, each session commit job has its own subfolder
-    containing the uploaded ZIP archive, preprocessing results, and possibly other temporary files.
-    """
-    return Path(get_config().dash_upload_dir, subfolder)
-
-
-def _remove_staging_dir(staging_dir: Path) -> None:
-    """ Remove a commit task staging directory in its entirety."""
+def _remove_job_subfolder(job_id: str) -> None:
+    """ Remove the subfolder (in the portal workspace) dedicated to the commit job specified. """
+    staging_dir = _get_job_subfolder(job_id)
     try:
         if staging_dir.exists():
             shutil.rmtree(str(staging_dir))
@@ -736,48 +521,181 @@ def _remove_staging_dir(staging_dir: Path) -> None:
         _logger.error(f"Failed to delete staging directory in repository at {str(staging_dir)}", exc_info=True)
 
 
-def initiate_session_commit(username: str, upload_id: str) -> Union[str, CommitJobStatus]:
+def initiate_session_commit(
+        is_api: bool, committer: str, unit_types: List[str], experimenter: str, subject: str, rec_date: str,
+        suffix: int, rig: str, study: str | int, notes: str, brain_area: Optional[str | int] = None,
+        src: Optional[str] = None, probe: Optional[str] = None, rate: Optional[float] = None, x: Optional[float] = None,
+        y: Optional[float] = None, z: Optional[float] = None) \
+        -> Tuple[bool, str]:
     """
-    Initiate a session commit job on the lab database server. The method generates a unique ID for the job, creates a
-    folder in the portal's staging directory where the ZIP archive is uploaded, and persists status information about
-    the job. The client must supply the job ID in all future requests involving the commit job.
+    Initiate a session commit job on the lab database server.
+
+    The method first validates the supplied session metadata and neuron types list. The specified session must not yet
+    exist in the portal database, nor be among the pending commit jobs. One neuron type must be specified for each
+    neural unit recorded during the session, assumed to be in the order in which neural units are listed in the session
+    archive. Neuron type names must be specified (not the opaque type IDs).
+
+    If the supplied metadata is valid, the method generates a unique ID for the job, creates a dedicated subfolder for
+    the commit job in the portal's workspace, writes the session and neural unit information to a binary file in that
+    folder, and registers the job in Redis. The pending commit job starts in the "uploading" phase.
 
     Args:
-        username: The username of the registered portal user requesting the session commit. The username is only
+        is_api: True if session commit was triggered via API request rather than through the commit page on the portal
+            website. The upload stage is handled differently by the `sglportalapi` package vs the Flask/Dash portal
+            frontend.
+        committer: The username of the registered portal user requesting the session commit. The username is only
             checked for validity; it is ASSUMED that the specified user is currently logged-in and has the necessary
             privileges to commit experiment data to the portal.
-        upload_id: Upload ID serves as the name of the upload folder within staging directory.
+        unit_types: The n-th element in this list is the neuron type assigned to the n-th neural unit recorded during
+            the session. List length must match the number of neurons recorded. An empty list indicates a behavior-only
+            session.
+        experimenter: Username of the registered portal user that conducted the experiment.
+        subject: ID of the subject of the experiment.
+        rec_date: Recording date in ISO format - 'YYYY-MM-DD'.
+        suffix: Session suffix in [1..9].
+        rig: ID of the rig on which experiment was conducted.
+        study: The research study to which experiment belongs -- specify either the study title or the unique integer
+            key identifying the study in the portal database.
+        notes: Session notes. Can be an empty string.
+        brain_area: The region of brain in which neural units were recorded -- specify either the brain area name or the
+            unique integer key identifying it in the portal database. None for behavioral session.
+        src: The electrophysiology recording source. Must be one of 'Omniplex', 'Omniplex clips', 'Plexon MAP',
+            'Maestro Waveform', 'Maestro Spike Ch'; currently, only 'Omniplex' supported. None for behavioral session.
+        probe: The probe type. Must be one of 'single', '32-channel', 'other'. None for behavioral session.
+        rate: The probe sampling rate in Hz. None for behavioral session.
+        x: The X-coordinate of probe location within implant cylinder, in mm. None for behavioral sesion.
+        y: The Y-coordinate of probe location within implant cylinder, in mm. None for behavioral sesion.
+        z: Probe insertion depth in mm. None for behavioral sesion.
     Returns:
-        Returns status information for the new commit job; if operation failed, returns a brief error description.
+        A 2-tuple: (True, job ID) on success, or (False, error description) on failure. The client must supply the
+            assigned job ID in all future requests involving the commit job.
+    Raises:
+        ValueError: If `committer` is an invalid username.
     """
-    if not (isinstance(username, str) and validate_username(username)):
-        raise ValueError('Invalid username')
+    if not (isinstance(committer, str) and validate_username(committer)):
+        raise ValueError('Invalid username for session committer')
 
-    job_id = f"{_STAGING_DIR_PREFIX}{str(uuid.uuid4())}"
-    upload_dir = _get_subfolder_in_staging_directory(upload_id)
+    err_msg, info, nt_ids = _check_pending_session_metadata(unit_types, experimenter, subject, rec_date, suffix, rig,
+                                                            study, notes, brain_area, src, probe, rate, x, y, z)
+    if len(err_msg) > 0:
+        return False, err_msg
+
+    # create job subfolder and save session metadata to file there.
+    job_id = f"{info.experimenter}_{info.subject}_{info.iso_recording_date}_{info.suffix}"
+    job_folder = _get_job_subfolder(job_id)
     try:
-        upload_dir.mkdir(parents=True, exist_ok=False)
+        job_folder.mkdir(parents=True, exist_ok=False)
+        _write_commit_info_file(Path(job_folder, COMMIT_INFO_FNAME), info, nt_ids)
     except Exception as err:
-        msg = f"Failed to create temporary upload directory for commit job {job_id}: {str(err)}"
-        _logger.error(msg, exc_info=True)
-        return msg
+        err_msg = f"Error initializing staging folder for commit job {job_id}: {str(err)}"
+        _logger.error(err_msg)
+        return False, err_msg
 
-    job_status = CommitJobStatus(job_id=job_id, owner=username, filename=upload_id)
-    commit_jobs_key = f"{COMMIT_NS}{username}"
-    status_key = f"{STATUS_NS}{job_id}"
-    job_progress_key = f"{PROGRESS_NS}{job_id}"
+    # register job in Redis -- another job with the same ID (ie, same experiment session primary key!) cannot exist!
+    job_status = CommitJobStatus(job_id=job_id, committer=committer, is_api=is_api)
     try:
         conn = get_config().redis_conn
-        with conn.pipeline() as pipe:
-            pipe.rpush(commit_jobs_key, job_id)
-            pipe.set(status_key, job_status.to_bytes())
-            pipe.zadd(job_progress_key, {job_status.msg: job_status.started})
-            pipe.execute()
+        ret = conn.hsetnx(name=COMMITS, key=job_id, value=job_status.to_bytes())
+        if ret == 0:
+            raise Exception("Commit job with same ID already pending!")
     except Exception as e:
-        _logger.error(f"Failed to persist commit job info: {str(e)}", exc_info=True)
-        _remove_staging_dir(upload_dir)
-        return f"Failed to persist commit job information on server. Job dropped."
-    return job_status
+        err_msg = f"Failed to register commit job: {str(e)}."
+        _logger.error(err_msg)
+        _remove_job_subfolder(job_id)
+        return False, err_msg
+
+    return True, job_id
+
+
+def _check_pending_session_metadata(
+        unit_types: List[str], experimenter: str, subject: str, rec_date: str, suffix: int, rig: str, study: str | int,
+        notes: str, brain_area: Optional[str | int] = None, src: Optional[str] = None, probe: Optional[str] = None,
+        rate: Optional[float] = None, x: Optional[float] = None, y: Optional[float] = None,
+        z: Optional[float] = None) -> Tuple[str, Optional[SessionInfo], List[int]]:
+    """
+    Helper method for `initiate_session_commit()`. Validates the session information and neural unit types supplied when
+    a user initiates a session commit job, and maps the neuron type names to their corresponding integer IDs in the
+    NeuronType database table. The session must not already exist in the portal database, the session parameters must be
+    valid, the length of the neuron types list must match the number of recorded units, and all listed neuron types must
+    exist in the database.
+
+    Returns:
+        A 3-tuple. On success, ("", a SessionInfo object encapsulating validated session metadata, and a list of neuron
+            type IDs corresponding to the list of type names provided). On failure, (error description, None, []).
+    """
+    # research study is specified by title or integer ID. Need both to initialize SessionInfo.
+    study_title, study_id, study_ok = "", -1, False
+    if isinstance(study, int):
+        study_id = study
+        res = fetch_attribute_values(DBTable.STUDY, "study_title", dict(study_id=study_id))
+        study_ok = (len(res) == 1)
+        study_title = res[0]
+    elif isinstance(study, str):
+        study_title = study
+        rows = fetch_rows(DBTable.STUDY, dict(study_title=study_title))
+        study_ok = (len(rows) == 1)
+        study_id = rows[0]['study_id']
+    if not study_ok:
+        return "Invalid ID or title for study", None, []
+
+    # analogously for the brain area...
+    ba_name, ba_id, ba_ok = "", -1, False
+    if isinstance(brain_area, int):
+        ba_id = brain_area
+        res = fetch_attribute_values(DBTable.BRAIN_AREA, "ba_name", dict(ba_id=ba_id))
+        ba_ok = (len(res) == 1)
+        ba_name = res[0]
+    elif isinstance(brain_area, str):
+        ba_name = brain_area
+        rows = fetch_rows(DBTable.BRAIN_AREA, dict(ba_name=ba_name))
+        ba_ok = (len(rows) == 1)
+        ba_id = rows[0]['ba_id']
+    if not ba_ok:
+        return "Invalid ID or title for brain area", None, []
+
+    # construct the session metadata argument. Don't know the number of trials yet, so we set that to 1.
+    session_dict: Dict = dict(
+        experimenter=experimenter,
+        subj_id=subject,
+        session_date=rec_date,
+        session_sfx=suffix,
+        rig_id=rig,
+        study_id=study_id,
+        study_title=study_title,
+        session_notes=notes,
+        num_trials=1,
+        num_units=len(unit_types)
+    )
+    if len(unit_types) > 0:
+        session_dict.update(dict(
+            ephys_src=src,
+            probe_type=probe,
+            sampling_rate=rate,
+            probe_x=x,
+            probe_y=y,
+            probe_depth=z,
+            ba_id=ba_id,
+            brain_area=ba_name
+        ))
+    info = SessionInfo(session_dict)
+
+    msg = check_row(DBTable.SESSION, info.session_table_entry())
+    if (msg is None) and info.number_of_units > 0:
+        msg = check_row(DBTable.SESSION_EPHYS, info.ephys_table_entry(), omit_master=True)
+    if msg:
+        return msg, None, []
+    nt_ids = []
+    if info.number_of_units > 0:
+        neuron_types = fetch_rows(DBTable.NEURON_TYPE)
+        if neuron_types is None:
+            return "Internal database error while retrieving neuron types", None, []
+        nt_map = {d['nt_name']: d['nt_id'] for d in neuron_types}
+        try:
+            nt_ids = [nt_map[type_name] for type_name in unit_types]
+        except KeyError:
+            return "Invalid neuron type specified", None, []
+
+    return "", info, nt_ids
 
 
 def get_pending_commit_jobs_for(username: str) -> Union[str, List[CommitJobStatus]]:
@@ -792,22 +710,21 @@ def get_pending_commit_jobs_for(username: str) -> Union[str, List[CommitJobStatu
         On failure, returns a brief error description. Otherwise, returns a list job status objects for the pending
             commit jobs belonging to the user. Jobs are listed in descending order by start time, with the most
             recently initiated job first.
+    Raises:
+        ValueError: If committer's username is invalid.
     """
     if not (isinstance(username, str) and validate_username(username)):
         raise ValueError('Invalid username')
 
     try:
         conn = get_config().redis_conn
-        raw_job_ids = conn.lrange(f"{COMMIT_NS}{username}", 0, -1)  # IMPORTANT: List of byte strings, not strings
+        raw_jobs: Dict = conn.hgetall(name=COMMITS)  # IMPORTANT: Returns Dict[job_id, CommitJobStatus as byte string]
         out: List[CommitJobStatus] = list()
-        if len(raw_job_ids) > 0:
-            with conn.pipeline() as pipe:
-                for raw_job_id in raw_job_ids:
-                    pipe.get(f"{STATUS_NS}{raw_job_id.decode('utf-8')}")
-                res = pipe.execute()
-            for r in res:
-                job_status: CommitJobStatus = CommitJobStatus.from_bytes(r)
+        for _, r in raw_jobs.items():
+            job_status: CommitJobStatus = CommitJobStatus.from_bytes(r)
+            if job_status.committer == username:
                 out.append(job_status)
+        out.sort(key=lambda j: j.started, reverse=True)
         return out
     except Exception as e:
         _logger.error(f"Failed to retrieve status for pending commit jobs: {str(e)}", exc_info=True)
@@ -816,7 +733,7 @@ def get_pending_commit_jobs_for(username: str) -> Union[str, List[CommitJobStatu
 
 def commit_job_status(job_id: str) -> Union[str, CommitJobStatus]:
     """
-    Retrieve current status information for a pending commit job belonging to the specified user.
+    Retrieve current status information for a pending commit job.
 
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
@@ -826,88 +743,198 @@ def commit_job_status(job_id: str) -> Union[str, CommitJobStatus]:
     """
     try:
         conn = get_config().redis_conn
-        job = conn.get(f"{STATUS_NS}{job_id}")
-        if job is None:
+        job_status_bytes = conn.hget(name=COMMITS, key=job_id)
+        if job_status_bytes is None:
             _logger.debug(f"Got request for status info on a commit job (id={job_id}) that does not exist.")
             return f"Commit job (id={job_id}) not found on server."
-        job_status: CommitJobStatus = CommitJobStatus.from_bytes(job)
+        job_status: CommitJobStatus = CommitJobStatus.from_bytes(job_status_bytes)
         return job_status
     except Exception as e:
         _logger.error(f"Error while retrieving commit job status info: {str(e)}", exc_info=True)
         return "An error occurred while retrieving commit job status on server"
 
 
-def commit_job_progress(job_id: str) -> Union[str, List[str]]:
+def on_archive_uploaded_to_workspace(job_id: str) -> Union[str, CommitJobStatus]:
     """
-    Retrieve the progress message history for a pending commit job.
+    Update a session commit job after uploading the session ZIP archive file to the portal workspace in the server's
+    local disk storage.
+
+    When the session commit is initiated by the Flask/Dash-based frontend running on a browser client, that frontend
+    is designed to upload the archive file in "chunks" to the folder in the portal's workspace dedicated to the commit
+    job: $PORTAL_WS/staging/<job_id>. Ultimately, the archive must be "knitted back together" from the individual file
+    chunks, then transferred to a staging area in the portal's backup repository in S3 (see file header for more info).
+    Only then can the job enter the preprocessing phase.
+
+    This method retrieves the specified job's status information, verifies that the job was originated by the portal
+    application's Flask-based frontend (rather than through an API endpoint that supports session commits via the
+    `sglportalapi` clientside package), and that the commit job staging folder exists. It then queues a background task
+    to reform the archive file, transfer it to the staging area in S3, and then queue another task to preprocess the
+    archive's contents.
+
+    This method should *NOT* be called for a commit job managed by the sglportalapi package. In that scenario, the
+    archive ZIP is uploaded directly (via a multipart upload) to the S3-based repository, which saves time compared to
+    commits initiated on the portal frontend.
+
+    Args:
+        job_id: The commit job ID.
+    Returns:
+        On success, the job's updated status information. The job will remain in the "uploading" state, in which it
+            remains until the archive ZIP has been transferred to the staging area in S3. If the job was not found or a
+            server error occurs, returns a brief error description.
+    """
+    try:
+        # get current job status and do checks...
+        conn = get_config().redis_conn
+        job = conn.hget(name=COMMITS, key=job_id)
+        if job is None:
+            _logger.debug(f"Called on a commit job [{job_id}] that does not exist")
+            return "Commit job not found on server"
+        job_status: CommitJobStatus = CommitJobStatus.from_bytes(job)
+        if job_status.state != CommitStateEnum.UPLOADING:
+            _logger.debug(f"Called on a commit job [{job_id}] NOT in upload phase")
+            return "Commit job was not in upload phase"
+        if job_status.api_triggered:
+            raise Exception(f"Not for use with commit jobs initiated via API")
+        job_folder = _get_job_subfolder(job_id)
+        if not job_folder.is_dir():
+            _logger.debug(f"Staging folder for commit job [{job_id}] not found in portal workspace")
+            return "Staging folder for commit job not found"
+
+        job_status.on_update("Archive uploaded to portal server. Moving archive to staging area in S3 repository...")
+        conn.hset(name=COMMITS, key=job_id, value=job_status.to_bytes())
+
+        job_queue.enqueue(transfer_archive_to_repo, job_id, job_id=f"{job_id}-2repo", job_timeout='60m')
+
+        return job_status
+    except Exception as e:
+        _logger.error(f"Error while checking or updating commit job status info: {str(e)}", exc_info=True)
+        return "An error occurred while checking or updating commit job status on server"
+
+
+def transfer_archive_to_repo(job_id: str) -> bool:
+    """
+    This method, intended to be called on a background process independent from the portal server, transfers the session
+    archive for a commit job to the staging area in the portal's S3 repository.
+
+    When a commit job is initiated on the Dash/Flask frontend, a Dash-based component uploads the session archive in
+    "chunks" to the job's subfolder in the portal's workspace in local cluster storage. Upon completion, the frontend
+    informs the server, and `on_archive_uploaded_to_workspace()` updates the commit job and queues a background task to
+    run this method, which reassembles the chunks into the original file, uploads that file to the S3 repository
+    at /staging/<job_id>/archive.zip, and cleans out uploaded chunks from the job's workspace folder. Finally, it calls
+    `on_archive_uploaded_to_repo()`, which transitions the job to the "Preprocessing" phase and queues a new background
+    task to begin processing the archive.
+
+    If the operation is cancelled or fails at any point, the job is moved to the "Failed" state before returning.
 
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
     Returns:
-        Returns the job's progress history as a list of up to 30 message strings, sorted from most recent to oldest.
-            The message strings are formatted as '(**datetime**) msg_text' so that they can be displayed in a
-            Markdown element, emphasizing the datetime. If task not found or a server error occurs, returns a brief
-            error description.
+        True if successful; False otherwise.
     """
+    _logger.debug(f"Started archive transfer to S3 for commit job {job_id}")
+
+    # callback during upload to repo which updates job progress. Stop reporting progress if user cancels. We cannot
+    # stop the upload, but there's no point in posting further progress messages!
+    t_last_update: float = -1
+
+    def _upload_progress(pct: float) -> None:
+        nonlocal t_last_update
+
+        try:
+            t = time.time()
+            if (t_last_update < 0) or (t-t_last_update > 10):
+                t_last_update = t
+                _background_job_update(job_id, f"Uploading session archive to portal repository... {pct:.1f}%",
+                                       dont_fail=True, overwrite=True)
+        except Exception:
+            pass
+
     try:
-        conn = get_config().redis_conn
-        timestamped_messages = conn.zrevrange(f"{PROGRESS_NS}{job_id}", 0, -1, withscores=True)
-        if (not isinstance(timestamped_messages, list)) or (len(timestamped_messages) == 0):
-            _logger.debug(f"Got request for progress history on a commit task (id={job_id}) that does not exist.")
-            return f"Commit job (id={job_id}) not found on server."
-        out = [f"(**{datetime.fromtimestamp(x[1]).isoformat(' ', 'seconds')}**) {x[0].decode('utf-8')}"
-               for x in timestamped_messages]
-        return out
-    except Exception as e:
-        _logger.error(f"Error retrieving progress history for commit job {job_id}: {str(e)}", exc_info=True)
-        return "An error occurred while retrieving commit job progress history on server"
+        # validate job state and reassemble archive from chunks
+        job_status = commit_job_status(job_id)
+        if isinstance(job_status, str):
+            _logger.error(f"Aborting transfer on error: {job_status}")
+            return False
+        elif job_status.state != CommitStateEnum.UPLOADING:
+            _logger.error(f"Aborting transfer: Commit job in unexpected state [{job_status.state}]")
+            return False
+        elif not _reassemble_archive_from_chunked_upload(job_id):
+            return False
+        else:
+            zip_path = Path(_get_job_subfolder(job_id), ARCHIVE_FNAME)
+        if not zip_path.is_file():
+            msg_pfx = f"Cannot find archive file for commit job {job_id}: "
+            _logger.debug(f"{msg_pfx}: {str(zip_path)}")
+            _background_job_update(job_id, f"{msg_pfx}: {zip_path.name}", CommitStateEnum.FAIL)
+            return False
+
+        # move archive to S3 -- can take a while -- so check for user cancel
+        key = f"/staging/{job_id}/{ARCHIVE_FNAME}"
+        if not repo.upload_file(zip_path, key, log_func=_upload_progress):
+            raise Exception(f"Failed to transfer archive to {key} in S3")
+        if _background_job_update(job_id, "Archive transfer complete."):
+            raise Exception("Operation cancelled")
+        zip_path.unlink(missing_ok=True)
+
+        # signal that archive is now in S3, transition to preprocessing phase.
+        res = on_archive_uploaded_to_repo(job_id)
+        if isinstance(res, str):
+            raise Exception(res)
+    except Exception as err:
+        error_msg = f"Error during archive transfer to S3: {str(err)}"
+        _logger.error(error_msg, exc_info=True)
+        _background_job_update(job_id, error_msg, CommitStateEnum.FAIL)
+        return False
+
+    return True
 
 
-def update_commit_job_on_archive_upload(job_id: str, filename: str) -> Union[str, CommitJobStatus]:
+def on_archive_uploaded_to_repo(job_id: str) -> Union[str, CommitJobStatus]:
     """
-    Update the status of a pending session commit job after the session archive has been fully uploaded to the staging
-    directory for the commit. When the ZIP file has been uploaded, the server will queue a background worker to begin
-    preprocessing the data in the archive.
+    Update a session commit job after uploading the session ZIP archive file to the portal's S3-based repository.
 
-    NOTE: The archive is uploaded in file "chunks" of 100MB each. These chunks are reassembled as the first step of
-    preprocessing.
+    To support processing an indeterminate number of ongoing session commit jobs, each session archive must be
+    uploaded to the S3-based repository, as the portal server's local storage is much more expensive and relatively
+    limited in capacity. When a commit job is originated through the Flask/Dash frontend, the archive is first
+    uploaded in chunks to server local storage, then a background task reassembles the chunks and transfers the
+    archive to S3. When originated through a portal API endpoint via the sglportalapi clientside package, the archive
+    is uploaded directly to the portal's S3-based repository (multipart upload using presigned URLs). Regardless, once
+    the archive is in the repo, this method is called to transition the commit job to the preprocessing phase, queueing
+    a background task to perform the work.
 
     Args:
-        job_id:  The commit job identifier, assigned when the session commit was initiated on server.
-        filename: The name of the ZIP file that was uploaded.
+        job_id: The commit job ID.
     Returns:
-        On success, returns the job's latest status information, updated to include the name of the session ZIP file
-            that finished uploading. If job not found or a server error occurs, returns a brief error description.
+        On success, the job's updated status information. The job will be in the "preprocessing" stage. If the job was
+            not found or a server error occurs, returns a brief error description.
     """
     try:
-        status_key = f"{STATUS_NS}{job_id}"
-        progress_key = f"{PROGRESS_NS}{job_id}"
-        # get job status dictionary
+        # get current job status and do checks...
         conn = get_config().redis_conn
-        job = conn.get(status_key)
+        job = conn.hget(name=COMMITS, key=job_id)
         if job is None:
-            _logger.debug(f"Got upload complete for a commit job (id={job_id}) that does not exist.")
-            return f"Commit job (id={job_id}) not found on server."
+            _logger.debug(f"Called on a commit job [{job_id}] that does not exist")
+            return "Commit job not found on server"
         job_status: CommitJobStatus = CommitJobStatus.from_bytes(job)
         if job_status.state != CommitStateEnum.UPLOADING:
-            _logger.debug(f"Got upload complete for a commit task (id={job_id}), but upload was already finished.")
+            _logger.debug(f"Called on a commit job [{job_id}] NOT in upload phase")
+            return "Commit job was not in upload phase"
+        job_folder = _get_job_subfolder(job_id)
+        if not job_folder.is_dir():
+            _logger.debug(f"Staging folder for commit job [{job_id}] not found in portal workspace")
+            return "Staging folder for commit job not found"
 
-        # the upload folder name is initially stored in the job status object in the 'zip' field. Rename that folder
-        # with the job ID. This frees the original upload folder name for the next upload from the same client session.
-        upload_dir = _get_subfolder_in_staging_directory(job_status.zip)
-        staging_dir = _get_subfolder_in_staging_directory(job_id)
-        upload_dir.rename(staging_dir)
+        archive_key = f"/staging/{job_id}/archive.zip"
+        sz = repo.file_size(archive_key)
+        if sz == 0:
+            _logger.debug(f"Uploaded archive not found in repo at: {archive_key}")
+            return "Uploaded archive not found in portal repository"
 
-        now = time.time()
-        update_msg = f"Upload complete - {filename}. Queued job to preprocess session archive."
-        job_status.on_update(msg=update_msg, filename=filename, state=CommitStateEnum.PREPROCESS, updated=now)
-        with conn.pipeline() as pipe:
-            pipe.set(status_key, job_status.to_bytes())
-            pipe.zadd(progress_key, {update_msg: now})
-            pipe.zremrangebyrank(progress_key, 0, -(PROGRESS_HISTORY_SIZE + 1))
-            pipe.execute()
+        job_status.on_update(f"Archive uploaded to portal repository in S3. Queued for preprocessing...",
+                             state=CommitStateEnum.PREPROCESS)
+        conn.hset(name=COMMITS, key=job_id, value=job_status.to_bytes())
 
-        job_queue.enqueue(preprocess_commit_job, job_id, job_id=f"{job_id}-preprocess", job_timeout='60m')
+        job_queue.enqueue(preprocess_commit_job, job_id, job_id=f"{job_id}-preproc", job_timeout='60m')
 
         return job_status
     except Exception as e:
@@ -922,9 +949,9 @@ def cancel_or_remove_commit_job(job_id: str) -> Tuple[bool, str, Optional[Commit
     state. When the background process detects the user cancellation, it will move the job to the "Failed" state and
     stop.
 
-    In no background process is working on the commit job, the job is removed immediately. If a commit job finished
+    If no background process is working on the commit job, the job is removed immediately. If a commit job finished
     successfully -- the "Done" state, meaning that the session data has been committed to the archive, this method
-    merely removes the completed job from the owner's commit queue.
+    merely removes the completed job from the set of pending commit jobs cached in Redis.
 
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
@@ -933,80 +960,78 @@ def cancel_or_remove_commit_job(job_id: str) -> Tuple[bool, str, Optional[Commit
             err_msg is a non-empty string only if a server error occurred, and job_status is the job's updated status
             if it was cancelled but removal is pending.
     """
-    status_key = f"{STATUS_NS}{job_id}"
-    progress_key = f"{PROGRESS_NS}{job_id}"
     try:
+        job_status = commit_job_status(job_id)
+        if isinstance(job_status, str):
+            return True, job_status, None
+
         conn = get_config().redis_conn
-        job = conn.get(status_key)
-        if job is None:
-            # job not found -- assume it was already removed
-            _logger.debug(f"Got request to remove a commit job (id={job_id}) that was not found.")
-            return True, "", None
-        job_status: CommitJobStatus = CommitJobStatus.from_bytes(job)
+
+        # remove job now if background process is not working on it. Else, if not already cancelled, move job to that
+        # state and append a progress message in Redis
         if job_status.state.can_delete_job_in_this_state():
-            # Job can be deleted immediately -- remove from Redis cache and delete relevant directory in repo
-            # If cancelled during upload, remove the upload folder; else remove the staging folder for the commit
-            target_dir = _get_subfolder_in_staging_directory(
-                job_status.zip if job_status.state == CommitStateEnum.UPLOADING else job_id)
-            _remove_staging_dir(target_dir)
-            # all the job-specific keys that may need to be deleted. After preprocessing, there are keys holding info
-            # used during subsequent phases. But if a session is behavioral only, the two neural unit keys won't exist.
-            delete_keys = [progress_key]
-            if job_status.state.after_preprocessing():
-                delete_keys.extend([f"{INFO_NS}{job_id}", f"{PROTONAMES_NS}{job_id}", f"{PROTODEFS_NS}{job_id}"])
-                if job_status.units and job_status.units > 0:
-                    delete_keys.extend([f"{UNITMETRICS_NS}{job_id}", f"{UNITTYPES_NS}{job_id}"])
+            _remove_job_subfolder(job_id)
+            archive_on_repo = f"/staging/{job_id}/{ARCHIVE_FNAME}"
+            if repo.file_size(archive_on_repo) > 0:
+                repo.delete_file(archive_on_repo)
+
             with conn.pipeline(True) as pipe:
-                pipe.lrem(f"{COMMIT_NS}{job_status.owner}", 0, job_id)
-                pipe.delete(*delete_keys)
+                pipe.hdel(COMMITS, job_id)
+                pipe.delete(f"{PROTODEFS_NS}{job_id}")
                 pipe.execute()
+
             return True, "", None
         elif job_status.state != CommitStateEnum.CANCEL:
-            # If not already cancelling, move job to that state and append a progress message in Redis
-            now = time.time()
-            cancel_msg = "User cancelled job."
-            job_status.on_update(msg=cancel_msg, state=CommitStateEnum.CANCEL, updated=now)
-            with conn.pipeline() as pipe:
-                pipe.set(status_key, job_status.to_bytes())
-                pipe.zadd(progress_key, {cancel_msg: now})
-                pipe.zremrangebyrank(progress_key, 0, -(PROGRESS_HISTORY_SIZE+1))
-                pipe.execute()
+            job_status.on_update(msg="User cancelled job", state=CommitStateEnum.CANCEL)
+            conn.hset(name=COMMITS, key=job_id, value=job_status.to_bytes())
+
         return False, "", job_status
     except Exception as e:
-        _logger.error(f"Failed to cancel commit job {job_id}: {str(e)}", exc_info=True)
+        _logger.error(f"Failed to cancel or remove commit job {job_id}: {str(e)}", exc_info=True)
         return False, "An error occurred while trying to cancel commit job on server", None
 
 
 def preprocess_commit_job(job_id: str) -> bool:
     """
-    This method, intended to be called on a background process independent from the Dash/Flask backend server,
-    pre-processes the uploaded session data ZIP archive for an in-progress commit job.
+    This method, intended to be called on a background process independent from the backend server, preprocesses the
+    experiment session data archive for a pending commit job.
 
-    A session archive ZIP file is uploaded from client to the server in 100MB chunks, and those chunks are stored in a
-    unique subfolder in the portal's commit staging directory. The first step in preprocessing is to reassemble the
-    archive file from the individual chunks. It then scans the archive contents and extracts information that will be
-    needed when the session is actually committed to the lab database: (1) the unique trial protocols presented during
-    the session; (2) timing information for all trial reps, in particular, the start and stop timestamps for the trial
-    in the Omniplex timeline (for electrophysiological experiments using the Omniplex system); and (3) metrics for all
-    neural units recorded in the session. It also initializes metadata that will be added to the database (Session and
-    Session.EPhys tables) when the session is committed.
+    After a commit job is initiated, the client is largely responsible for uploading the session archive to the portal's
+    backup repository in S3, at the key `/staging/<job_id>/archive.zip`. [The upload process is different depending on
+    whether the commit is initiated through the Dash frontend or via a dedicated API endpoint using the `sglportalapi`
+    Python package. See file header for details.] Once uploaded, the server queues a task to preprocess the archive.
 
-    Pre-processing a large (>1GB) session can take many minutes, so progress messages are delivered periodically to the
-    commit job's Redis-cached progress history. The method also checks the job's status regularly in case the user
-    cancels the job through the backend.
+    Since the archive is cached on S3, the method must first download it to the staging folder in the server's local
+    workspace. It then scans the archive contents and extracts information that will be needed when the session is
+    actually committed to the lab database: (1) the unique trial protocols presented during the session; (2) timing
+    information for all trial reps, in particular, the start and stop timestamps for the trial in the Omniplex timeline
+    (for electrophysiological experiments using the Omniplex system); and (3) metrics for all neural units recorded in
+    the session. These preprocessing results are added to a file in the staging folder, `commit_info.bin`, that already
+    contains user-supplied metadata for the session.
+
+    Preprocessing a large (>1GB) session can take many minutes, so the method periodically posts progress messages for
+    the job and checks whether or not the user has requested the job be cancelled.
 
     If the operation is cancelled or fails at any point, the job is moved to the "Failed" state before returning. On
-    successful completion, the job is moved to the "Review" stage.
+    successful completion:
+        - If any trial protocol definitions require user validation, the job is moved to the interactive "Review" stage.
+          Since the user may not check the status of commit for an indefinite period of time, the large archive file
+          is deleted from the staging folder in the portal workspace (it's still backed up in the repo) before the
+          method returns.
+        - Otherwise, no review is necessary and the background task starts work on committing the session to the
+          database (the "Commit" stage).
 
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
     Returns:
-        True if preprocessing is successful; False otherwise.
+        True if successful; False otherwise.
     """
     _logger.debug(f"Started preprocessing phase for commit job {job_id}")
 
-    zip_path: Path
-    """ Location of session archive in portal repository. """
+    commit_info_path = Path(_get_job_subfolder(job_id), COMMIT_INFO_FNAME)
+    """ Location of the commit information file in job's staging folder within local portal workspace. """
+    zip_path: Path = Path(_get_job_subfolder(job_id), ARCHIVE_FNAME)
+    """ Location of session archive in staging folder within local portal workspace. """
     trial_info: Dict[str, _TrialInfo] = dict()
     """ 
     Dictionary maps the filename for each Maestro data file in the session archive to timing and trial protocol info for
@@ -1016,19 +1041,39 @@ def preprocess_commit_job(job_id: str) -> bool:
     """
     units: List[OmniplexUnit] = list()
     """ 
-    The list of neural units culled from the session data archive during pre-processing. Includes information required
+    The list of neural units culled from the session data archive during preprocessing. Includes information required
     to prepare an entry in the Session.Neuron part table for each neural unit.
     """
     protocols: List[maestro.Protocol]
     """ The list of trial protocol culled from the session data archive during pre-processing. """
-    session_meta: SessionMetaData
+    session_info: SessionInfo
     """
-    Metadata about session that is partially initialized during preprocessing phase, then reviewed and updated by user
-    before committing the session to the database. It includes attributes from the Session and Session.EPhys tables.
+    Metadata about session that was supplied by the user when the commit job was initiated and stored in a dedicated
+    file in the job's staging folder. After preprocessing, we must update it to reflect the number of trials recorded
+    during the experiment session.
     """
 
+    # callback during download from repo which posts progress updates for job. Stop reporting progress if user cancels.
+    # We cannot stop the download, but there's no point in posting further progress messages!
+    t_last_update: float = -1
+
+    def _download_progress(pct: float) -> None:
+        nonlocal t_last_update
+
+        try:
+            t = time.time()
+            if t_last_update < 0 or (t - t_last_update > 10):
+                t_last_update = t
+                _background_job_update(job_id, f"Downloading session archive to local staging folder... {pct:.1f}%",
+                                       dont_fail=True, overwrite=True)
+        except Exception:
+            pass
+
     try:
-        # verify job status and ZIP file location in repo
+        if _background_job_update(job_id, f"Starting preprocessing phase..."):
+            return False
+
+        # verify job status and local staging folder
         job_status = commit_job_status(job_id)
         if isinstance(job_status, str):
             _logger.error(f"Failed to retrieve job status from Redis for {job_id}")
@@ -1036,16 +1081,26 @@ def preprocess_commit_job(job_id: str) -> bool:
         elif job_status.state != CommitStateEnum.PREPROCESS:
             _logger.error(f"Commit job is not in the correct stage for background preprocessing: {job_status.state}")
             return False
-        elif not _reassemble_archive_from_chunked_upload(job_id, job_status.zip):
+        elif not commit_info_path.is_file():
+            _logger.error(f"Staging folder or commit information file missing for job {job_id}")
+            _background_job_update(job_id, "Error: Missing staging folder for job on server", CommitStateEnum.FAIL)
             return False
-        else:
-            zip_path = Path(_get_subfolder_in_staging_directory(job_id), job_status.zip)
-        if not zip_path.is_file():
-            msg_pfx = f"Cannot find archive file for commit job {job_id}: "
-            _logger.debug(f"{msg_pfx}: {str(zip_path)}")
-            _background_job_update(job_id, f"{msg_pfx}: {zip_path.name}", CommitStateEnum.FAIL)
+
+        # download archive to staging folder
+        archive_on_repo = f"/staging/{job_id}/{ARCHIVE_FNAME}"
+        if repo.file_size(archive_on_repo) == 0:
+            _logger.error(f"Archive for commit job {job_id} not found on S3 repo")
+            _background_job_update(job_id, "Error: Session archive not found in portal repo", CommitStateEnum.FAIL)
             return False
-        if _background_job_update(job_id, f"Preprocessing session archive {job_status.zip}"):
+        if _background_job_update(job_id, f"Downloading session archive from portal repo"):
+            return False
+        if not repo.download_file(archive_on_repo, zip_path, log_func=_download_progress):
+            _logger.error(f"Failed to download session archive from S3 repo for commit job {job_id}")
+            _background_job_update(job_id, "Error: Unable to download session archive", CommitStateEnum.FAIL)
+            return False
+
+        # preprocess the archive
+        if _background_job_update(job_id, f"Preprocessing session archive..."):
             return False
 
         with zipfile.ZipFile(zip_path, 'r') as archive:
@@ -1054,12 +1109,10 @@ def preprocess_commit_job(job_id: str) -> bool:
             pl2s_archived: List[zipfile.ZipInfo] = list()
             units_zip_info: Optional[zipfile.ZipInfo] = None
             session_date: Optional[date] = None
-            sample_maestro_file_name: str = ""
             for info in archive_list:
                 if (len(info.filename) > 3) and (info.filename[-3:].lower() == 'pl2'):
                     pl2s_archived.append(info)
                 elif data_file_name_pattern.search(info.filename) is not None:
-                    sample_maestro_file_name = info.filename
                     header = maestro.DataFileHeader(archive.read(info))
                     file_index = int(info.filename[-4:])
                     header_timestamp = header.timestamp_ms if header.version >= 21 else None
@@ -1074,7 +1127,7 @@ def preprocess_commit_job(job_id: str) -> bool:
                     if units_zip_info is None:
                         units_zip_info = info
                     else:
-                        raise Exception("Found more than one spikes data file in session data archive!")
+                        raise Exception("Found more than one neural units file in session data archive!")
             if (units_zip_info is not None) and (len(pl2s_archived) == 0):
                 raise Exception("Missing Omniplex file(s) for spike-sorted unit data!")
 
@@ -1117,84 +1170,69 @@ def preprocess_commit_job(job_id: str) -> bool:
                     if trial_info[key].omniplex_start is None:
                         raise Exception(f"Missing Omniplex start/stop timestamps for {key}")
 
-            # initialize session metadata. We get the session date from the Maestro trials, and we may get the
-            # subject ID from the ZIP archive file name or a Maestro data file name.
-            subject_choices = fetch_attribute_values(DBTable.SUBJECT, 'subj_id')
-            subj_id_found: Optional[str] = None
-            test_str = ','.join([zip_path.name.lower(), sample_maestro_file_name.lower()])
-            for choice in subject_choices:
-                if choice.lower() in test_str:
-                    subj_id_found = choice
-                    break
-            session_meta = _initialize_session_metadata(job_status.owner, session_date, subj_id_found,
-                                                        len(trial_info), units)
-
-            # save preprocessing results in a binary file in the staging directory
+            # add results from preprocessing to the commit information file in the local staging folder
             if _background_job_update(job_id, "Saving results from preprocessing..."):
                 return False
-            _write_session_preprocessing_file(Path(_get_subfolder_in_staging_directory(job_id), PREPROC_FNAME),
-                                              session_meta, trial_info, protocols, units)
+            session_info, nt_ids, _, _, _ = _read_commit_info_file(commit_info_path)
+            session_info.number_of_trials = len(trial_info)
+            if len(units) > 0:
+                if len(units) != len(nt_ids):
+                    raise Exception("Length of neuron types list does not match number of neural units found!")
+                for i, u in enumerate(units):
+                    u.neuron_type = nt_ids[i]
+            _write_commit_info_file(commit_info_path, session_info, [], trial_info, protocols, units)
 
-            # store in Redis all information that will be needed to interact with user during the review phase: session
-            # and electrophysiology metadata; protocol candidate definitions; and unit metrics (excluding spike times,
-            # which could consume a lot of storage!)
-            info = session_meta.to_bytes()
-            proto_names = list()
-            proto_defs = list()
-            for p in protocols:
-                proto_names.append(f"{'** ' if p.is_candidate else ''}{p.trial.path_name}")
-                proto_defs.append(p.to_bytes())
-            unit_metrics = list()
-            unit_types = list()
-            for u in units:
-                # we don't store spike times in Redis, and we leave neuron type as None b/c all of the unit neuron
-                # types are stored in a separate key -- the user can only edit the neuron type of each unit.
-                unit_metrics.append(u.to_bytes(omit_spikes=True))
-                unit_types.append(-1 if u.neuron_type is None else u.neuron_type)
-            with get_config().redis_conn.pipeline() as pipe:
-                pipe.set(f"{INFO_NS}{job_id}", info)
-                pipe.rpush(f"{PROTONAMES_NS}{job_id}", *proto_names)
-                pipe.rpush(f"{PROTODEFS_NS}{job_id}", *proto_defs)
-                if len(unit_metrics) > 0:
-                    pipe.rpush(f"{UNITMETRICS_NS}{job_id}", *unit_metrics)
-                    pipe.rpush(f"{UNITTYPES_NS}{job_id}", *unit_types)
-                pipe.execute()
+            # if any trial protocol needs validation, then transition to review stage, caching protocol definitions in
+            # Redis for efficient access. The archive is deleted locally, since we won't need it for an indefinite
+            # period of time. Otherwise, proceed immediately (on the same background task) to the final commit.
+            requires_review = any([p.is_candidate for p in protocols])
+            if requires_review:
+                zip_path.unlink()
+                proto_defs = [p.to_bytes() for p in protocols]
+                get_config().redis_conn.rpush(f"{PROTODEFS_NS}{job_id}", *proto_defs)
+                if _background_job_update(job_id, "Preprocessing complete. User review required.",
+                                          CommitStateEnum.REVIEW):
+                    return False
+                return True
+            else:
+                if _background_job_update(job_id, "Preprocessing complete. Committing session to database...",
+                                          CommitStateEnum.COMMIT):
+                    return False
+                return finish_commit_job(job_id)
 
-            if _background_job_update(job_id, "Preprocessing complete!", CommitStateEnum.REVIEW, len(units)):
-                return False
     except Exception as err:
         error_msg = f"Error during preprocessing: {str(err)}"
         _logger.error(error_msg, exc_info=True)
         _background_job_update(job_id, error_msg, CommitStateEnum.FAIL)
         return False
 
-    return True
 
-
-def _reassemble_archive_from_chunked_upload(job_id: str, zip_file_name: str) -> bool:
+def _reassemble_archive_from_chunked_upload(job_id: str) -> bool:
     """
-    Helper method for preprocess_commit_job() handles the task of reconstructing the session archive from the
-    individual file chunks that are uploaded to the server from the client.
+    Helper method for background task function `transfer_archive_to_repo()`. It reconstructs the session archive from
+    the individual file chunks that are uploaded to the commit job's staging folder in the server's workspace.
 
-    Session archives will typically be several GB in size, and the current upload mechanism uses chunking to keep the
-    client responsive. If the upload was successful, the commit job's staging folder will contain a single subfolder
-    containing all of the file chunks, with file names "zipfilename_part_NNN", where NNN is the chunk number.
+    Session archives will typically be several GB in size, and the current upload mechanism via the Dash frontend uses
+    chunking to keep the client responsive. If the upload was successful, the commit job's staging folder will contain a
+    single subfolder holding all of the file chunks, with file names "zipfilename_part_NNN", where NNN is the chunk
+    number.
 
-    This method verifies the expeected contents of the staging folder, knits together the chunks in order into the
-    original zip file, which is stored directly under the staging folder. The subfolder with the chunks is deleted.
+    This method verifies the existence of the upload folder under the job's staging folder, knits together the chunks in
+    order into the original archive, which is stored directly under the staging folder. The subfolder with the chunks is
+    deleted.
 
     It can take a while to rebuild a multi-GB file, so the method will post progress messages and check for user
     cancel.
+
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
-        zip_file_name: The file name for the session archive.
     Returns:
         True if successful, false otherwise.
     Raises:
         Exception: If a chunk file is missing, an IO or other error occurs.
     """
     # expect to find a SINGLE folder under the staging folder that contains the file chunks
-    commit_job_dir = _get_subfolder_in_staging_directory(job_id)
+    commit_job_dir = _get_job_subfolder(job_id)
     temp_dir: Optional[Path] = None
     for child in commit_job_dir.iterdir():
         if child.is_dir():
@@ -1206,17 +1244,28 @@ def _reassemble_archive_from_chunked_upload(job_id: str, zip_file_name: str) -> 
         _background_job_update(job_id, error_msg, CommitStateEnum.FAIL)
         return False
 
-    # reassemble chunks into ZIP file -- with progress updates every 5 seconds
+    # chunk filenames all have the format "<base>_part_NNN", where N is the chunk number. Find the value of <base>.
+    base_name: str = ""
+    for child in temp_dir.iterdir():
+        if child.is_file():
+            base_name = child.name[0:-len("_part_NNN")]
+            break
+    if len(base_name) == 0:
+        _background_job_update(job_id, "Failed to reassemble archive from chunked upload - bad chunk file name",
+                               CommitStateEnum.FAIL)
+        return False
+
+    # reassemble chunks into ZIP file -- with progress updates every 10 seconds
     t0 = time.time()
-    zip_path = Path(commit_job_dir, zip_file_name)
+    zip_path = Path(commit_job_dir, ARCHIVE_FNAME)
     with open(zip_path, "ab") as target_file:
         for i in range(1, num_chunks + 1):
-            chunk_path = Path(temp_dir, get_chunk_name(zip_file_name, i))
+            chunk_path = Path(temp_dir, get_chunk_name(base_name, i))
             with open(chunk_path, "rb") as stored_chunk_file:
                 target_file.write(stored_chunk_file.read())
-            if (time.time() - t0) > 5:
-                msg = f"Reassembling {zip_file_name} from chunked upload: {i} of {num_chunks} chunks processed."
-                if _background_job_update(job_id, msg):
+            if (time.time() - t0) > 10:
+                msg = f"Reassembling session archive from chunked upload: {i} of {num_chunks} chunks processed."
+                if _background_job_update(job_id, msg, overwrite=True):
                     return False
                 t0 = time.time()
     shutil.rmtree(temp_dir)
@@ -1224,52 +1273,52 @@ def _reassemble_archive_from_chunked_upload(job_id: str, zip_file_name: str) -> 
 
 
 def _background_job_update(job_id: str, msg: str, next_state: Optional[CommitStateEnum] = None,
-                           num_units: Optional[int] = None) -> bool:
+                           dont_fail: bool = False, overwrite: bool = False) -> bool:
     """
     Helper method used to update progress and, optionally, the state of a commit job. Intended for use ONLY within the
-    background workers that handle the preprocessing and final commit phases of a job, this method will detect if the
-    job has been cancelled and, if so, move the job to the "Failed" state. In this scenario, the specified progress
-    message is not posted. However, if the job has just finished and is being moved to the "Done" state, the method
-    does NOT check if the job was cancelled.
+    background workers that handle the uploading, preprocessing and final commit phases of a job, this method will
+    detect if the job has been cancelled and, if so, move the job to the "Failed" state. In this scenario, the specified
+    progress message is not posted. However, if the job has just finished and is being moved to the "Done" state, the
+    method does NOT check if the job was cancelled.
+
+    No action is taken if the specified commit job has failed or already finished, or is in the interactive review
+    phase. A background task should not be actively working on the commit job in these states.
 
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
         msg: The new progress message to post.
-        next_state: If not None, transition the job to this state. Default is None.
-        num_units: When preprocessing finishes and the job is moved to the "Review" phase, this is the number of neural
-            units found while preprocessing the session archive. It is cached in a field in the job's status object.
 
+        next_state: If not None, transition the job to this state. Default is None.
+        dont_fail: If True and job has been cancelled, do not transition to the failed state and do not post the new
+            progress message. This flag should be set if the background task is unable to stop work immediately.
+        overwrite: If True, overwrite the most recent progress message with the new one. This is useful when posting
+            updates about a long running task indicating percent complete.
     Returns:
         True if job was in the "Cancelled" state and therefore moved to the "Failed" state; False otherwise.
     Raises:
         Exception: If an error occurs while reading or writing job status/progress history in Redis.
     """
-    status_key = f"{STATUS_NS}{job_id}"
-    progress_key = f"{PROGRESS_NS}{job_id}"
-
     was_cancelled = False
-    conn = get_config().redis_conn
-    job = conn.get(status_key)
-    if job is None:
-        raise Exception(f"Got request for status info on a commit job (id={job_id}) that does not exist.")
-    job_status: CommitJobStatus = CommitJobStatus.from_bytes(job)
-    if job_status.state not in [CommitStateEnum.PREPROCESS, CommitStateEnum.COMMIT, CommitStateEnum.CANCEL]:
-        raise Exception(f"Commit job {job_id} found in an unexpected state for background work.")
-    if (job_status.state == CommitStateEnum.CANCEL) and (next_state != CommitStateEnum.DONE):
+    job_status = commit_job_status(job_id)
+    if isinstance(job_status, str):
+        raise Exception(str)
+    # a background task should not run in any of these states; do nothing
+    if job_status.state in [CommitStateEnum.REVIEW, CommitStateEnum.DONE, CommitStateEnum.FAIL]:
+        return False
+    if job_status.state == CommitStateEnum.CANCEL:
+        if dont_fail:
+            return False
         next_state = CommitStateEnum.FAIL
         was_cancelled = True
 
-    set_units: Optional[None] = None
-    if next_state == CommitStateEnum.REVIEW:
-        set_units = num_units if (isinstance(num_units, int) and num_units >= 0) else 0
-    now = time.time()
-    job_status.on_update(msg="Background task cancelled!" if was_cancelled else msg, state=next_state, units=set_units,
-                         updated=now)
-    with conn.pipeline() as pipe:
-        pipe.set(status_key, job_status.to_bytes())
-        pipe.zadd(progress_key, {job_status.msg: now})
-        pipe.zremrangebyrank(progress_key, 0, -(PROGRESS_HISTORY_SIZE + 1))
-        pipe.execute()
+    if (job_status.state == CommitStateEnum.CANCEL) and (next_state != CommitStateEnum.DONE) and not dont_fail:
+        next_state = CommitStateEnum.FAIL
+        was_cancelled = True
+
+    job_status.on_update(msg="Background task cancelled!" if was_cancelled else msg, overwrite=overwrite,
+                         state=next_state)
+    get_config().redis_conn.hset(name=COMMITS, key=job_id, value=job_status.to_bytes())
+
     return was_cancelled
 
 
@@ -1355,7 +1404,7 @@ def _chunked_extract_from_archive(job_id: str, archive: zipfile.ZipFile, pl2_inf
             written_mb: float = bytes_written / (1024 * 1024)
             if (time.time() - t0) > 5:
                 msg = f"Extracting Omniplex file {pl2_info.filename}: {written_mb:.1f} of {size_in_mb:.1f} MB ..."
-                if _background_job_update(job_id, msg):
+                if _background_job_update(job_id, msg, overwrite=True):
                     return None
                 t0 = time.time()
 
@@ -1645,7 +1694,7 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
         if (time.time() - t0) > 5:
             msg = f"Calculating metrics for {len(spikes)} neural unit(s) on Omniplex channel {channel_id} ... " \
                   f"{100.0*block_idx/num_blocks:.1f}%"
-            if _background_job_update(job_id, msg):
+            if _background_job_update(job_id, msg, overwrite=True):
                 return None
             t0 = time.time()
 
@@ -1663,164 +1712,6 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
     return out
 
 
-def _initialize_session_metadata(
-        username: str, session_date: Optional[date], subj_id: Optional[str], num_trials: int,
-        units: List[OmniplexUnit]) -> SessionMetaData:
-    """
-    Helper method for _preprocess_session_archive(). It looks up the experiment session most recently committed to
-    the database by the user committing the current session, and uses metadata from that previous session to fill in
-    reasonable defaults for the current session. If this is the user's first session commit, at least some session
-    metadata will be a "guess".
-
-    It is assumed that the user committing the current session is also the person that conducted the session. In order
-    to fully initialize session metadata, the lab database MUST contain at least one experiment subject, rig, research
-    study, and brain area. Otherwise, this method raises an exception.
-
-    Args:
-        username:  The username of the registered portal user to which the commit job belongs.
-        session_date: The session date as extracted from the header of a Maestro data file.
-        subj_id: The ID of the experiment subject, if matched in the session archive filename or the name of a
-            Maestro data file in that archive.
-        num_trials: The number of trials presented during the session.
-        units: A list of all neural units recorded during the session. Will be empty for a behavioral session. This
-            method will associate each unit with the "Unspecified" neuron type IF that type is in the database. Else,
-            it is left untouched.
-    Returns:
-        The initialized session metadata record.
-    Raises:
-        Exception: If an error occurs while looking up the previous experiment session in the database, or if unable to
-            obtain enough information from database to successfully initialize the session metadata.
-    """
-    # get most recent session committed by user (if one exists)
-    recent_session: Optional[Dict[str, AttributeValue]] = None
-    recent_ephys: Optional[Dict[str, AttributeValue]] = None
-    sessions_for_user = fetch_rows(DBTable.SESSION, dict(experimenter=username))
-    if sessions_for_user is None:
-        raise Exception(f"A database error occurred while retrieving previous session metadata.")
-    if len(sessions_for_user) > 0:
-        recent_session = sorted(sessions_for_user, key=lambda s: (s['session_date'], s['session_sfx']), reverse=True)[0]
-        pk = {k: recent_session[k] for k in primary_key_of(DBTable.SESSION)}
-        recent_ephys = fetch_one_row(DBTable.SESSION_EPHYS, pk)
-
-    # get defaults for subject, rig, study, and brain area IDs
-    if subj_id is None:
-        if recent_session:
-            subj_id = recent_session['subj_id']
-        else:
-            subj_ids = fetch_attribute_values(DBTable.SUBJECT, 'subj_id')
-            if subj_ids and (len(subj_ids) > 0):
-                subj_id = subj_ids[0]
-    default_rig_id = recent_session and recent_session['rig_id']
-    default_study_id = recent_session and recent_session['study_id']
-    if recent_session is None:
-        rig_ids = fetch_attribute_values(DBTable.RIG, 'rig_id')
-        study_ids = fetch_attribute_values(DBTable.STUDY, 'study_id')
-        default_rig_id = rig_ids and (len(rig_ids) > 0) and rig_ids[0]
-        default_study_id = study_ids and (len(study_ids) > 0) and int(study_ids[0])   # fetch returns np.int64 !!
-    default_ba_id = recent_ephys and recent_ephys['ba_id']
-    if recent_ephys is None:
-        ba_ids = fetch_attribute_values(DBTable.BRAIN_AREA, 'ba_id')
-        default_ba_id = ba_ids and (len(ba_ids) > 0) and int(ba_ids[0])    # fetch returns np.int64 !!
-
-    # to initialize session suffix, we need to check if there are any sessions already committed by user with the
-    # same subject on the same date. If we don't know subject or date, we can't do this and we use 1 for the suffix.
-    session_sfx = 1
-    if isinstance(session_date, date) and isinstance(subj_id, str):
-        used: Set[int] = set()
-        for session in sessions_for_user:
-            if (session['subj_id'] == subj_id) and (session['session_date'] == session_date):
-                used.add(session['session_sfx'])
-        for i in range(1, 10):
-            if i not in used:
-                session_sfx = i
-                break
-
-    # initialize all neural units to neuron type "Unspecified" if it exists in database -- it should!
-    unspecified_id: Optional[int] = None
-    res = fetch_rows(DBTable.NEURON_TYPE, dict(nt_name="Unspecified"))
-    if res and (len(res) == 1):
-        unspecified_id = int(res[0]['nt_id'])
-
-    # initialize session metadata, as well as neuron type for each neural unit
-    session_dict = dict(experimenter=username, subj_id=subj_id, session_date=session_date or date.today(),
-                        session_sfx=session_sfx, rig_id=default_rig_id, study_id=default_study_id, session_notes="",
-                        num_units=len(units), num_trials=num_trials)
-    if len(units) > 0:
-        for u in units:
-            u.neuron_type = unspecified_id
-        channel_ids = {unit.channel for unit in units}
-        session_dict['ephys_src'] = 'Omniplex'
-        session_dict['probe_type'] = 'single' if len(channel_ids) == 1 else '32-channel'
-        session_dict['sampling_rate'] = len(units[0].template) / 0.01
-        session_dict['probe_x'] = 0.0 if (recent_ephys is None) else recent_ephys['probe_x']
-        session_dict['probe_y'] = 0.0 if (recent_ephys is None) else recent_ephys['probe_y']
-        session_dict['probe_depth'] = 10.0 if (recent_ephys is None) else recent_ephys['probe_depth']
-        session_dict['ba_id'] = default_ba_id
-
-    # a ValueError or TypeError is raised here if any missing session metadata
-    return SessionMetaData(**session_dict)
-
-
-def session_metadata(job_id: str) -> Optional[SessionMetaData]:
-    """
-    Retrieve the session metadata for a commit job. The metadata is only available during the "Review" phase of a
-    session commit job. It includes information that will be inserted into the Session and -- for an experiment in
-    which one or more neural units were recorded -- the Session.EPhys tables in the portal database.
-
-    Args:
-        job_id: The commit job identifier, assigned when the session commit was initiated on server.
-    Returns:
-        The session metadata, or None if the operation fails.
-    """
-    session_info: Optional[SessionMetaData]
-    try:
-        info_raw = get_config().redis_conn.get(f"{INFO_NS}{job_id}")
-        if info_raw is None:
-            raise Exception("Session metadata not found!")
-        return SessionMetaData.from_bytes(info_raw)
-    except Exception as e:
-        _logger.error(f"Error while retrieving session metadata for commit job {job_id}: {str(e)}", exc_info=True)
-        return None
-
-
-def update_session_metadata(job_id: str, updated_params: Dict[str, Any]) -> bool:
-    """
-    Update the session metadata for an in-progress commit job. This operation is available only during the review
-    phase of the job, when the user interactively reviews and edits information required before the experiment session
-    can be committed to the portal database.
-
-    Args:
-        job_id: The commit job identifier, assigned when the session commit was initiated on server.
-        updated_params: A dictionary of parameter names and values to be updated. Can contain any of the following keys
-            (value type in parentheses): experimenter (str), subj_id (str), session_date (date), session_sfx (int, 1-9),
-            rig_id (int), study_id (int), session_notes (str), ephys_src (str), probe_type (str), sampling_rate (float),
-            probe_x (float), probe_y (float), probe_depth (float), ba_id (int). If the session is behavior only, the
-            electrophysiology metadata are ignored. The operation will fail if any parameter has an invalid type.
-
-    Returns:
-        True if successful; False otherwise
-    """
-    try:
-        conn = get_config().redis_conn
-        with conn.pipeline() as pipe:
-            pipe.get(f"{STATUS_NS}{job_id}")
-            pipe.get(f"{INFO_NS}{job_id}")
-            res = pipe.execute()
-        if res is None:
-            raise Exception("Did not find commit job status or session metadata on server!")
-        job_status = CommitJobStatus.from_bytes(res[0])
-        session_meta = SessionMetaData.from_bytes(res[1])
-        if job_status.state != CommitStateEnum.REVIEW:
-            raise Exception("Cannot modify session metadata for a commit job that is not in the 'Review' stage.")
-
-        session_meta.update(**updated_params)
-        conn.set(f"{INFO_NS}{job_id}", session_meta.to_bytes())
-        return True
-    except Exception as e:
-        _logger.error(f"Error while updating session metadata for commit job {job_id}: {str(e)}", exc_info=True)
-        return False
-
-
 def protocol_names(job_id: str) -> Optional[List[str]]:
     """
     Get the path names (in the form 'set/subset/trial_name') of all trial protocols detected during pre-processing of
@@ -1828,7 +1719,7 @@ def protocol_names(job_id: str) -> Optional[List[str]]:
     processed -- and which don't match an existing protocol in the database -- are "protocol candidates" requiring user
     review and verification.
 
-    This information is available ONLY during the "Review" phase of a commit job -- after pre-processing and before the
+    This information is available ONLY during the "Review" phase of a commit job -- after preprocessing and before the
     actual database commit begins.
 
     Args:
@@ -1836,15 +1727,19 @@ def protocol_names(job_id: str) -> Optional[List[str]]:
 
     Returns:
         The list of protocol path names. The list is not sorted, but indicates the order in which the protocols were
-            detected in the pre-processing stage. It is unlikely, but theoretically possible, that two protocols could
+            detected in the preprocessing stage. It is unlikely, but theoretically possible, that two protocols could
             have the same path name. A protocol's pathname is prepended with '**' if that protocol requires manual user
             validation. Returns None if operation fails.
     """
     try:
-        raw_names = get_config().redis_conn.lrange(f"{PROTONAMES_NS}{job_id}", 0, -1)
-        if not isinstance(raw_names, list):
-            raise Exception(f"Cached protocol names not found")
-        return [r.decode('utf-8') for r in raw_names]
+        raw_protocols = get_config().redis_conn.lrange(f"{PROTODEFS_NS}{job_id}", 0, -1)
+        if not isinstance(raw_protocols, list):
+            raise Exception(f"Cached protocol definitions not found")
+        protocols = [maestro.Protocol.from_bytes(r) for r in raw_protocols]
+        proto_names = list()
+        for p in protocols:
+            proto_names.append(f"{'** ' if p.is_candidate else ''}{p.trial.path_name}")
+        return proto_names
     except Exception as e:
         _logger.error(f"Error while retrieving trial protocol names for commit job {job_id}: {str(e)}", exc_info=True)
         return None
@@ -1852,10 +1747,10 @@ def protocol_names(job_id: str) -> Optional[List[str]]:
 
 def protocol_definition(job_id: str, index: int) -> Optional[maestro.Protocol]:
     """
-    Get the full definition of a trial protocol culled during pre-processing of the session data ZIP archive for the
+    Get the full definition of a trial protocol culled during preprocessing of the session data ZIP archive for the
     specified commit job.
 
-    This information is available ONLY during the "Review" phase of a commit job -- after pre-processing and before the
+    This information is available ONLY during the "Review" phase of a commit job -- after preprocessing and before the
     actual database commit begins. In concert with protocol_names(), this method provides a mechanism by which the
     client front-end can present a user interface for reviewing each trial protocol and validating any protcol that
     requires manual validation (1 or 2 reps encountered, and does not match an existing protocol in the database).
@@ -1882,11 +1777,10 @@ def add_rv_to_protocol(job_id: str, index: int, rv: maestro.SegParam) -> Optiona
     """
     Add a random variable to the definition of a trial protocol culled during preprocessing of the session data ZIP
     archive for the specified commit job. This operation is available only during the review phase of the job, when the
-    user interactively reviews and edits information required before the experiment session can be committed o the
-    portal database.
+    user interactively validates any trial protocols that require manual validation.
 
     When a protocol definition is based on fewer than 3 trial reps over the course of a session, AND it does not match
-    an existing trial protocol in the lab database, it is considered a "candiaate" protocol. The user must validate the
+    an existing trial protocol in the lab database, it is considered a "candidate" protocol. The user must validate the
     definition before the protocol and the session can be committed to the database. Part of validation may require
     adding any missing random variables that are part of that definition. When only 1 rep is processed, it is impossible
     to identify any random variables; with only 2 reps, it's possible we might miss one.
@@ -1917,8 +1811,7 @@ def add_rv_to_protocol(job_id: str, index: int, rv: maestro.SegParam) -> Optiona
 def validate_protocol(job_id: str, index: int) -> bool:
     """
     Validate the definition of a trial protocol culled during preprocessing of of the session data ZIP archive for the
-    specified commit job. This operation is available only during the review phase of the job, when the user reviews and
-    edits information required before the experiment session can be committed to the portal database.
+    specified commit job. This operation is available only during the review phase of the job.
 
     When a protocol's definition is based on fewer than 3 trial reps over the course of a session, AND it does not match
     an existing trial protocol in the lab database, the user must manually add any missing random variables in the
@@ -1938,11 +1831,7 @@ def validate_protocol(job_id: str, index: int) -> bool:
             raise Exception(f"Cached protocol definition not found at index {index}")
         proto: maestro.Protocol = maestro.Protocol.from_bytes(raw_proto)
         proto.validate()
-        # we cache the updated protocol candidate definition AND remove the '** ' from the cached protocol path name
-        with conn.pipeline() as pipe:
-            pipe.lset(f"{PROTODEFS_NS}{job_id}", index, proto.to_bytes())
-            pipe.lset(f"{PROTONAMES_NS}{job_id}", index, proto.trial.path_name)
-            pipe.execute()
+        conn.lset(f"{PROTODEFS_NS}{job_id}", index, proto.to_bytes())
         return True
     except Exception as e:
         _logger.error(f"Error while validating trial protocol definition for commit job {job_id}: {str(e)}",
@@ -1950,149 +1839,37 @@ def validate_protocol(job_id: str, index: int) -> bool:
         return False
 
 
-def metrics_for_neural_unit(job_id: str, index: int) -> Optional[OmniplexUnit]:
-    """
-    Get the metrics for a neural unit identified during preprocessing of the session data ZIP archive for the specified
-    commit job.
-
-    This information is available ONLY during the "Review" phase of a commit job -- after pre-processing and before the
-    actual database commit begins.
-
-    Args:
-        job_id: The commit job identifier, assigned when the session commit was initiated on server.
-        index: The zero-based index of the neural unit requested. The index position reflects the order in which units
-            were culled from the archive during preprocessing.
-
-    Returns:
-        The requested neural unit. Returns None if index invalid or the operation failed for whatever reason.
-    """
-    # remember: during review phase, the neuron types are stored in UNITTYPES key, while all other metrics are
-    # stored as serialized OmniplexUnits in UNITMETRICS_NS.
-    try:
-        conn = get_config().redis_conn
-        with conn.pipeline() as pipe:
-            pipe.lindex(f"{UNITMETRICS_NS}{job_id}", index)
-            pipe.lindex(f"{UNITTYPES_NS}{job_id}", index)
-            raw_unit, raw_type = pipe.execute()
-        if (raw_unit is None) or (raw_type is None):
-            raise Exception(f"Missing unit metrics or neuron type in Redis cache at index {index}")
-        unit = OmniplexUnit.from_bytes(raw_unit)
-        unit.neuron_type = int(raw_type.decode('utf-8'))
-        return unit
-    except Exception as e:
-        _logger.error(f"Error while retrieving neural unit metrics for commit job {job_id}: {str(e)}",
-                      exc_info=True)
-        return None
-
-
-def set_unit_type(job_id: str, index: int, neuron_type: int) -> bool:
-    """
-    Update the neuron type ID assigned to one or all neural units identified during preprocessing of the session data
-    archive for the specified commit job. This operation is available only during the review phase of the job, when the
-    user interactively reviews and edits information required before the experiment session can be committed to the
-    portal database.
-
-    During preprocessing, all neural units are assigned to the "Unspecified" neuron type, if it exists in the portal
-    database. During the review phase, the user can review the unit metrics and assign a more specific type to each
-    unit, or leave it as "Unspecified". If the "Unspecified" type does not exist (which should never be the case), the
-    user MUST assign a valid type to each unit.
-
-    Args:
-        job_id: The commit job identifier, assigned when the session commit was initiated on server.
-        index: The zero-based index of the neural unit requested. If -1, then the specified neuron type is applied
-            to ALL identified units in the session.
-        neuron_type: The neuron type ID. This should identify an existing entry in the database's NeuronType table,
-            but it is not checked until the session is actually committed to the database.
-    Returns:
-        True if successful; False if the operation fails for whatever reason.
-    """
-    try:
-        conn = get_config().redis_conn
-        n = conn.llen(f"{UNITTYPES_NS}{job_id}")
-        if n <= 0:
-            raise Exception("Found no cached unit types")
-        if index == -1:
-            unit_types = [neuron_type] * n
-            with conn.pipeline() as pipe:
-                pipe.delete(f"{UNITTYPES_NS}{job_id}")
-                pipe.rpush(f"{UNITTYPES_NS}{job_id}", *unit_types)
-                pipe.execute()
-        else:
-            if (index < 0) or (index >= n):
-                raise Exception("Invalid unit index position")
-            conn.lset(f"{UNITTYPES_NS}{job_id}", index, neuron_type)
-        return True
-    except Exception as e:
-        _logger.error(f"Error while updating neural unit type for commit job {job_id}, index={index}: {str(e)}",
-                      exc_info=True)
-        return False
-
-
 def ready_to_commit(job_id: str) -> Tuple[bool, bool, str]:
     """
     Check whether or not the session data for an in-progress commit job is valid and ready to be committed to the portal
-    database. This operation is only available during the review phase of the job, when the user interactively reviews
-    and edits information required before the experiment is committed to the database.
+    database. This operation is only available during the review phase of the job.
 
-    The method makes these checks in the order indicated: (1) Are all required session metadata attributes valid?
-    (2) Do any trial protocol candidates require user validation? (3) Are any recorded neural units lacking a neuron
-    type?  If all tests pass, the experiment session is ready to commit to the database.
+    After preprocessing, a commit job enters the review phase ONLY if there is at least one trial protocol in the commit
+    that requires manual validation. This method checks all trial protocol definitions (cached in Redis). If any
+    remain unvalidated, the session is not ready to be committed.
 
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
     Returns:
         A 3-tuple (ok, ready, msg), where ok indicates whether or not the check was successful. If ok==False, an error
             occurred on the server and msg contains an error description. Otherwise, ready==False indicates that input
-            from the user is required before the session can be committed and msg is a brief description of the first
-            issue encountered during the check. If ready==True, then the session is ready to commit, and msg will
-            contain a user-facing message to that effect.
+            from the user is required before the session can be committed and msg is a brief description of what is
+            needed. If ready==True, then the session is ready to commit, and msg will contain a user-facing message to
+            that effect.
     """
     try:
-        conn = get_config().redis_conn
-        status_raw = conn.get(f"{STATUS_NS}{job_id}")
-        if status_raw is None:
-            return False, False, "Did not find commit job status on server!"
-        job_status = CommitJobStatus.from_bytes(status_raw)
-        if job_status.state != CommitStateEnum.REVIEW:
-            return False, False, "Cannot check session data readiness for a commit job not in the 'Review' stage."
-
-        has_units = job_status.units and (job_status.units > 0)
-        with conn.pipeline() as pipe:
-            pipe.get(f"{INFO_NS}{job_id}")
-            pipe.lrange(f"{PROTONAMES_NS}{job_id}", 0, -1)
-            if has_units:
-                pipe.lrange(f"{UNITTYPES_NS}{job_id}", 0, -1)
-            res = pipe.execute()
-            if len(res) != (3 if has_units else 2):
-                raise Exception(f"Got {len(res)} responses from Redis pipe; expected {3 if has_units else 2}")
-            if any([(r is None) for r in res]):
-                raise Exception(f"Missing Redis response data from pipe")
-        info = SessionMetaData.from_bytes(res[0])
-        msg = check_row(DBTable.SESSION, info.session_table_entry())
-        if (msg is None) and job_status.units and (job_status.units > 0):
-            msg = check_row(DBTable.SESSION_EPHYS, info.ephys_table_entry(), omit_master=True)
-        if msg:
-            return True, False, msg
-        proto_names = [raw.decode('utf-8') for raw in res[1]]
-        n = [s.startswith('**') for s in proto_names].count(True)
+        raw_protocols = get_config().redis_conn.lrange(f"{PROTODEFS_NS}{job_id}", 0, -1)
+        if not isinstance(raw_protocols, list):
+            raise Exception(f"Cached protocol definitions not found")
+        protocols = [maestro.Protocol.from_bytes(r) for r in raw_protocols]
+        n = [p.is_candidate for p in protocols].count(True)
         if n > 0:
             return True, False, f"{n} trial protocols (marked with '**') require manual validation."
-        if has_units:
-            type_ids = [int(t.decode('utf-8')) for t in res[2]]  # have to convert from byte strings!!!!
-            n = type_ids.count(-1)
-            if n > 0:
-                return True, False, f"{n} neural units are missing a neuron type identification."
-
-            # let user know if some units have the "Unspecified" neuron type (if it exists in database)
-            res = fetch_rows(DBTable.NEURON_TYPE, dict(nt_name="Unspecified"))
-            if res and (len(res) == 1):
-                n = type_ids.count(res[0]['nt_id'])
-                if n > 0:
-                    return True, True, f"\u2713 OK. Ready to commit, but {n} units have 'Unspecified' neuron type."
-        return True, True, "\u2713 OK. Ready to commit."
+        else:
+            return True, True, "\u2713 OK. Ready to commit."
     except Exception as e:
         _logger.error(f"Error while checking if commit job {job_id} is ready to commit: {str(e)}", exc_info=True)
-        return False, False, "A server error occurred while checking cached session data."
+        return False, False, "A server error occurred while checking cached trial protocols."
 
 
 def commit_to_database(job_id: str) -> Optional[str]:
@@ -2100,9 +1877,9 @@ def commit_to_database(job_id: str) -> Optional[str]:
     Request that the experiment data for a pending session commit job be committed to the database. This is the final
     phase of the session commit workflow.
 
-    The specified commit job must currently be in the review stage, with no missing metadata (the user supplies this
-    information interactively during the review stage). If these requirements are met, the server transitions the job to
-    the final "Commit" phase and queues a background task to perform that work.
+    The specified commit job must currently be in the review stage, and the user must have validated all trial protocols
+    found during preprocessing. If these requirements are met, the server transitions the job to the final "Commit"
+    phase and queues a background task to perform that work.
 
     Args:
         job_id:  The commit job identifier, assigned when the session commit was initiated on server.
@@ -2110,33 +1887,21 @@ def commit_to_database(job_id: str) -> Optional[str]:
         Returns None if successful. If the job is not in the review phase or is not ready to commit, or if a server
             error occurs, returns a brief error description.
     """
-    ok, ready, msg = ready_to_commit(job_id)
-    if not (ok and ready):
-        return f"Session not ready to be committed to database: {msg}"
-
     try:
-        status_key = f"{STATUS_NS}{job_id}"
-        progress_key = f"{PROGRESS_NS}{job_id}"
-        # get job status dictionary
-        conn = get_config().redis_conn
-        job = conn.get(status_key)
-        if job is None:
-            _logger.debug(f"Got request to finalize a commit job (id={job_id}) that does not exist.")
-            return f"Commit job (id={job_id}) not found on server."
-        job_status: CommitJobStatus = CommitJobStatus.from_bytes(job)
+        job_status = commit_job_status(job_id)
+        if isinstance(job_status, str):
+            raise Exception(str)
         if job_status.state != CommitStateEnum.REVIEW:
             _logger.debug(f"Got request to finalize a commit job (id={job_id}) that is not in the review phase.")
             return f"Commit job must be in the 'Review' stage before committing to database"
 
-        now = time.time()
-        update_msg = "Queueing job to commit experiment session to the database."
-        job_status.on_update(msg=update_msg, state=CommitStateEnum.COMMIT, updated=now)
-        with conn.pipeline() as pipe:
-            pipe.set(status_key, job_status.to_bytes())
-            pipe.zadd(progress_key, {update_msg: now})
-            pipe.zremrangebyrank(progress_key, 0, -(PROGRESS_HISTORY_SIZE + 1))
-            pipe.execute()
+        ok, ready, msg = ready_to_commit(job_id)
+        if not (ok and ready):
+            return f"Session not ready to be committed to database: {msg}"
 
+        update_msg = "Queueing job to commit experiment session to the database."
+        job_status.on_update(msg=update_msg, state=CommitStateEnum.COMMIT)
+        get_config().redis_conn.hset(name=COMMITS, key=job_id, value=job_status.to_bytes())
         job_queue.enqueue(finish_commit_job, job_id, job_id=f"{job_id}-commit", job_timeout='60m')
         return None
     except Exception as e:
@@ -2146,42 +1911,53 @@ def commit_to_database(job_id: str) -> Optional[str]:
 
 def finish_commit_job(job_id: str) -> bool:
     """
-    This method, intended to be called on a background process independent from the Dash/Flask backend server, performs
-    the final stage of the session commit workflow, in which the session data is pushed to the portal database.
+    This method, intended to be called on a background process independent from the backend server, performs the final
+    stage of the session commit workflow, in which the session data is pushed to the portal database.
 
     Committing a preprocessed experiment session to the database involves the following steps:
+        1. Validate the commit job status. Make sure the job's staging folder exists in the server's local workspace
+           and includes the commit information file, containing session metadata and results from preprocessing -- .
+           trial timing information, trial protocol definitions, and neural unit metrics.
 
-        0) Verify that the user has supplied all required information during the interactive review (session metadata,
-        all trial protocols validated, etc).
+        2. Update trial protcol definitions in the commit information file, if necessary.
 
-        1) Entries are inserted into the Session, Session.EPhys, and Session.Neuron tables as appropriate, and all
-        trial protocols not already in the database are inserted into the TrialProtocol table.
+           If no trial protocols required validation, the workflow will have skipped the "review" phase and proceeded
+           directly to the final commit. In this case, the session archive must also be present in the job's local
+           staging folder, and the commit information file is in its final form.
 
-        2) The Trial table and its part tables are populated with data from all the trials presented during the
-        session. We post a progress message and check for user cancel periodically during this process.
+           If some trial protocols required validation, the preprocessing task will cache ALL trial protocol definitions
+           in Redis, delete the session archive from the local staging folder, and transition the job to the review
+           phase. During that phase, the user interactively validates any trial protocols requiring it, and the relevant
+           protocol definitions are updated in the Redis cache. In this scenario, the method must retrieve the updated
+           trial protocol definitions and rewrite the commit information file accordingly. It must also download the
+           session archive from the portal repository on S3 to the local staging folder.
 
-        3) A custom binary file, "preproc.bin", is generated that contains the preprocessing results, along with session
-        metadata entered manually by the user during the review stage. The file is appended to the original session
-        archive ZIP. As a result, the ZIP file contains everything needed to recommit the experiment session -- without
-        user intervention -- in the event the portal database was corrupted and had to be reconstructed from scratch.
+        3. Entries are inserted into the Session, Session.EPhys, and Session.Neuron tables as appropriate, and all
+           trial protocols not already in the database are inserted into the TrialProtocol table.
 
-        4) The altered ZIP file is uploaded to the portal's backing repository, which is maintained in an AWS S3 bucket
-        provisioned by the lab expressly for this purpose. The object key under which the ZIP file is stored uniquely
-        identifies the experiment session: "/repo/<experimenter>/<subj_id>_<session_date>_<session_sfx>.zip", where
-        <experimenter> is the portal username of the experimenter, <subj_id> is the experiment subject's ID,
-        <session_date> is the experiment date as an ISO-formatted string 'YYYY-MM-DD', and <session_sfx> is the integer
-        session suffix.
+        4. The Trial table and its part tables are populated with data from all the trials presented during the
+           session. We post a progress message and check for user cancel periodically during this process.
 
-        4) Lastly, the completed session commit is recorded in the database operations log. This single log entry (along
-        with the ZIP file just stored in the backing repository) accounts for all of the database insertions required to
-        commit the data from the experiment session.
+        5. The conmmit information file is appended to the original session archive ZIP. As a result, the ZIP file
+           contains everything needed to recommit the experiment session -- without user intervention -- in the event
+           the portal database was corrupted and had to be reconstructed from scratch.
+
+        6. The altered ZIP file is uploaded to the portal's backing repository on S3. The object key under which the
+           ZIP file is stored uniquely identifies the experiment session: "/repo/<E>/<S>_<D>_<F>.zip",
+           where <E> is the username of the registered portal user that conducted the experiment, <S> is the experiment
+           subject's ID, <D> is the experiment date as an ISO-formatted string 'YYYY-MM-DD', and <F> is the integer
+           session suffix.
+
+        7. Lastly, the completed session commit is recorded in the database operations log. This single log entry (along
+           with the ZIP file just stored in the backing repository) accounts for all of the database insertions required
+           to commit the data from the experiment session.
 
     We rely on the database server's transaction mechanisms to ensure data consistency; all insertions into the database
     are encapsulated in a transaction. If an error occurs at any point during the commit, any changes to the database
     and the file repository are unwound before returning.
 
-    Committing a large (>1GB) session to the database can take many minutes, so progress messages are delivered
-    periodically to the commit job's Redis-cached progress history. The method also checks the job's status regularly in
+    Committing a large (>1GB) session to the database can take many minutes, so progress messages are periodically
+    pushed to the commit job's state object cached in Redis. The method also checks the job's status regularly in
     case the user cancels the job through the backend.
 
     If the operation is cancelled or fails at any point, the job is moved to the "Failed" state before returning. On
@@ -2194,10 +1970,10 @@ def finish_commit_job(job_id: str) -> bool:
     """
     _logger.debug(f"Started final commit phase for commit job {job_id}")
 
-    zip_path: Path
-    """ Location of session archive in staging directory. """
-    preproc_path: Path
-    """ Location of temporary file in staging directory holding results from preprocessing phase. """
+    commit_info_path = Path(_get_job_subfolder(job_id), COMMIT_INFO_FNAME)
+    """ Location of the commit information file in job's staging folder within local portal workspace. """
+    zip_path: Path = Path(_get_job_subfolder(job_id), ARCHIVE_FNAME)
+    """ Location of session archive in staging folder within local portal workspace. """
     trial_info: Dict[str, _TrialInfo]
     """ 
     Dictionary maps the filename for each Maestro data file in the session archive to timing and trial protocol info for
@@ -2211,21 +1987,48 @@ def finish_commit_job(job_id: str) -> bool:
     to prepare an entry in the Session.Neuron part table for each neural unit.
     """
     protocols: List[maestro.Protocol]
-    """ The list of trial protocols culled from the session data archive during pre-processing. """
-    session_info: SessionMetaData
+    """ 
+    The list of trial protocols culled from the session data archive during preprocessing, stored in the commit
+    information file, and possibly validated in the review phase.
     """
-    Metadata about session that is partially initialized during preprocessing phase, then reviewed and updated by user
-    before committing the session to the database. It includes attributes from the Session and Session.EPhys tables.
+    session_info: SessionInfo
+    """
+    Metadata about session that is supplied when the commit job is initiated and kept in the commit information file.
+    It includes attributes from the Session and Session.EPhys tables.
     """
 
-    def _upload_progress(pct: float) -> None:
+    # these two inner functions serve as callbacks while downloading the session archive from the S3 repo prior to
+    # the database commit, or uploading the amended archive (with commit information file) to the S3 repo after the
+    # database commit. These merely post progress updates for the job.
+    t_last_dnld: float = -1
+    t_last_upld: float = -1
+
+    def _download_progress(pct: float) -> None:
+        nonlocal t_last_dnld
+
         try:
-            _background_job_update(job_id, f"Uploading session archive to portal repository... {pct:.1f}%")
+            t = time.time()
+            if t_last_dnld < 0 or (t - t_last_dnld > 10):
+                t_last_dnld = t
+                _background_job_update(job_id, f"Downloading session archive to local staging folder... {pct:.1f}%",
+                                       dont_fail=True, overwrite=True)
+        except Exception:
+            pass
+
+    def _upload_progress(pct: float) -> None:
+        nonlocal t_last_upld
+
+        try:
+            t = time.time()
+            if t_last_upld < 0 or (t - t_last_upld > 10):
+                t_last_upld = t
+                _background_job_update(job_id, f"Uploading session archive to portal repository... {pct:.1f}%",
+                                       dont_fail=True, overwrite=True)
         except Exception:
             pass
 
     try:
-        # verify job status, existence of ZIP archive and preprocessing results file in staging directory
+        # verify job status and commit information file.
         job_status = commit_job_status(job_id)
         if isinstance(job_status, str):
             _logger.error(f"Failed to retrieve job status from Redis for {job_id}")
@@ -2233,74 +2036,47 @@ def finish_commit_job(job_id: str) -> bool:
         elif job_status.state != CommitStateEnum.COMMIT:
             _logger.error(f"Commit job is not in the final commit phase: {job_status.state}")
             return False
-        else:
-            zip_path = Path(_get_subfolder_in_staging_directory(job_id), job_status.zip)
-            preproc_path = Path(_get_subfolder_in_staging_directory(job_id), PREPROC_FNAME)
+        elif not commit_info_path.is_file():
+            _logger.error(f"Commit job information file for job {job_id} not found at: {str(commit_info_path)}")
+            _background_job_update(job_id, "Missing commit information file", CommitStateEnum.FAIL)
+            return False
+
+        # read in commit information and check if any protocols required validation
+        session_info, _, trial_info, protocols, units = _read_commit_info_file(commit_info_path)
+        review_required = any([p.is_candidate for p in protocols])
+
+        # if protocol validation was required, get all protocol definitions from Redis and verify all are now
+        # validated.
+        if review_required:
+            raw_protocols = get_config().redis_conn.lrange(f"{PROTODEFS_NS}{job_id}", 0, -1)
+            if not isinstance(raw_protocols, list):
+                raise Exception(f"Cached protocol definitions not found")
+            protocols = [maestro.Protocol.from_bytes(r) for r in raw_protocols]
+            for p in protocols:
+                if p.is_candidate:
+                    msg = f"Error: At least one trial protocol ({p.trial.path_name} still requires user validation!"
+                    _logger.debug(f"Commit job {job_id} failed: {msg}")
+                    _background_job_update(job_id, msg, CommitStateEnum.FAIL)
+                    return False
+
+        # check if session archive is in local staging folder, and download it from repo if not.
         if not zip_path.is_file():
-            msg_pfx = f"Cannot find archive file for commit job {job_id}: "
-            _logger.debug(f"{msg_pfx}: {str(zip_path)}")
-            _background_job_update(job_id, f"{msg_pfx}: {zip_path.name}", CommitStateEnum.FAIL)
-            return False
-        if not preproc_path.is_file():
-            msg_pfx = f"Cannot find temporary file with preprocessed data for commit job {job_id}: "
-            _logger.debug(f"{msg_pfx}: {str(preproc_path)}")
-            _background_job_update(job_id, f"{msg_pfx}: {preproc_path.name}", CommitStateEnum.FAIL)
-            return False
-
-        # retrieve Redis-cached information "filled in" by user during review phase, and verify nothing is missing.
-        num_units = job_status.units if job_status.units else 0
-        conn = get_config().redis_conn
-        with conn.pipeline() as pipe:
-            pipe.get(f"{INFO_NS}{job_id}")
-            pipe.lrange(f"{PROTODEFS_NS}{job_id}", 0, -1)
-            if num_units > 0:
-                pipe.lrange(f"{UNITTYPES_NS}{job_id}", 0, -1)
-            res = pipe.execute()
-        session_info = SessionMetaData.from_bytes(res[0])
-        msg = check_row(DBTable.SESSION, session_info.session_table_entry())
-        if (msg is None) and num_units > 0:
-            msg = check_row(DBTable.SESSION_EPHYS, session_info.ephys_table_entry(), omit_master=True)
-        if msg:
-            msg = f"Error: Session metadata incomplete/invalid: {msg}"
-            _logger.debug(f"Commit job {job_id} failed: {msg}")
-            _background_job_update(job_id, msg, CommitStateEnum.FAIL)
-            return False
-        protocols = [maestro.Protocol.from_bytes(proto_raw) for proto_raw in res[1]]
-        for p in protocols:
-            if p.is_candidate:
-                msg = f"Error: At least one trial protocol ({p.trial.path_name} still requires user validation!"
-                _logger.debug(f"Commit job {job_id} failed: {msg}")
-                _background_job_update(job_id, msg, CommitStateEnum.FAIL)
+            archive_on_repo = f"/staging/{job_id}/{ARCHIVE_FNAME}"
+            if not repo.download_file(archive_on_repo, zip_path, log_func=_download_progress):
+                _logger.error(f"Failed to download session archive from S3 repo for commit job {job_id}")
+                _background_job_update(job_id, "Error: Unable to download session archive", CommitStateEnum.FAIL)
                 return False
-        unit_types: List[int] = [int(raw.decode('utf-8')) for raw in res[2]] if num_units > 0 else list()
-        if len(unit_types) != num_units:
-            msg = f"Error: Number of cached units inconsistent with job status info!"
-            _logger.debug(f"Commit job {job_id} failed: {msg}")
-            _background_job_update(job_id, msg, CommitStateEnum.FAIL)
-            return False
-        if unit_types.count(-1) > 0:
-            msg = f"Error: The neuron type is undefined for at least one neural unit!"
-            _logger.debug(f"Commit job {job_id} failed: {msg}")
-            _background_job_update(job_id, msg, CommitStateEnum.FAIL)
-            return False
 
-        # load preprocessing results from temporary file in staging directory. We only need the trial info and the
-        # units. We don't need trial info nor the (potentially huge) unit spike time arrays during the review phase,
-        # so these weren't cached in Redis and so must be recovered from the temporary file. Set neuron type for each
-        # unit IAW cached neuron type list that may have been altered during review phase.
-        _, trial_info, _, units = _read_session_preprocessing_file(preproc_path)
-        if len(units) != num_units:
-            msg = f"Error: Number of preprocessed units inconsistent with job status info!"
-            _logger.debug(f"Commit job {job_id} failed: {msg}")
-            _background_job_update(job_id, msg, CommitStateEnum.FAIL)
-            return False
-        for i, u in enumerate(units):
-            u.neuron_type = unit_types[i]
-
-        # update the individual trial info to include the corresponding protocol's unique MD5 hexadecimal digest
+        # at this point, all trial protocols should be validated, and the original session archive should be in the
+        # staging folder. Now that trial protocol definitions are finalized, update per-trial info to include the
+        # corresponding protocol's unique MD5 hexadecimal digest.
         for _, t_info in trial_info.items():
             protocol = protocols[t_info.proto_index]
             t_info.proto_hash = protocol.md5_digest
+
+        # rewrite the commit information file to persist any changes in trial protocol definitions, as well as the
+        # update to per-trial info.
+        _write_commit_info_file(commit_info_path, session_info, [], trial_info, protocols, units)
     except Exception as err:
         error_msg = f"Error occurred before starting commit: {str(err)}"
         _logger.error(error_msg)
@@ -2322,29 +2098,27 @@ def finish_commit_job(job_id: str) -> bool:
         return False
     added_proto_hashes = [p['proto_hash'] for p in commit_mgr.trial_protocols()]
 
-    # at this point, the session has been committed to the database. Now we need to rewrite the preprocessing file
-    # to include the information supplied during the review stage, and append it to the ZIP archive. Then we upload the
-    # amended ZIP archive to the portal backing repository. If any of those operations fail, we have to remove the
-    # session from the database!
-    key = f"/repo/{session_info.experimenter}/" \
-          f"{session_info.subj_id}_{str(session_info.session_date)}_{session_info.session_sfx}.zip"
+    # at this point, the session has been committed to the database and the commit information file is complete. Now we
+    # need to add that file to the ZIP archive, then upload the amended ZIP archive to the portal backing repository. If
+    # any of those operations fail, we have to remove the session from the database!
+    archive_key_final = f"/repo/{session_info.experimenter}/" \
+                        f"{session_info.subject}_{session_info.iso_recording_date}_{session_info.suffix}.zip"
     archive_uploaded, commit_logged = False, False
     try:
-        if _background_job_update(job_id, "Adding pre-processing results to session archive..."):
+        if _background_job_update(job_id, "Adding commit information to session archive..."):
             raise Exception("Operation cancelled")
-        _write_session_preprocessing_file(preproc_path, session_info, trial_info, protocols, units)
         with zipfile.ZipFile(zip_path, 'a') as f:
-            f.write(preproc_path, PREPROC_FNAME)
+            f.write(commit_info_path, COMMIT_INFO_FNAME)
 
-        if _background_job_update(job_id, "Starting archive upload to portal repository..."):
+        if _background_job_update(job_id, "Transferrring archive to portal repository..."):
             raise Exception("Operation cancelled")
-        if not repo.upload_file(zip_path, key, log_func=_upload_progress):
-            raise Exception(f"Unable to push committed session archive [{key}] to portal repository")
+        if not repo.upload_file(zip_path, archive_key_final, log_func=_upload_progress):
+            raise Exception(f"Unable to push committed session archive [{archive_key_final}] to portal repository")
         archive_uploaded = True
 
         # finally, log the session commit
-        res = log_session_commit(session_info.experimenter, session_info.subj_id, str(session_info.session_date),
-                                 session_info.session_sfx)
+        res = log_session_commit(session_info.experimenter, session_info.subject, session_info.iso_recording_date,
+                                 session_info.suffix)
         if res:
             raise Exception(res)
         commit_logged = True
@@ -2364,8 +2138,9 @@ def finish_commit_job(job_id: str) -> bool:
             _logger.critical(f"Session commit rollback failed: {str(e)}")
             ok = False
         if archive_uploaded:
-            if not repo.delete_file(key):
-                _logger.critical(f"Failed to remove session archive from repository {key} during commit rollback")
+            if not repo.delete_file(archive_key_final):
+                _logger.critical(f"Failed to remove session archive from repository {archive_key_final} during "
+                                 f"commit rollback")
                 ok = False
         err_msg = f"Commit failed after database insertions; rollback {'successful' if ok else 'FAILED!'}"
         try:
@@ -2381,7 +2156,7 @@ class _SessionCommitMgr(SessionCommitter):
     """
     Helper class that performs the actual database table insertions that commit an experiment session to the portal
     database. It is used in two contexts: (1) during a new commit managed by a background worker process initiated
-    through the Dash backend server; or (2) during reconstruction of the database contents from the database update log
+    through the portal server; or (2) during reconstruction of the database contents from the database update log
     and the archive files stored in the portal's backing repository on AWS S3.
 
     NOTE: Inserting data associated with a single trial can involve many individual database inserts: one for the entry
@@ -2395,17 +2170,17 @@ class _SessionCommitMgr(SessionCommitter):
     Usage: Construct the _SessionCommitMgr object, passing the required session, trial, and neural unit data and the
     path to the session data archive. Then invoke commit() to begin the (potentially long-running) database commit.
     """
-    def __init__(self, job_id: Optional[str], zip_path: Path, session_info: SessionMetaData,
+    def __init__(self, job_id: Optional[str], zip_path: Path, session_info: SessionInfo,
                  trial_info: Dict[str, _TrialInfo], protocols: List[maestro.Protocol], units: List[OmniplexUnit]):
         """
         Construct the experiment session data commit manager.
 
         Args:
             job_id: If this is a normal session commit initiated by a user via the backend server, then this is ID of
-                the associated commit job. In the context of a commit job, progress messages are posted to the relevant
-                Redis key, and cancellation is possible. If the ID is None, then the commit is part of a database
-                reconstruction task. In this case, progress messages are written to STDOUT, and the operation cannot be
-                cancelled.
+                the associated commit job. In the context of a commit job, the Redis-cached job state is updated
+                periodically with progress messages, and cancellation is possible. If the ID is None, then the commit is
+                part of a database reconstruction task. In this case, progress messages are written to STDOUT, and the
+                operation cannot be cancelled.
             zip_path: The path to the session data archive containing all Maestro trial data files.
             session_info: Metadata for the experiment session.
             trial_info: Dictionary of information about all trials presented during the experiment session, ascertained
@@ -2422,12 +2197,12 @@ class _SessionCommitMgr(SessionCommitter):
         """
         self.zip_path: Path = zip_path
         """ File path to the session data archive. """
-        self.session_info: SessionMetaData = session_info
+        self.session_info: SessionInfo = session_info
         """ Session metadata that must be written to the database. """
         self.trial_info: Dict[str, _TrialInfo] = trial_info
         """ Dictionary of trial information objects, keyed by trial data filenames. """
         self.protocols: List[maestro.Protocol] = protocols
-        """ List of all trial protocols presented during the experiment session."""
+        """ List of all trial protocols presented during the experiment session. """
         self.new_protocol_entries: Optional[List[Dict[str, AttributeValue]]] = None
         """ List of all new protocol entries that must be added to database, lazily created. """
         self.units: List[OmniplexUnit] = units
@@ -2439,16 +2214,16 @@ class _SessionCommitMgr(SessionCommitter):
         return self.session_info.session_table_entry()
 
     def ephys_table_entry(self) -> Optional[Dict[str, AttributeValue]]:
-        return self.session_info.ephys_table_entry() if self.session_info.num_units > 0 else None
+        return self.session_info.ephys_table_entry() if self.session_info.number_of_units > 0 else None
 
     def neurons(self) -> List[Dict[str, AttributeValue]]:
         neuron_entries: List[Dict[str, AttributeValue]] = list()
         for i, unit in enumerate(self.units):
             neuron = dict()
             neuron['experimenter'] = self.session_info.experimenter
-            neuron['subj_id'] = self.session_info.subj_id
-            neuron['session_date'] = self.session_info.session_date
-            neuron['session_sfx'] = self.session_info.session_sfx
+            neuron['subj_id'] = self.session_info.subject
+            neuron['session_date'] = self.session_info.iso_recording_date
+            neuron['session_sfx'] = self.session_info.suffix
             neuron['unit_id'] = i + 1
             neuron['unit_channel'] = unit.channel
             neuron['unit_type'] = unit.neuron_type
@@ -2639,8 +2414,8 @@ class _SessionCommitMgr(SessionCommitter):
                     neuronal_entries.clear()
                     event_entries.clear()
 
-                # report progress and check for cancel roughly once every 5 seconds
-                if (time.time() - t0) > 5:
+                # report progress and check for cancel roughly once every 10 seconds
+                if (time.time() - t0) > 10:
                     self.update_progress(f"{num_inserted} of {num_trials} trials added to database...")
                     t0 = time.time()
 
@@ -2749,12 +2524,11 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
     username of the experimenter, <subj_id> is the experiment subject's ID, <session_date> is the date of the experiment
     in the format 'YYYY-MM-DD', and <session_sfx> is the integer session suffix.
 
-    During the original commit, all pre-processing results -- as well as any information entered manually via user
-    interaction -- are stored in the file "preproc.bin", which in turn is appended to the session archive ZIP. As a
-    result, re-committing the session requires no user intervention and is significantly faster because it does not
-    require processing of a large PL2 file (which also would have to be extracted from the ZIP file). However, the
-    archive ZIP must be downloaded from the repository to a staging directory in the portal workspace before it is
-    processed, which could take a while.
+    During the original commit, session metadata and preprocessing results are stored in a file "commit_info.bin", which
+    in turn is stored in the original session archive ZIP. As a result, re-committing the session requires no user
+    intervention and is significantly faster because it does not require processing of a large PL2 file (which also
+    would have to be extracted from the ZIP file). However, the archive ZIP must be downloaded from the repository to a
+    staging directory in the portal workspace before it is processed, which could take a while.
 
     Progress messages are written to STDOUT.
 
@@ -2766,31 +2540,31 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
     """
     key = f"/repo/{log_entry['username']}/" \
           f"{log_entry['subj_id']}_{str(log_entry['date'])}_{log_entry['suffix']}.zip"
-    recon_dir = _get_subfolder_in_staging_directory("reconstruct")
+    recon_dir = _get_job_subfolder("reconstruct")
     error_msg = None
     try:
-        # create a temporary folder in the staging directory on the portal server
+        # create a staging folder for the reconstruction in the portal's local workspace
         recon_dir.mkdir(parents=True, exist_ok=False)
         zip_path = Path(recon_dir, f"{log_entry['subj_id']}_{str(log_entry['date'])}_{log_entry['suffix']}.zip")
         print(f"  > Downloading session archive from repository at {key}...", file=sys.stdout, flush=True)
         if not repo.download_file(key, zip_path, log_func=False):
             raise Exception("Failed while downloading session archive from repository.")
 
-        # load pre-processing results from binary file in session archive
-        print(f"  > Loading preprocessed results stored in session archive...")
-        preproc_path = Path(recon_dir, PREPROC_FNAME)
+        # extract commit information file from session archive and read in its contents
+        print(f"  > Loading commit information stored in session archive...")
+        commit_info_path = Path(recon_dir, COMMIT_INFO_FNAME)
         with zipfile.ZipFile(zip_path, 'r') as archive:
-            archive.extract(PREPROC_FNAME, path=str(recon_dir.absolute()))
-        if not preproc_path.is_file():
-            raise Exception("Failed to extract pre-processing results file from session archive")
-        session_meta, trial_info, protocols, units = _read_session_preprocessing_file(preproc_path)
+            archive.extract(COMMIT_INFO_FNAME, path=str(recon_dir.absolute()))
+        if not commit_info_path.is_file():
+            raise Exception("Failed to extract commit information file from session archive")
+        session_info, _, trial_info, protocols, units = _read_commit_info_file(commit_info_path)
 
         # here's where it all happens: the database inserts, rollback on failure, progress messages and check for
         # cancellation.
-        session_label = f"{session_meta.experimenter}-{session_meta.subj_id}-{str(session_meta.session_date)}-" \
-                        f"{session_meta.session_sfx}"
+        session_label = f"{session_info.experimenter}-{session_info.subject}-{session_info.iso_recording_date}-" \
+                        f"{session_info.suffix}"
         print(f"   > Reconstructing session [{session_label}] in database...", file=sys.stdout)
-        commit_mgr = _SessionCommitMgr(None, zip_path, session_meta, trial_info, protocols, units)
+        commit_mgr = _SessionCommitMgr(None, zip_path, session_info, trial_info, protocols, units)
         error_msg = commit_mgr.commit()
         if error_msg:
             return error_msg
@@ -2798,7 +2572,7 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
     except Exception as err:
         error_msg = f"Exception while reconstructing experiment session:\n  {str(err)}"
     finally:
-        # dispose of the temporary directory in which the archive and preproc files were stored during reconstruction
+        # dispose of the temporary directory in which files were stored during reconstruction
         try:
             shutil.rmtree(recon_dir)
         except Exception as e:
@@ -2807,120 +2581,170 @@ def _reconstruct_session(log_entry: Dict[str, Union[str, int]]) -> Optional[str]
     return error_msg
 
 
-_SESSION_PREPROC_VERSION: int = 1
-""" Current version number for the binary session preprocessing results file. """
+_COMMIT_INFO_VERSION: int = 1
+""" Current version number for the binary file containing session metadata and preprocessing results. """
 
 
-def _write_session_preprocessing_file(file_path: Path, session_meta: SessionMetaData, trial_info: Dict[str, _TrialInfo],
-                                      protocols: List[maestro.Protocol], units: List[OmniplexUnit]) -> None:
+def _write_commit_info_file(file_path: Path, info: SessionInfo, nt_ids: List[int],
+                            trial_info: Optional[Dict[str, _TrialInfo]] = None,
+                            protocols: Optional[List[maestro.Protocol]] = None,
+                            units: Optional[List[OmniplexUnit]] = None) -> None:
     """
-    Write the results from preprocessing a session archive to a binary file.
+    Write the binary session commit information file.
 
-    The preprocessing phase of the session commit workflow can take a significant amount of time, especially for a
-    longer experiment in which many trials were presented and many neural units recorded. These results are kept in a
-    file in the staging directory during the review phase (and the content may be modified by user action during that
-    phase); after the session is committed, the preprocessing file is added to the session archive before it is moved
-    to the portal's backup repository.
+    This file contains information provided by the committer or compiled during the preprocessing phase. It is
+    generated several times over the course of the commit workflow:
+        - Upon initializing the commit job, the session metadata and neuron types are stored in the file.
+        - After the preprocessing phase, trial protocol definitions, per-trial timing information, and neural unit
+          metrics are added to the file. The unit metrics replace the list of unit types, as neuron type is one
+          part of the metrics object, `OmniplexUnit`.
+        - After the review phase (if necessary), the definition of each validated trial protocol is updated.
+
+    Note that the file is updated merely by overwriting its contents entirely. After the experiment data has been
+    fully committed to the portal database, this file is added to the session archive, which is then uploaded to the
+    portal backup repository on S3. The file enables automated recommit of the experiment session in the event that
+    database reconstruction is necessary.
 
     Args:
-        file_path: Destination path for session preprocessing file.
-        session_meta: The session metadata.
+        file_path: Destination path for the commit information file.
+        info: The session metadata.
+        nt_ids: Neuron type ID assigned to each recorded neural unit. Ignored for behavior-only sessions, or if unit
+            metrics are supplied (the neuron type ID is included in those metrics).
         trial_info: Information on each trial rep presented during session, keyed by the Maestro data file name.
-        protocols: The list of distinct Maestro trial protocols (vs individual reps) presented during session.
-        units: The list of neural units recorded during the session. Will be empty list for behavioral session.
+            Provided after the preprocessing phase.
+        protocols: The list of distinct Maestro trial protocols (vs individual reps) presented during session. Provided
+            after the the preprocessing phase.
+        units: Metrics (including neuron type ID) for each neural unit recorded during the session. Provided after the
+            preprocessing phase. Ignored for behavior-only sessions.
     Raises:
-        Exception if operation fails for any reason.
+        Exception: If operation fails for any reason.
     """
     try:
-        session_meta_raw = session_meta.to_bytes()
-        json_trial_info = dict()
-        for k, tinfo in trial_info.items():
-            json_trial_info[k] = [tinfo.file_index, tinfo.duration, tinfo.header_timestamp, tinfo.omniplex_start,
-                                  tinfo.omniplex_stop, tinfo.proto_index, tinfo.proto_hash]
-        trial_info_raw = json.dumps(json_trial_info).encode()
-        hdr_raw = struct.pack("<5i", _SESSION_PREPROC_VERSION, len(session_meta_raw), len(trial_info_raw),
-                              len(protocols), len(units))
+        info_raw = info.to_bytes()
+        nt_ids_raw = json.dumps(nt_ids).encode() if ((info.number_of_units > 0) and (units is None)) else None
+        trial_info_raw: Optional[bytes] = None
+        if trial_info:
+            json_trial_info = dict()
+            for k, tinfo in trial_info.items():
+                json_trial_info[k] = [
+                    tinfo.file_index, tinfo.duration, tinfo.header_timestamp, tinfo.omniplex_start,
+                    tinfo.omniplex_stop, tinfo.proto_index, tinfo.proto_hash
+                ]
+            trial_info_raw = json.dumps(json_trial_info).encode()
+        hdr_raw = struct.pack("<6i", _COMMIT_INFO_VERSION, len(info_raw),
+                              len(nt_ids_raw) if (nt_ids_raw is not None) else 0,
+                              len(trial_info_raw) if (trial_info_raw is not None) else 0,
+                              len(protocols) if (protocols is not None) else 0,
+                              len(units) if ((info.number_of_units > 0) and (units is not None)) else 0)
         with open(file_path, 'wb') as f:
             f.write(hdr_raw)
-            f.write(session_meta_raw)
-            f.write(trial_info_raw)
-            for p in protocols:
-                proto_raw = p.to_bytes()
-                f.write(struct.pack('<i', len(proto_raw)))
-                f.write(proto_raw)
-            for u in units:
-                unit_raw = u.to_bytes()
-                f.write(struct.pack('<i', len(unit_raw)))
-                f.write(unit_raw)
+            f.write(info_raw)
+            if nt_ids_raw is not None:
+                f.write(nt_ids_raw)
+            if trial_info_raw is not None:
+                f.write(trial_info_raw)
+            if protocols is not None:
+                for p in protocols:
+                    proto_raw = p.to_bytes()
+                    f.write(struct.pack('<i', len(proto_raw)))
+                    f.write(proto_raw)
+            if (info.number_of_units > 0) and (units is not None):
+                for u in units:
+                    unit_raw = u.to_bytes()
+                    f.write(struct.pack('<i', len(unit_raw)))
+                    f.write(unit_raw)
     except Exception as e:
-        emsg = f"Failed to write preprocessing file - {str(e)}"
+        emsg = f"Failed to write commit information file - {str(e)}"
         raise Exception(emsg)
 
 
-def _read_session_preprocessing_file(file_path: Path) -> \
-        Tuple[SessionMetaData, Dict[str, _TrialInfo], List[maestro.Protocol], List[OmniplexUnit]]:
+def _read_commit_info_file(file_path: Path) -> \
+        Tuple[SessionInfo, List[int], Dict[str, _TrialInfo], List[maestro.Protocol], List[OmniplexUnit]]:
     """
-    Read the contents of a file previously written by `_write_sesssion_preprocessing_file()`.
+    Read the binary session commit information file, as previously written by `_write_commit_info_file()`.
+
+    The information contained in the file and returned by this method varies depending on the current phase of the
+    commit workflow and whether or not any neural units were recorded during the session:
+        - The session metadata is always present.
+        - The neuron type ID list is non-empty only after initialization and before preprocessing has finished -- and
+          only if neural units were recorded.
+        - The trial timing information dictionary and trial protocols list are non-empty only after preprocessing has
+          completed.
+        - The unit metrics list is empty only after preprocessing has finished -- and only if neural units were
+          recorded during the session.
 
     Args:
         file_path: Source path for the session preprocessing file.
     Returns:
-        A 4-tuple: the session metadata object; a dictionary with information on each trial rep presented during
-            session, keyed by the Maestro data file name; the list of distinct Maestro trial protocols (vs individual
-            reps) presented; and the list of neural units recorded during the session (empty for behavioral sessions).
+        A 5-tuple: session metadata; the list of neuron type IDs assigned to the recorded neurol units; a dictionary
+            with information on each trial rep presented during session, keyed by the Maestro data file name; the list
+            of distinct Maestro trial protocols (vs individual reps) presented; and the list of neural unit metrics for
+            the recorded neural units. As described above, some of these may be empty depending on the phase of the
+            commit job and whether or not neural units were recorded.
     Raises:
         Exception: If operation fails for any reason.
     """
     try:
         with open(file_path, 'rb') as f:
-            hdr_size = struct.calcsize("<5i")
+            hdr_size = struct.calcsize("<6i")
             hdr_raw = f.read(hdr_size)
             if (not hdr_raw) or (len(hdr_raw) != hdr_size):
                 raise Exception('Hit EOF unexpectedly while reading file header')
-            v, meta_size, tinfo_size, num_proto, num_units = struct.unpack("<5i", hdr_raw)
-            if v != _SESSION_PREPROC_VERSION:
+            v, info_size, nt_id_size, tinfo_size, num_proto, num_units = struct.unpack("<6i", hdr_raw)
+            if v != _COMMIT_INFO_VERSION:
                 raise Exception('Bad file version')
-            if (meta_size < 0) or (tinfo_size < 0) or (num_proto < 0) or (num_units < 0):
+            if (info_size < 0) or (nt_id_size < 0) or (tinfo_size < 0) or (num_proto < 0) or (num_units < 0):
                 raise Exception('Invalid file header')
 
-            meta_raw = f.read(meta_size)
-            if (not meta_raw) or (len(meta_raw) != meta_size):
+            info_raw = f.read(info_size)
+            if (not info_raw) or (len(info_raw) != info_size):
                 raise Exception('Hit EOF unexpectedly while reading session metadata')
-            session_meta = SessionMetaData.from_bytes(meta_raw)
+            info = SessionInfo.from_bytes(info_raw)
 
-            trial_info_raw = f.read(tinfo_size)
-            if (not trial_info_raw) or (len(trial_info_raw) != tinfo_size):
-                raise Exception('Hit EOF unexpectedly while reading trial reps info')
-            json_trial_info = json.loads(trial_info_raw.decode())
+            nt_ids = []
+            if nt_id_size > 0:
+                nt_ids_raw = f.read(nt_id_size)
+                if (not nt_ids_raw) or (len(nt_ids_raw) != nt_id_size):
+                    raise Exception('Hit EOF unexpectedly while reading neuron type ID list')
+                nt_ids = json.loads(nt_ids_raw.decode())
+
             trial_info: Dict[str, _TrialInfo] = dict()
-            for k, v in json_trial_info.items():
-                trial_info[k] = _TrialInfo(file_index=v[0], duration=v[1], header_timestamp=v[2], omniplex_start=v[3],
-                                           omniplex_stop=v[4], proto_index=v[5], proto_hash=v[6])
+            if tinfo_size > 0:
+                trial_info_raw = f.read(tinfo_size)
+                if (not trial_info_raw) or (len(trial_info_raw) != tinfo_size):
+                    raise Exception('Hit EOF unexpectedly while reading trial reps info')
+                json_trial_info = json.loads(trial_info_raw.decode())
+                for k, v in json_trial_info.items():
+                    trial_info[k] = _TrialInfo(file_index=v[0], duration=v[1], header_timestamp=v[2],
+                                               omniplex_start=v[3], omniplex_stop=v[4], proto_index=v[5],
+                                               proto_hash=v[6])
 
             int_sz = struct.calcsize("<i")
             protocols: List[maestro.Protocol] = list()
-            for _ in range(num_proto):
-                sz_raw = f.read(int_sz)
-                if (not sz_raw) or (len(sz_raw) != int_sz):
-                    raise Exception('Hit EOF unexpectedly in trial protocols section')
-                proto_raw_sz, = struct.unpack("<i", sz_raw)
-                proto_raw = f.read(proto_raw_sz)
-                if (not proto_raw) or (len(proto_raw) != proto_raw_sz):
-                    raise Exception('Hit EOF unexpectedlyin trial protocols section')
-                protocols.append(maestro.Protocol.from_bytes(proto_raw))
+            if num_proto > 0:
+                for _ in range(num_proto):
+                    sz_raw = f.read(int_sz)
+                    if (not sz_raw) or (len(sz_raw) != int_sz):
+                        raise Exception('Hit EOF unexpectedly in trial protocols section')
+                    proto_raw_sz, = struct.unpack("<i", sz_raw)
+                    proto_raw = f.read(proto_raw_sz)
+                    if (not proto_raw) or (len(proto_raw) != proto_raw_sz):
+                        raise Exception('Hit EOF unexpectedlyin trial protocols section')
+                    protocols.append(maestro.Protocol.from_bytes(proto_raw))
 
             units: List[OmniplexUnit] = list()
-            for _ in range(num_units):
-                sz_raw = f.read(int_sz)
-                if (not sz_raw) or (len(sz_raw) != int_sz):
-                    raise Exception('Hit EOF unexpectedly in neural units section')
-                unit_raw_sz, = struct.unpack("<i", sz_raw)
-                unit_raw = f.read(unit_raw_sz)
-                if (not unit_raw) or (len(unit_raw) != unit_raw_sz):
-                    raise Exception('Hit EOF unexpectedly while reading a trial protocol')
-                units.append(OmniplexUnit.from_bytes(unit_raw))
+            if num_units > 0:
+                for _ in range(num_units):
+                    sz_raw = f.read(int_sz)
+                    if (not sz_raw) or (len(sz_raw) != int_sz):
+                        raise Exception('Hit EOF unexpectedly in neural units section')
+                    unit_raw_sz, = struct.unpack("<i", sz_raw)
+                    unit_raw = f.read(unit_raw_sz)
+                    if (not unit_raw) or (len(unit_raw) != unit_raw_sz):
+                        raise Exception('Hit EOF unexpectedly while reading a trial protocol')
+                    units.append(OmniplexUnit.from_bytes(unit_raw))
 
-        return session_meta, trial_info, protocols, units
+        return info, nt_ids, trial_info, protocols, units
     except Exception as e:
-        emsg = f"Failed to read preprocessing file - {str(e)}"
+        emsg = f"Failed to read commit information file - {str(e)}"
         raise Exception(emsg)

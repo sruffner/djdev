@@ -264,6 +264,11 @@ class SessionInfo:
         """ Total number of Maestro trials recorded during the experiment. """
         return self._info['num_trials']
 
+    @number_of_trials.setter
+    def number_of_trials(self, n: int) -> None:
+        """ Set the total number of Maestro trials recorded during the experiment. Intended for internal use only. """
+        self._info['num_trials'] = max(1, n)
+
     @property
     def number_of_units(self) -> int:
         """ Number of distinct neural units recorded during the experiment. 0 for behavioral-only sessions. """
