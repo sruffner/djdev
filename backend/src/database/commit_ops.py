@@ -1948,7 +1948,7 @@ def finish_commit_job(job_id: str) -> bool:
            subject's ID, <D> is the experiment date as an ISO-formatted string 'YYYY-MM-DD', and <F> is the integer
            session suffix.
 
-        7. Lastly, the completed session commit is recorded in the database operations log. This single log entry (along
+        7. The completed session commit is recorded in the database operations log. This single log entry (along
            with the ZIP file just stored in the backing repository) accounts for all of the database insertions required
            to commit the data from the experiment session.
 
@@ -2084,6 +2084,7 @@ def finish_commit_job(job_id: str) -> bool:
             _background_job_update(job_id, error_msg, CommitStateEnum.FAIL)
         except Exception:
             pass
+        zip_path.unlink(missing_ok=True)   # always make sure large archive file is deleted from local storage!
         return False
 
     # here's where it all happens: the database inserts, rollback on failure, progress messages and check for
@@ -2095,6 +2096,7 @@ def finish_commit_job(job_id: str) -> bool:
             _background_job_update(job_id, error_msg, CommitStateEnum.FAIL)
         except Exception:
             pass
+        zip_path.unlink(missing_ok=True)  # always make sure large archive file is deleted from local storage!
         return False
     added_proto_hashes = [p['proto_hash'] for p in commit_mgr.trial_protocols()]
 
@@ -2123,8 +2125,14 @@ def finish_commit_job(job_id: str) -> bool:
             raise Exception(res)
         commit_logged = True
 
+        # we don't need the ZIP in local storage any more -- delete it
+        zip_path.unlink(missing_ok=True)
+
         _background_job_update(job_id, "Done!", CommitStateEnum.DONE)
     except Exception as e:
+        # on failure, remove the archive ZIP from local storage (in case committer doesn't check job status for a while)
+        zip_path.unlink(missing_ok=True)
+
         # if the exception occurs AFTER we've logged the session commit, don't rollback. Technically, everything is
         # OK with the database and repository -- something went wrong with Redis at the worst possible time!
         if commit_logged:

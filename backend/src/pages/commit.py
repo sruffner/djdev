@@ -893,7 +893,7 @@ def _layout_session_metadata_card() -> Tuple[dbc.Card, Optional[str]]:
             }
         },
         editable=True,
-        row_selectable='single',
+        row_selectable=False,
         cell_selectable=False,
         selected_rows=[],
         style_header={'fontWeight': 'bold'},
@@ -907,6 +907,10 @@ def _layout_session_metadata_card() -> Tuple[dbc.Card, Optional[str]]:
         css=[],
         style_table={'height': '300px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
     )
+    nt_div_with_dropdown_container = html.Div([
+        nt_table,
+        html.Div(id=f"{_NT_TABLE_ID}-container")
+    ])
 
     source_options = attribute_info(DBTable.SESSION_EPHYS, 'ephys_src').options
     rec_src_group = dbc.InputGroup([
@@ -925,16 +929,15 @@ def _layout_session_metadata_card() -> Tuple[dbc.Card, Optional[str]]:
         dbc.Input(id=_PROBE_RATE_INPUT_ID, disabled=True, type='number', minlength=2, maxlength=10, value=40000)
     ], size='sm')
     probe_x_group = dbc.InputGroup([
-        dbc.InputGroupText("Probe Location: "),
-        dbc.InputGroupText("X (mm)"),
+        dbc.InputGroupText("Probe X (mm)"),
         dbc.Input(id=_PROBE_X_INPUT_ID, disabled=True, type='number', minlength=2, maxlength=10, value=10)
     ], size='sm')
     probe_y_group = dbc.InputGroup([
-        dbc.InputGroupText("Y (mm)"),
+        dbc.InputGroupText("Probe Y (mm)"),
         dbc.Input(id=_PROBE_Y_INPUT_ID, disabled=True, type='number', minlength=2, maxlength=10, value=10)
     ], size='sm')
     probe_z_group = dbc.InputGroup([
-        dbc.InputGroupText("Depth (mm)"),
+        dbc.InputGroupText("Probe Depth (mm)"),
         dbc.Input(id=_PROBE_Z_INPUT_ID, disabled=True, type='number', minlength=2, maxlength=10, value=10)
     ], size='sm')
     initial_value = brain_areas[0]['ba_id'] if (len(brain_areas) > 0) else None
@@ -951,20 +954,20 @@ def _layout_session_metadata_card() -> Tuple[dbc.Card, Optional[str]]:
     ], class_name='mx-1 mb-2')
 
     unit_rows = [
-        dbc.Row(dbc.Col(num_units_group), class_name='mx-1 mb-2'),
-        dbc.Row(dbc.Col(nt_table), class_name='mx-1 mb-2')
+        dbc.Row(dbc.Col(num_units_group, width="auto"), class_name='mx-1 mb-2'),
+        dbc.Row(dbc.Col(nt_div_with_dropdown_container), class_name='mx-1 mb-2')
     ]
     ephys_rows = [
-        dbc.Row(dbc.Col(brain_area_group), class_name='mx-1 mb-2'),
-        dbc.Row(dbc.Col(rec_src_group), class_name='mx-1 mb-2'),
-        dbc.Row(dbc.Col(probe_type_group), class_name='mx-1 mb-2'),
-        dbc.Row(dbc.Col(rate_group), class_name='mx-1 mb-2'),
-        dbc.Row(dbc.Col(probe_x_group), class_name='mx-1 mb-2'),
-        dbc.Row(dbc.Col(probe_y_group), class_name='mx-1 mb-2'),
-        dbc.Row(dbc.Col(probe_z_group), class_name='mx-1 mb-2')
+        dbc.Row(dbc.Col(brain_area_group, width="auto"), class_name='mx-1 mb-3'),
+        dbc.Row(dbc.Col(rec_src_group, width="auto"), class_name='mx-1 mb-3'),
+        dbc.Row(dbc.Col(probe_type_group, width="auto"), class_name='mx-1 mb-3'),
+        dbc.Row(dbc.Col(rate_group, width="auto"), class_name='mx-1 mb-3'),
+        dbc.Row(dbc.Col(probe_x_group, width="auto"), class_name='mx-1 mb-3'),
+        dbc.Row(dbc.Col(probe_y_group, width="auto"), class_name='mx-1 mb-3'),
+        dbc.Row(dbc.Col(probe_z_group, width="auto"), class_name='mx-1 mb-3')
     ]
 
-    row_4 = dbc.Row([dbc.Col([unit_rows], width=3), dbc.Col([ephys_rows], width=9)], class_name='mx-1 mt-2')
+    row_4 = dbc.Row([dbc.Col(unit_rows, width=6), dbc.Col(ephys_rows, width=6)], class_name='mx-1 mt-2')
 
     return dbc.Card([row_1, row_2, row_3, divider, row_4], class_name='mt-2'), err_msg
 

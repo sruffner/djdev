@@ -90,8 +90,9 @@ def upload_file(file_path: Path, key: str, log_func: Union[bool, Callable] = Tru
     Upload the specified file to the portal's backing repository.
 
     All files are stored in the repository under file path-like keys and must match one of these formats: '/logs/*' for
-    log files, '/downloads/*' for experiment data files prepared in response to download requests, and '/repo/*/*' for
-    session archive ZIP files.
+    log files, '/downloads/*' for experiment data files prepared in response to download requests, '/staging/*/*' for
+    session archive ZIP files that are temporarily stored in the repository prior to being committed to the portal
+    database, and '/repo/*/*' for the archive ZIPs of all committed experiment sessions.
 
     Args:
         file_path: File system path for the target file. Must exist.
@@ -115,8 +116,9 @@ def upload_file(file_path: Path, key: str, log_func: Union[bool, Callable] = Tru
 def _validate_key_format(key: str) -> bool:
     """
     Check that specified S3 object key conforms to the format expected for any file stored in the portal repository. By
-    convention, the key must always start with a '/logs', '/downloads', or '/repo'. Keys under 'repo' will have 3 path
-    parts (/repo/username/file.zip), while keys under the other 2 folders have 2 path parts.
+    convention, the key must always start with a '/logs', '/downloads', '/staging', or '/repo'. Keys under 'repo' and
+    'staging' will have 3 path parts (/repo/*/*.zip, /staging/*/*.zip), while keys under the other 2 folders have only
+    2 path parts.
 
     Args:
         key: The object key.
@@ -127,7 +129,8 @@ def _validate_key_format(key: str) -> bool:
     try:
         parts = key.split('/')
         n, p1 = len(parts), parts[1]
-        ok = (parts[0] == '') and (((n == 3) and (p1 in ['logs', 'downloads'])) or ((n == 4) and (p1 == 'repo')))
+        ok = (parts[0] == '') and (((n == 3) and (p1 in ['logs', 'downloads'])) or
+                                   ((n == 4) and (p1 in ['repo', 'staging'])))
     except Exception:
         pass
     return ok
