@@ -250,8 +250,8 @@ def initialize_multipart_upload(file_sz: int, key: str) -> Tuple[bool, str, int,
 
     Note the calls to the associated methods `abort_multipart_upload` and `finish_multipart_upload`.
 
-    The method only supports uploading a file >= 10MB in size. (For a smaller file, acquire a single presigned URL to
-    upload the entire file in one transfer.) Chunk size will depend on the total file size, but will  max out at 100MB
+    The method only supports uploading a file >= 1MB in size. (For a smaller file, acquire a single presigned URL to
+    upload the entire file in one transfer.) Chunk size will depend on the total file size, but will max out at 100MB
     for file uploads of 300MB or more. The presigned URLs will expire in one hour, so the file must be uploaded in its
     entirety within that time frame.
 
@@ -263,8 +263,9 @@ def initialize_multipart_upload(file_sz: int, key: str) -> Tuple[bool, str, int,
             K is the file chunk size in bytes (use for all file chunks except the last), and L is the list of presigned
             part upload URLs.
     """
-    # TODO: Validate key
-    if file_sz < 10*MB:
+    if not _validate_key_format(key):
+        return False, "Invalid key for file object repository", -1, []
+    if file_sz < 1*MB:
         return False, "File size is too small for multipart upload", -1, []
     logger = app_log.get_application_logger()
     try:

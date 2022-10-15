@@ -990,6 +990,9 @@ class Route:
      - `Route.METADATA_TABLE`: API route to retrieve the contents of one of the small metadata tables in the portal
        database.
      - `Route.NEURONS`: API route to search portal database for comparable neural units satisfying a set of filters.
+     - `Route.COMMIT`: API route to start a new session commit job, complete (or abort) the multipart upload of the
+       session archive to the portal repo in S3, monitor the progress of any pending commit jobs started by the user,
+       cancel a commit in progress, and remove a failed or completed commit job from the job registry.
     """
     AUTHENTICATE: Final[str] = '/api'
     SESSIONINFO: Final[str] = '/api/sessions'
@@ -1000,10 +1003,11 @@ class Route:
     SESSION_PROTOCOL_REPS: Final[str] = '/api/session/protocol/reps'
     METADATA_TABLE: Final[str] = '/api/metadata'
     NEURONS: Final[str] = '/api/neurons'
+    COMMIT: Final[str] = '/api/commit'
 
     _KNOWN_ROUTES: List[str] = [
         AUTHENTICATE, SESSIONINFO, SESSION_NEURONS, SESSION_PROTOCOLS,
-        SESSION_TRIAL, SESSION_BLOCK, SESSION_PROTOCOL_REPS, METADATA_TABLE, NEURONS
+        SESSION_TRIAL, SESSION_BLOCK, SESSION_PROTOCOL_REPS, METADATA_TABLE, NEURONS, COMMIT
     ]
     """ List of all supported API routes. """
 
@@ -1052,7 +1056,8 @@ class Route:
                                 ['session_key', 'proto_hash', 'completed', 'unit_ids', 'what']),
         METADATA_TABLE: ('**metadata_table**', ['table']),
         NEURONS: ('**neurons**', ['min_spikes', 'min_snr', 'min_rate', 'neuron_type', 'subj_id', 'study_title',
-                                  'proto_hash', 'min_complete'])
+                                  'proto_hash', 'min_complete']),
+        COMMIT: ('**commit**', ['action', 'session', 'unit_types', 'size', 'job_id', 'parts'])
     }
     """
     Maps API route name to a tuple (D, L), where D is a short description of the API function and L is a list of
@@ -1060,21 +1065,32 @@ class Route:
     and L will be empty for any API that has no request parameters.
     """
 
-    _ROUTE_TO_RESP_INFO: Dict[str, Tuple[str, Type, bool]] = {
-        AUTHENTICATE: (None, None, None),
-        SESSIONINFO: ('sessions', SessionInfo, True),
-        SESSION_NEURONS: ('neurons', NeuronInfo, True),
-        SESSION_PROTOCOLS: ('protocols', Protocol, True),
-        SESSION_TRIAL: ('trial', TrialRep, False),
-        SESSION_BLOCK: ('trials', TrialRep, True),
-        SESSION_PROTOCOL_REPS: ('trials', TrialRep, True),
-        METADATA_TABLE: ('metatable', MetadataTable, False),
-        NEURONS: ('neurons', NeuronInfo, True)
+    _ROUTE_TO_RESP_INFO: Dict[str, Tuple[Optional[str], Optional[Type], Optional[bool], Optional[List[str]]]] = {
+        AUTHENTICATE: (None, None, None, ['token', 'expires_in']),
+        SESSIONINFO: ('sessions', SessionInfo, True, None),
+        SESSION_NEURONS: ('neurons', NeuronInfo, True, None),
+        SESSION_PROTOCOLS: ('protocols', Protocol, True, None),
+        SESSION_TRIAL: ('trial', TrialRep, False, None),
+        SESSION_BLOCK: ('trials', TrialRep, True, None),
+        SESSION_PROTOCOL_REPS: ('trials', TrialRep, True, None),
+        METADATA_TABLE: ('metatable', MetadataTable, False, None),
+        NEURONS: ('neurons', NeuronInfo, True, None),
+        COMMIT: (None, None, None, ['action', 'job_id', 'urls', 'chunk_size', 'jobs', 'removed'])
     }
     """ 
-    Maps API route name to a tuple (K, T, L), where K is the string key for the response field holding the object(s)
-    returned; T is the object type; L==True if the response field is a list of objects of type T, else the response
-    field is just an object of type T
+    Maps API route name to a tuple (K, T, L, H), which defines the structure of the response from that endpoint. 
+    
+    The response byte stream starts with a JSON-encoded "header dictionary" with fields 'route' and 'version', plus
+    additional fields if the endpoint returns response data in the header. Alternatively, an endpoint returns a single
+    object or list of objects following the header. Each such object is associated with a class implementing the 
+    methods to_bytes() and from_bytes() to convert the object to a byte stream and back again.
+    
+    If the endpoint returns response data in the header, then K, T and L are None, and H is the list of all possible
+    response fields that may appear in the header (depending on the request, only a subset of those fields may be
+    included in the response). If, instead, the endpoint returns a response object or list of object, then H is None,
+    and K is the string key in the response content dict that holds the response object or object list; T is the object 
+    type; L==True if the response field is a list of objects of type T, else the response field is just an object of 
+    type T.
     """
 
     @classmethod
@@ -1095,22 +1111,23 @@ class Route:
         try:
             out = bytearray()
             hdr: Dict[str, Any] = dict(route=route, version=API_VERSION)
-            obj_key, obj_class, is_list = None, None, False
+            obj_key, obj_class, is_list, hdr_keys = None, None, False, None
             if not cls.is_supported_api(route):
                 raise ValueError(f"Unsupported API endpoint: {route}")
-            elif 'error' in kwargs:
+            if 'error' in kwargs:
                 hdr['error'] = kwargs['error']
-            elif route == cls.AUTHENTICATE:
-                hdr['token'], hdr['expires_in'] = kwargs['token'], kwargs['expires_in']
             else:
-                obj_key, obj_class, is_list = cls._ROUTE_TO_RESP_INFO[route]
-            if obj_key:
-                hdr['num_objects'] = len(kwargs[obj_key]) if is_list else 1
+                obj_key, obj_class, is_list, hdr_keys = cls._ROUTE_TO_RESP_INFO[route]
+                if obj_key is None:
+                    hdr.update([(k, kwargs[k]) for k in hdr_keys if k in kwargs])
+                else:
+                    hdr['num_objects'] = len(kwargs[obj_key]) if is_list else 1
+
             raw_hdr = json.dumps(hdr).encode()
             out.extend(struct.pack("<i", len(raw_hdr)))
             out.extend(raw_hdr)
             if obj_key:
-                # NOTE: This relies on fact that all object types returned in an API response implement to_bytes()
+                # NOTE: Relies on fact that the object type implements to_bytes and from_bytes
                 obj_list: List[Any] = kwargs[obj_key] if is_list else [kwargs[obj_key]]
                 for o in obj_list:
                     raw_object = o.to_bytes()
@@ -1148,24 +1165,22 @@ class Route:
                 raise ValueError('Route mismatch in response!')
             elif resp['version'] != API_VERSION:
                 raise ValueError(f"Invalid API version in response: {resp['version']}")
-            elif route == Route.AUTHENTICATE:
-                if not all([(k in resp) for k in ['token', 'expires_in']]):
-                    raise KeyError(f"Missing one or more keys in response")
-                return resp
             elif 'error' in resp:
                 return resp
 
-            # NOTE: This relies on fact that all object types returned in an API response implement from_bytes()
-            obj_key, obj_class, is_list = cls._ROUTE_TO_RESP_INFO[route]
-            num_objects = resp['num_objects']
-            obj_list: List[obj_class] = list()
-            for i in range(num_objects):
-                info_sz, = struct.unpack_from('<i', raw, offset)
-                offset += int_sz
-                # noinspection PyUnresolvedReferences
-                obj_list.append(obj_class.from_bytes(raw[offset:offset + info_sz]))
-                offset += info_sz
-            resp[obj_key] = obj_list if is_list else obj_list[0]
+            # if endpoint returns response data as an object or object list after the header, decode the object(s)
+            # accordingly.
+            obj_key, obj_class, is_list, hdr_keys = cls._ROUTE_TO_RESP_INFO[route]
+            if obj_key is not None:
+                num_objects = resp['num_objects']
+                obj_list: List[obj_class] = list()
+                for i in range(num_objects):
+                    info_sz, = struct.unpack_from('<i', raw, offset)
+                    offset += int_sz
+                    # noinspection PyUnresolvedReferences
+                    obj_list.append(obj_class.from_bytes(raw[offset:offset + info_sz]))
+                    offset += info_sz
+                resp[obj_key] = obj_list if is_list else obj_list[0]
             return resp
         except Exception as e:
             raise APISerializeError(cause=e)

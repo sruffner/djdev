@@ -26,15 +26,22 @@ can take advantage of the API with as little "fuss" as possible. Another module,
 data containers for the various kinds of information that are retrieved by the API, sent "over the wire" in serialized
 form, and reconstituted on the client side.
 
+Committing experiment sessions to the portal database: Authorized users with 'commit'-level access can commit new
+experiment sessions to the portal database interactively through a dedicated web page in the portal application, or they
+can do it programmatically by sending requests to the /api/commit endpoint. One method in the clientside API handles
+initiating a new commit job and uploading the session archive to a staging area in the portal repo in S3; other methods
+allow the Python client to check the progress of any pending commit, and cancel/remove a commit job.
+
 Author: saruffner
 """
 from datetime import date
-from typing import Tuple, Optional, List, Dict, Any
+from typing import Tuple, Optional, List, Dict, Any, Union
 
 from flask import Response, request
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 
 from database.log_ops import log_api_request
+from database.repo import initialize_multipart_upload, abort_multipart_upload
 from sglportalapi.data_containers import SessionInfo, NeuronInfo, Route, MetadataTable, RequestedData
 from app import app
 from config.config import get_config
@@ -42,7 +49,10 @@ from sglportalapi.maestro import Protocol
 from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_any_proj, row_exists
 import database.table_info as ti
 from database.trial_data_ops import trial_protocols_for_session, retrieve_session_trial_rep, retrieve_session_trial_reps
-from database.user_ops import authenticate_portal_user
+from database.user_ops import authenticate_portal_user, get_portal_user_record, COMMIT_ACCESS
+from database.commit_ops import initiate_session_commit, get_pending_commit_jobs_for, commit_job_status, \
+    CommitJobStatus, cancel_or_remove_commit_job, staged_archive_key_in_repo, on_archive_mupload_initialized, \
+    abort_archive_mupload, complete_archive_mupload
 
 
 @app.server.route(Route.AUTHENTICATE, methods=['POST'])
@@ -632,3 +642,308 @@ def _retrieve_neurons(min_spikes: Optional[int], min_snr: Optional[float], min_r
             r['session_date'] = r['session_date'].isoformat()
 
     return 200, '', [NeuronInfo(r) for r in accepted_rows]
+
+
+@app.server.route(Route.COMMIT, methods=['POST'])
+@jwt_required()
+def commit() -> Tuple[Response, int]:
+    """
+    API access point for committing experiment sessions to the portal database, monitoring the progress of pending
+    commit jobs, cancelling a commit job in progress, and removing a failed or completed job from the user's commit
+    job registry.
+
+    The authenticated user sending a request to this endpoint must have commit-level access to the portal.
+
+    The request body is a dictionary that includes the key 'action', defining the action to be taken. The remaining
+    request parameters vary with the action:
+       - Start a new session commit: `dict(action='start', session=Dict[str, Any], unit_types=List[str], size=int)`
+       - Abort the upload of a session archive after starting a new commit: `dict(action='upload_abort', job_id=str)`.
+         This will also cancel the commit job.
+       - Complete the upload of a session archive and start preprocessing the commit: `dict(action='upload_done',
+         job_id=str, parts=List[Dict])`.
+       - Check the progress of a pending commit job, or all jobs belonging to user: `dict(action='status', job_id=str)`.
+       - Cancel and/or remove a pending or completed commit job: `dict(action='remove', job_id=str)`.
+
+    For a full discussion of each of these actions in the commit workflow, the required request parameters, and what
+    is returned in the response if the operation succeeds, see the relevant helper method for each action.
+
+    Returns:
+        Tuple with Flask Response object and HTML status code. On success, the status code is 200 and the response is
+            prepared IAW the specific request. Otherwise, the status code is 400 (bad request) or 501 (internal server
+            error) and the response body is a serialized dictionary including the field 'error' = <error description
+            string>.
+    """
+    # fail if authenticated user lacks commit-level access
+    committer = get_jwt_identity()['username']
+    if not _can_commit_to_database(committer):
+        out = dict(error="You do not have commit access to database")
+        return Response(Route.serialize_api_response(Route.COMMIT, **out)), 400
+
+    action = request.json.get('action')
+    req_args = dict(action=action)
+    if action == 'start':
+        req_args.update([(k, request.json.get(k)) for k in ['session', 'unit_types', 'size']])
+        status_code, err_msg, out = _commit_start(committer=committer, session=req_args['session'],
+                                                  unit_types=req_args['unit_types'], size=req_args['size'])
+    elif action == 'upload_abort':
+        req_args['job_id'] = request.json.get('job_id')
+        status_code, err_msg, out = _commit_upload_abort(committer=committer, job_id=req_args['job_id'])
+    elif action == 'upload_done':
+        req_args.update([(k, request.json.get(k)) for k in ['job_id', 'parts']])
+        status_code, err_msg, out = \
+            _commit_upload_done(committer=committer, job_id=req_args['job_id'], parts=req_args['parts'])
+    elif action == 'status':
+        req_args['job_id'] = request.json.get('job_id')
+        status_code, err_msg, out = _commit_status(committer=committer, job_id=req_args['job_id'])
+    elif action == 'remove':
+        req_args['job_id'] = request.json.get('job_id')
+        status_code, err_msg, out = _commit_cancel_or_remove(committer=committer, job_id=req_args['job_id'])
+    else:
+        status_code, err_msg, out = 400, f"Unrecognized session commit job request: action={action}", {}
+
+    if status_code == 200:
+        log_api_request(route=Route.COMMIT, username=committer, **req_args)
+    else:
+        out = dict(error=err_msg)
+    return Response(Route.serialize_api_response(Route.COMMIT, **out)), status_code
+
+
+def _can_commit_to_database(committer: str) -> bool:
+    """
+    Does the specified user have permission to commit experiment sessions to the portal database?
+
+    Args:
+        committer: Username of portal user that sent a request to the Route.COMMIT endpoint.
+    Returns:
+        True if user has commit-level access, else False.
+    """
+    user_rec = get_portal_user_record(committer)
+    return isinstance(user_rec, dict) and (user_rec['access'] in COMMIT_ACCESS)
+
+
+def _commit_start(committer: str, session: Dict[str, Any], unit_types: List[str], size: int) -> \
+        Tuple[int, str, Dict[str, Any]]:
+    """
+    Helper method for commit() handles the 'start' action, initiating a new session commit job on the portal server.
+
+    Committing experimental data via the commit API endpoint is a multi-step process. First the 'start' request is
+    sent, with the required metadata describing the session, along with the size of the session archive ZIP. Then the
+    archive file must be uploaded directly to a staging area in the portal's S3-based repository. Upon signaling the
+    completion of that upload, the portal server queues a background task to preprocess the archive and commit the
+    experimental data to the database. However, if the session includes any trial protocols requiring manual validation
+    by the user, the commit job enters an interactive review phase, which must be completed on the 'commit' web page;
+    the 'commit' API endpoint does not support the review phase.
+
+    This method handles the first step in the commit workflow -- initiating a new commit job. First, it creates the new
+    commit job and adds it to the requesting user's commit job registry on the server. It then initializes a multipart
+    upload task on S3. The upload task ID is stored in the commit job's status information so that, once the upload has
+    finished, the client side can send the appropriate request to complete the upload, transitioning the commit job to
+    the preprocessing phase.
+
+    The session metadata dictionary has the following keys. Note that, if no neural units were recorded -- a so-called
+    behavior-only session --, then the electrophysiology-related fields may be omitted.
+        - experimenter: str = Username of the registered portal user that conducted the experiment.
+        - subject: str = ID of the experiment subject.
+        - rec_date: str = Recorded date of experiment in string form as 'YYYY-MM-DD'.
+        - suffix: int = Session suffix in 1..9.
+        - rig: str = The experiment rig's ID.
+        - study: str | int = The title or the unique integer ID of the research study to which the experiment belongs.
+        - notes: str = Session notes (free-form).
+        - brain_area: Optional[str | int] = The unique name or integer key identifying the brain area in which units
+          were recorded.
+        - src: Optional[str] = The EPhys recording source. Normally, this is "Omniplex".
+        - probe: Optional[str] = The probe type: 'single', '32-channel', or 'other'.
+        - rate: Optional[float] = The probe sampling rate in Hz. This is typically 40000 for the Omniplex.
+        - x, y, z: Optional[float] = Probe (X,Y) location within implant cylinder, and its insertion depth. In mm.
+
+
+    If successful, the response dictionary will contain the following keys:
+        - action='start'.
+        - job_id: str. The unique ID assigned to the new session commit job on the server.
+        - urls: List[str]. A list of presigned URLs by which the clientside can upload the session archive in sequential
+          "chunks" to a  designated staging area in S3.
+        - chunk_size: int. The size of each file chunk (except the last, typically), in bytes.
+
+    Args:
+        committer: Username of the requester.
+        session: Required session metadata. See description above.
+        unit_types: List L such that L[i] is the neuron type assigned to the i-th recorded neural unit as defined in
+           a pickle file, prepared by the experimenter, that is part of the session ZIP. The length of L must equal the
+           number of recorded units in the archive, and each neuron type name in the list must exist in the portal
+           database.
+        size: The exact size of the session archive file to be uploaded by the client once the commit job is created.
+    Returns:
+        A 3-tuple: (HTTP response status code, error description string, response dictionary). On failure, the status
+            code is 400 (bad request) or 501 (internal server error), an error description is provided, and the response
+            dictionary is empty. On success, the HTTP status code is 200, the error string is empty, and the response
+            dictionary is as described above.
+    """
+    if any([(k not in session) for k in ['experimenter', 'subject', 'rec_date', 'suffix', 'rig', 'study', 'notes']]):
+        return 400, "Incomplete session metadata", {}
+
+    ok, job_id = initiate_session_commit(is_api=True, committer=committer, unit_types=unit_types, **session)
+    if not ok:
+        return 501, job_id, {}
+
+    repo_key = staged_archive_key_in_repo(job_id)
+    ok, upload_id, chunk_size, urls = initialize_multipart_upload(size, repo_key)
+    if not ok:
+        cancel_or_remove_commit_job(job_id)
+        return 501, f"Failed to initialize multipart upload task [{upload_id}]", {}
+
+    err_msg = on_archive_mupload_initialized(job_id, upload_id)
+    if err_msg is not None:
+        abort_multipart_upload(repo_key, upload_id)
+        cancel_or_remove_commit_job(job_id)
+        return 501, err_msg, {}
+
+    return 200, "", dict(action='start', job_id=job_id, chunk_size=chunk_size, urls=urls)
+
+
+def _commit_upload_abort(committer: str, job_id: str) -> Tuple[int, str, Dict[str, Any]]:
+    """
+    Helper method for commit() handles the 'upload_abort' action, aborting the S3 multipart upload task for a session
+    commit job, then removing the commit job from the user's job registry on the portal server.
+
+    If successful, the response dictionary is trivial: dict(action='upload_abort'). A successful return indicates that
+    the upload was successfully terminated AND the commit job deleted.
+
+    Args:
+        committer: Username of the requester.
+        job_id: The commit job ID.
+    Returns:
+        A 3-tuple: (HTTP response status code, error description string, response dictionary). On failure, the status
+            code is 400 (bad request) or 501 (internal server error), an error description is provided, and the response
+            dictionary is empty. On success, the HTTP status code is 200, the error string is empty, and the response
+            dictionary is as described above.
+    """
+    # make sure user owns the commit job
+    job_status: Union[str, CommitJobStatus] = commit_job_status(job_id)
+    if isinstance(job_status, str):
+        return 501, job_status, {}
+    elif job_status.committer != committer:
+        return 501, "You do not own this pending commit job", {}
+
+    err_msg = abort_archive_mupload(job_id)
+    if err_msg is None:
+        _, err_msg, _ = cancel_or_remove_commit_job(job_id)
+
+    if err_msg is not None:
+        return 501, err_msg, {}
+    else:
+        return 200, "", dict(action='upload_abort')
+
+
+def _commit_upload_done(committer: str, job_id: str, parts: List[Dict]) -> Tuple[int, str, Dict[str, Any]]:
+    """
+    Helper method for commit() handles the 'upload_done' action, finalizing the S3 multipart upload task for a session
+    commit job, then tranistioning the commit job to the preprocessing phase.
+
+    If successful, the response dictionary is trivial: dict(action='upload_done'). A successful return indicates that
+    the server has queued a background task to preprocess the session archive.
+
+    Args:
+        committer: Username of the requester.
+        job_id: The commit job ID.
+    Returns:
+        A 3-tuple: (HTTP response status code, error description string, response dictionary). On failure, the status
+            code is 400 (bad request) or 501 (internal server error), an error description is provided, and the response
+            dictionary is empty. On success, the HTTP status code is 200, the error string is empty, and the response
+            dictionary is as described above.
+    """
+    # make sure user owns the commit job
+    job_status: Union[str, CommitJobStatus] = commit_job_status(job_id)
+    if isinstance(job_status, str):
+        return 501, job_status, {}
+    elif job_status.committer != committer:
+        return 501, "You do not own this pending commit job", {}
+
+    err_msg = complete_archive_mupload(job_id, parts)
+    if err_msg is not None:
+        return 501, err_msg, {}
+    else:
+        return 200, "", dict(action='upload_done')
+
+
+def _commit_status(committer: str, job_id: str) -> Tuple[int, str, Dict[str, Any]]:
+    """
+    Helper method for commit() handles the 'status' action, retrieving status information for a specified commit job or
+    for all pending commit jobs belonging to the requesting user.
+
+    On success, the response dictionary has two keys: action='status' and 'jobs'=List[Dict], a list of job status
+    dictionaries. When status for a particular job is requested, 'jobs' is a list containing exactly one status
+    dictionary. When retrieving status on all jobs belonging to the user specified, the result could be an empty list if
+    no jobs were found.
+
+    Per-job status information is returned as a dictionary with the following keys:
+        - job_id: str is the commit job's unique ID.
+        - messages: List[str] is the job's progress history, a list of progress messages in reverse chronological order.
+        - started: float is the timestamp (seconds since the "epoch") when the commit job was initiated.
+        - updated: float is the timestamp when the commit job's progress was last updated.
+        - state: str is a string description of the job's current state.
+        - api_triggered: bool indicates whether the commit job was initiated via the API endpoint rather than the commit
+          web page.
+
+    Args:
+        committer: Username of the requester. Only retrieves status info for commit jobs initiated by this user.
+        job_id: If this is a non-empty string, then retrieves status information for the specified commit job. Else,
+            returns status information on all pending jobs belonging to the user.
+    Returns:
+        A 3-tuple: (HTTP response status code, error description string, response dictionary). On failure, the status
+            code is 400 (bad request) or 501 (internal server error), an error description is provided, and the response
+            dictionary is empty. On success, the HTTP status code is 200, the error string is empty, and the response
+            dictionary is as described above.
+    """
+    if (not isinstance(job_id, str)) or (len(job_id) == 0):
+        jobs: Union[str, List[CommitJobStatus]] = get_pending_commit_jobs_for(committer)
+    else:
+        out = commit_job_status(job_id)
+        jobs: Union[str, List[CommitJobStatus]] = out if isinstance(out, str) else [out]
+
+    if isinstance(jobs, str):
+        return 501, jobs, {}
+    else:
+        status_dicts = list()
+        for j in jobs:
+            if j.committer == committer:
+                status_dicts.append(dict(
+                    job_id=j.id, messages=j.message_history, started=j.started, updated=j.updated,
+                    state=j.state.get_state_descriptor(), api_triggered=j.api_triggered
+                ))
+        return 200, "", dict(action='status', jobs=status_dicts)
+
+
+def _commit_cancel_or_remove(committer: str, job_id: str) -> Tuple[int, str, Dict[str, Any]]:
+    """
+    Helper method for commit() handles the 'remove' action, cancelling the specified session commit job and, if
+    possible, removing it from the user's commit job registry. If the commit job has already completed successfully,
+    this merely removes the job from the user's job registry; the commit is not rolled back.
+
+    If the specified job is still in the upload phase, the S3 multipart upload task associated with the job is
+    aborted to ensure that any already uploaded parts are removed from S3.
+
+    On success, the response dictionary has two keys: action='remove' and 'removed'=bool. If the latter is True, then
+    either the specified commit job was not found, or it was successfully removed. Otherwise, the job is cancelled but
+    could not yet be removed from the server.
+
+    Args:
+        committer: Username of the requester. Users can only cancel/remove their own session commit jobs.
+        job_id: The job ID.
+    Returns:
+        A 3-tuple: (HTTP response status code, error description string, response dictionary). On failure, the status
+            code is 400 (bad request) or 501 (internal server error), an error description is provided, and the response
+            dictionary is empty. On success, the HTTP status code is 200, the error string is empty, and the response
+            dictionary is as described above.
+    """
+    job_status: Union[str, CommitJobStatus] = commit_job_status(job_id)
+    if isinstance(job_status, str):
+        return 501, job_status, {}
+    elif job_status.committer != committer:
+        return 501, "You do not have permission to remove this pending commit job", {}
+    else:
+        # NOTE - if job is in the uploading phase, cancelling the job will also abort the multpart upload task.
+        removed, err_msg, _ = cancel_or_remove_commit_job(job_id)
+        if len(err_msg) > 0:
+            return 501, err_msg, {}
+        else:
+            return 200, "", dict(action='remove', removed=removed)

@@ -10,6 +10,13 @@ analyses. RESTful-like API endpoints are available on the portal server, providi
 arbitrary experimental data sets. To protect data provenance, access to these endpoints requires user authentication
 through a dedicated endpoint, which returns an access token that is supplied in requests to all other API endpoints.
 
+It is also possible to commit an experiment session's worth of recorded data to the portal using the "/api/commit"
+endpoint. The commit workflow was recently redesigned to make it more automated. All metadata required to commit an
+experiment to the portal database now must be supplied **prior** to uploading the session archive; as a result, the
+commit can run to completion on the server without further user input -- unless preprocessing the archive finds one or
+more trial protocols that require manual validation (in the "review" phase). This redesign made API-managed commits
+much more convenient.
+
 This module is essentially a client-side "wrapper" for the API endpoints, intended for use by custom analysis scripts
 -- or within an interactive Python console. It takes care of the details of user authentication, managing the access
 token, preparing and sending the requests to the API and processing the responses. The data returned is generally a
@@ -20,8 +27,10 @@ The server-side implementation of the endpoints is found in the companion module
 
 Author: saruffner
 """
+import sys
 import time
 from datetime import date
+from pathlib import Path
 from typing import Optional, Union, List, Tuple
 
 import requests
@@ -420,3 +429,244 @@ class PortalAccessor:
             return f"Failed to decode server response: {str(e)}"
         except RequestException as e:
             return f"Request failed on send: {str(e)}"
+
+    def commit_start(
+            self, zip_path: Path, unit_types: List[str], experimenter: str, subject: str, rec_date: str, suffix: int,
+            rig: str, study: Union[str, int], notes: str, brain_area: Optional[Union[str, int]] = None,
+            src: Optional[str] = None, probe: Optional[str] = None, rate: Optional[float] = None,
+            x: Optional[float] = None, y: Optional[float] = None, z: Optional[float] = None,
+            show_progress: bool = True) -> Tuple[bool, str]:
+        """
+        Start the process of committing an experiment session's worth of data to the portal database.
+
+        This API provides an alternative to using the portal website directly to initiate a session commit. It is best
+        suited to sessions in which the "review" phase can be skipped, which will be the case if no trial protocol
+        presented during the experiment requires manual validation by the user. [This should be the case so long as
+        every distinct protocol is presented a minimum of 3 times over the course of the session.] For such commits,
+        no further user interaction is required -- unless an error occurs, in which case the experiment session must be
+        resubmitted anyway.
+
+        The method will send a "start commit" request accompanied by the required session metadata and unit types list,
+        then upload the session archive directly to the portal's S3-based repository via a chunked, multipart upload
+        (using a sequence of presigned upload part URLs provided by the portal server). The method will BLOCK until the
+        upload is completed. An "upload_done" request informs the portal server that the multipart upload operation is
+        done, at which point the server will queue a background task to process the archive.
+
+        All session metadata supplied here -- the unit types list, experimenter, subject, etc. -- must be valid and
+        must not correspond to an experiment session that is already committed to the portal or is currently pending.
+        Some metdata requires knowledge of the contents of some of the so-called metadata tables in the database: the
+        neuron type names, the experimenter's username, the subject ID, and so on. The operation will fail if any
+        metadata are invalid, and the error message will indicate the first problem encountered.
+
+        If the operation succeeds, you can use the commit job ID returned to monitor the progress of the commit, and
+        cancel/remove the job if desired. However, once the experiment is fully committed to the database, the commit
+        job is considered "done" and cannot be "rolled back".
+
+        To use this API, you must have "commit"-level access on the portal.
+
+        Args:
+            zip_path: The path to the session archive ZIP.
+            unit_types: A list of length N, where N is the number of neurol units recorded during the experiment.
+                The n-th element specifies a recognized neuron type to be assigned to the n-th unit.
+            experimenter: Username of the registered portal user that conducted the experiment. Note that the
+                experimenter need not be the same as the user committing the experiment session to the database.
+            subject: ID of the subject of the experiment.
+            rec_date: Recording date in ISO format - 'YYYY-MM-DD'.
+            suffix: Session suffix in [1..9].
+            rig: ID of the rig on which experiment was conducted.
+            study: The research study to which experiment belongs -- specify either the study title or the unique
+                integer key identifying the study in the portal database.
+            notes: Session notes. Can be an empty string.
+            brain_area: The region of brain in which neural units were recorded -- specify either the brain area name or
+                the unique integer key identifying it in the portal database. None for behavioral session.
+            src: The electrophysiology recording source. Must be one of 'Omniplex', 'Omniplex clips', 'Plexon MAP',
+                'Maestro Waveform', 'Maestro Spike Ch'; currently, only 'Omniplex' supported. None for behavioral
+                session.
+            probe: The probe type. Must be one of 'single', '32-channel', 'other'. None for behavioral session.
+            rate: The probe sampling rate in Hz. None for behavioral session.
+            x: The X-coordinate of probe location within implant cylinder, in mm. None for behavioral sesion.
+            y: The Y-coordinate of probe location within implant cylinder, in mm. None for behavioral sesion.
+            z: Probe insertion depth in mm. None for behavioral sesion.
+            show_progress: If True, a progress message is updated on the Python console (STDOUT) while the archive is
+                uploaded.
+        Returns:
+            (True, job_id) if archive file is successfully uploaded to the portal and a background job is queued to
+                perform the session commit, where `job_id` is the unique ID assigned to the session commit job on the
+                server. Otherwise: (False, string describing the error).
+        """
+        if not (isinstance(zip_path, Path) and zip_path.is_file()):
+            return False, "Archive file missing or path not specified"
+        zip_size = zip_path.stat()
+
+        if (out := self.authenticate()) is not None:
+            return False, out
+
+        # start the commit job
+        if not isinstance(unit_types, list):
+            unit_types = list()
+        session = dict(experimenter=experimenter, subject=subject, rec_date=rec_date, suffix=suffix,
+                       rig=rig, study=study, notes=notes)
+        if len(unit_types) > 0:
+            session.update(dict(brain_area=brain_area, src=src, probe=probe, rate=rate, x=x, y=y, z=z))
+
+        req_body = dict(action='start', session=session, unit_types=unit_types, size=zip_size)
+        try:
+            response = requests.post(f"{self._base_url}{Route.COMMIT}",
+                                     json=req_body,
+                                     headers={'Authorization': f"Bearer {self._token}"},
+                                     allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
+            content = Route.deserialize_api_response(Route.COMMIT, response.content)
+            if response.status_code != 200:
+                return False, f"Failed to start commit job [{response.status_code}]: {content['error']}"
+        except APISerializeError as e:
+            return False, f"Failed to decode server response: {str(e)}"
+        except RequestException as e:
+            return False, f"Request failed on send: {str(e)}"
+        job_id: str = content['job_id']
+        chunk_size: int = content['chunk_size']
+        urls: List[str] = content['urls']
+
+        # execute multipart upload to transfer session archive file to portal repo in S3
+        upload_error, parts = None, []
+        try:
+            with zip_path.open('rb') as f:
+                if show_progress:
+                    sys.stdout.write("\nStarting upload...")
+                for num, url in enumerate(urls):
+                    part = num + 1
+                    file_data = f.read(chunk_size)
+                    res = requests.put(url, data=file_data)
+                    if res.status_code != 200:
+                        raise Exception(f"Archive upload failed on chunk {part} [{res.status_code}]")
+                    etag = res.headers['ETag']
+                    parts.append({'ETag': etag, 'PartNumber': part})
+                    if show_progress:
+                        sys.stdout.write(f"\r{zip_path.name}: Uploaded {part} of {len(urls)} chunks...")
+                        sys.stdout.flush()
+                if show_progress:
+                    sys.stdout.write(" finishing up.\n")
+        except Exception as e:
+            upload_error = str(e)
+
+        # if an error occurred, abort the multipart upload, which also terminates the commit.
+        if upload_error is not None:
+            req_body = dict(action="upload_abort", job_id=job_id)
+            abort_error = None
+            try:
+                response = requests.post(f"{self._base_url}{Route.COMMIT}",
+                                         json=req_body,
+                                         headers={'Authorization': f"Bearer {self._token}"},
+                                         allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
+                content = Route.deserialize_api_response(Route.COMMIT, response.content)
+                if response.status_code != 200:
+                    abort_error = content['error']
+            except APISerializeError as e:
+                abort_error = f"Failed to decode server response: {str(e)}"
+            except RequestException as e:
+                abort_error = f"Request failed on send: {str(e)}"
+
+            err_msg = f"ERROR: {upload_error}"
+            if abort_error is not None:
+                err_msg = f"{err_msg}\n   Failed to abort multipart upload [{abort_error}]. Contact portal admin."
+            return False, err_msg
+
+        # complete multipart upload on server, transitioning commit job to preprocessing phase.
+        req_body = dict(action="upload_done", job_id=job_id, parts=parts)
+        try:
+            response = requests.post(f"{self._base_url}{Route.COMMIT}",
+                                     json=req_body,
+                                     headers={'Authorization': f"Bearer {self._token}"},
+                                     allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
+            content = Route.deserialize_api_response(Route.COMMIT, response.content)
+            if response.status_code != 200:
+                upload_error = content['error']
+        except APISerializeError as e:
+            upload_error = f"Failed to decode server response: {str(e)}"
+        except RequestException as e:
+            upload_error = f"Request failed on send: {str(e)}"
+
+        if upload_error is not None:
+            return False, f"Failed after archive upload: {upload_error}.\nCheck job status and cancel job."
+        else:
+            return True, job_id
+
+    def commit_status(self, job_id: Optional[str] = None) -> Tuple[bool, Union[str, List[dict]]]:
+        """
+        Retrieve status information for a specified pending commit job or all pending commit jobs belonging to the
+        authenticated portal user.
+
+        You can only use this method to check the progress of session commits that you started, whether using this
+        clientside API or the 'commit' page on the portal's web site. Per-job status information is returned as a
+        dictionary with the following keys:
+            - `job_id [str]`: The commit job's unique ID.
+            - `messages [List[str]]`: The job's progress history, with messages in reverse chronological order.
+            - `started [float]`: The timestamp (seconds since the "epoch") when the commit job was initiated.
+            - `updated [float]`: The timestamp when the commit job's progress was last updated.
+            - `state [str]`: A short description of the job's current state.
+            - `api_triggered [bool]`: Indicates whether the commit job was initiated via this API rather than the
+              'commit' page on the portal web site.
+
+        Args:
+            job_id: The commit job ID, as returned by start_commit(). If an empty string or None, the method will
+                retrieve job status for all of your pending commit jobs (if any).
+        Returns:
+            A 2-tuple (True, jobs), where the `jobs` is a list of job status dictionaries (empty if no jobs found), as
+                described above. On failure, returns (False, error message)
+        """
+        if (out := self.authenticate()) is not None:
+            return False, out
+
+        req_body = dict(action='status', job_id="" if not isinstance(job_id, str) else job_id)
+        try:
+            response = requests.post(f"{self._base_url}{Route.COMMIT}",
+                                     json=req_body,
+                                     headers={'Authorization': f"Bearer {self._token}"},
+                                     allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
+            content = Route.deserialize_api_response(Route.COMMIT, response.content)
+            if response.status_code == 200:
+                return True, content['jobs']
+            else:
+                return True, content['error']
+        except APISerializeError as e:
+            return False, f"Failed to decode server response: {str(e)}"
+        except RequestException as e:
+            return False, f"Request failed on send: {str(e)}"
+
+    def commit_remove(self, job_id: str) -> Tuple[bool, str, bool]:
+        """
+        Cancel and/or remove a pending session commit job on the portal server. You can only remove commit jobs that
+        belong to you; the server will deny the request if the specified job belongs to another portal user.
+
+        If the commit job has failed or completed successfully, this merely removes the completed job from your commit
+        job registry on the server -- a completed commit is NOT rolled back. If the commit job is currently in the
+        upload phase, this will cancel the upload and delete the cancelled job. However, if a background task on the
+        server is either preprocessing the session archive or committing the experiment data to the portal database,
+        the job is cancelled but not removed. The background task will eventually detect the cancellation and stop
+        working, transitioning the job to the "failed" state. At that point, you can call this function again to
+        delete the cancelled job from your commit job registry.
+
+        Args:
+            job_id: The commit job ID, as returned by start_commit().
+        Returns:
+            A 3-tuple (True, "", removed), where removed=True if the specified commit has been deleted, False if the
+                commit was cancelled but not removed because a background task was still working on it. On failure,
+                returns (False, error description, False).
+        """
+        if (out := self.authenticate()) is not None:
+            return False, out, False
+
+        req_body = dict(action='remove', job_id=str(job_id))
+        try:
+            response = requests.post(f"{self._base_url}{Route.COMMIT}",
+                                     json=req_body,
+                                     headers={'Authorization': f"Bearer {self._token}"},
+                                     allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
+            content = Route.deserialize_api_response(Route.COMMIT, response.content)
+            if response.status_code == 200:
+                return True, "", content['removed']
+            else:
+                return False, content['error'], False
+        except APISerializeError as e:
+            return False, f"Failed to decode server response: {str(e)}", False
+        except RequestException as e:
+            return False, f"Request failed on send: {str(e)}", False

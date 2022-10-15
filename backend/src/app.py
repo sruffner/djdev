@@ -93,6 +93,6 @@ def load_authorized_user(username: str) -> Optional[PortalUser]:
     return PortalUser(user_record)
 
 
-# here we define the Flask API endpoints for programmatic retrieval of database content (read-only access)
+# here we define the Flask API endpoints for programmatic retrieval of database content
 # noinspection PyUnresolvedReferences
 from api import endpoints

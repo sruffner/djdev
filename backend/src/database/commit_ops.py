@@ -134,6 +134,7 @@ from werkzeug.security import generate_password_hash
 from config.app_logging import get_application_logger
 from config.config import get_config
 from database import repo
+from database.repo import abort_multipart_upload, finish_multipart_upload
 from sglportalapi import maestro, PL2
 from database.log_ops import log_session_commit, read_log_entries
 from database.table_info import DBTable, AttributeValue
@@ -196,9 +197,10 @@ class CommitStateEnum(DocEnum):
     def can_delete_job_in_this_state(self) -> bool:
         """
         Can commit job be deleted immediately in this state? In any state where a background process could be
-        working on the job, the job should NOT be deleted.
+        working on the job, the job should NOT be deleted. One exception -- cancellation is permitted while the
+        archive is being uploaded
         """
-        return self in [CommitStateEnum.REVIEW, CommitStateEnum.DONE, CommitStateEnum.FAIL]
+        return self in [CommitStateEnum.UPLOADING, CommitStateEnum.REVIEW, CommitStateEnum.DONE, CommitStateEnum.FAIL]
 
     def after_preprocessing(self) -> bool:
         """ Does this commit job state represent any state after the preprocessing phase? """
@@ -207,16 +209,19 @@ class CommitStateEnum(DocEnum):
 
 class CommitJobStatus:
     """ Status information for a session commit job pending or in progress on the lab portal server. """
-    def __init__(self, job_id: str, committer: str, is_api: bool = False, started: Optional[float] = None,
-                 updated: Optional[float] = None, state: CommitStateEnum = CommitStateEnum.UPLOADING,
-                 messages: Optional[List[str]] = None):
+    def __init__(self, job_id: str, committer: str, is_api: bool, mupload_id: Optional[str] = None,
+                 started: Optional[float] = None, updated: Optional[float] = None,
+                 state: CommitStateEnum = CommitStateEnum.UPLOADING, messages: Optional[List[str]] = None):
         """
         Construct a session commit job status object. The commit job ID reflects the primary key of the experiment
         session being committed: <experimenter username>_<subject ID>_<session date ISO>_<session suffix>.
         Args:
             job_id: The job ID.
             committer: The registered portal user that initiated the commit job.
-            is_api: True if job was triggered by portal API endpoint, False if initiated on interactive web page.
+            is_api: True if commit was triggered by an API endpoint dedicated to the purpose; False if it was
+                triggered on the relevant  page in the portal web app.
+            mupload_id: The ID of the multipart upload task by which the session archive is uploaded directly to S3.
+               This applies ONLY to a commit job initiated via the dedicated API endpoint.
             started: Timestamp (seconds since the Epoch) when job was started. If None, use the current time.
             updated: Timestamp when job was last updated. If None, use the value of the 'started' argument.
             state: The current job state.
@@ -227,6 +232,7 @@ class CommitJobStatus:
         self._definition['id'] = job_id
         self._definition['committer'] = committer
         self._definition['is_api'] = is_api
+        self._definition['mupload_id'] = "" if ((not is_api) or (mupload_id is None)) else mupload_id
         self._definition['started'] = started if isinstance(started, float) else time.time()
         self._definition['updated'] = updated if isinstance(updated, float) else self._definition['started']
         self._definition['state'] = state
@@ -246,6 +252,23 @@ class CommitJobStatus:
     def api_triggered(self) -> bool:
         """ True if session commit job was triggered via portal API endpoint rather than via interactive web page. """
         return self._definition['is_api']
+
+    @property
+    def mupload_id(self) -> str:
+        """
+        S3 multipart upload task ID for a session commit job initiated via portal API endpoint. Not applicable to
+        a commit initiated via interactive web page (empty string). Upon leaving the 'upload' phase, the upload ID
+        reads as 'done'.
+        """
+        return self._definition['mupload_id']
+
+    @mupload_id.setter
+    def mupload_id(self, uid: str) -> None:
+        """
+        Sets the ID os the S3 multipart upload ID task for a commit job triggered by a dedicated API endpoint. Has no
+        effect for a commit job initiated via the 'commit' page in the portal web app."""
+        if self.api_triggered:
+            self._definition['mupload_id'] = uid
 
     @property
     def started(self) -> float:
@@ -292,6 +315,8 @@ class CommitJobStatus:
             if len(self._definition['messages']) > PROGRESS_HISTORY_SIZE:
                 self._definition['messages'].pop(PROGRESS_HISTORY_SIZE-1)
         if isinstance(state, CommitStateEnum):
+            if (self._definition['state'] == CommitStateEnum.UPLOADING) and (len(self._definition['mupload_id']) > 0):
+                self._definition['mupload_id'] = 'done' if state == CommitStateEnum.PREPROCESS else 'cancelled'
             self._definition['state'] = state
         self._definition['updated'] = updated if isinstance(updated, float) else time.time()
 
@@ -315,9 +340,10 @@ class CommitJobStatus:
         """
         try:
             d = json.loads(raw.decode())
-            return CommitJobStatus(job_id=d['id'], committer=d['committer'], is_api=d['is_api'],
-                                   started=float.fromhex(d['started']), updated=float.fromhex(d['updated']),
-                                   state=CommitStateEnum(d['state']), messages=d['messages'])
+            return CommitJobStatus(
+                job_id=d['id'], committer=d['committer'], is_api=d['is_api'], mupload_id=d['mupload_id'],
+                started=float.fromhex(d['started']), updated=float.fromhex(d['updated']),
+                state=CommitStateEnum(d['state']), messages=d['messages'])
         except Exception as e:
             raise ValueError(f"Failed to deserialize CommitJobStatus: {str(e)}")
 
@@ -540,9 +566,10 @@ def initiate_session_commit(
     folder, and registers the job in Redis. The pending commit job starts in the "uploading" phase.
 
     Args:
-        is_api: True if session commit was triggered via API request rather than through the commit page on the portal
-            website. The upload stage is handled differently by the `sglportalapi` package vs the Flask/Dash portal
-            frontend.
+        is_api: True if session commit is triggered by a request from the `sglportalapi` package to the 'commit' API
+            endpoint; False if commit was triggerd through the relevant page in the portal web app. In the former case,
+            the clientside will upload the session archive directly to the staging area in the portal's S3-base repo;
+            in the latter case, a React-based uploader component uploads the archive to the portal's local workspace.
         committer: The username of the registered portal user requesting the session commit. The username is only
             checked for validity; it is ASSUMED that the specified user is currently logged-in and has the necessary
             privileges to commit experiment data to the portal.
@@ -889,6 +916,137 @@ def transfer_archive_to_repo(job_id: str) -> bool:
     return True
 
 
+def staged_archive_key_in_repo(job_id: str) -> str:
+    """
+    The bucket key to which a session archive is uploaded in the portal's S3-based repository for the commit job
+    specified.
+    """
+    return f"/staging/{job_id}/{ARCHIVE_FNAME}"
+
+
+def on_archive_mupload_initialized(job_id: str, mupload_id: str) -> Optional[str]:
+    """
+    When a session commit is triggered through the dedicated API endpoint, the endpoint code initializes a multipart
+    upload task so that the clientside code can upload the session archive directly to the staging area in the portal's
+    S3-based repository. This method updates the commit job's status with the upload task ID, which will be needed
+    later on to complete the multipart upload, or abort it if the upload failed.
+
+    Args:
+        job_id: The commit job ID.
+        mupload_id: The multipart upload task ID.
+    Returns:
+        None if successful, else an error message.
+    """
+    try:
+        # get current job status and do checks...
+        conn = get_config().redis_conn
+        job = conn.hget(name=COMMITS, key=job_id)
+        if job is None:
+            _logger.debug(f"Called on a commit job [{job_id}] that does not exist")
+            return "Commit job not found on server"
+        job_status: CommitJobStatus = CommitJobStatus.from_bytes(job)
+        if job_status.state != CommitStateEnum.UPLOADING:
+            _logger.debug(f"Called on a commit job [{job_id}] NOT in upload phase")
+            return "Commit job was not in upload phase"
+        if not job_status.api_triggered:
+            return "Commit job was not API triggered; multipart upload does not apply."
+
+        job_status.mupload_id = mupload_id
+        conn.hset(name=COMMITS, key=job_id, value=job_status.to_bytes())
+
+        return None
+    except Exception as e:
+        _logger.error(str(e), exc_info=True)
+        return "A server error occurred while storing multipart upload ID for API-triggered commit job."
+
+
+def abort_archive_mupload(job_id: str) -> Optional[str]:
+    """
+    Abort the S3 multipart upload task for an API-triggered session commit job. The session commit job is moved to the
+    'failed' state.
+
+    Args:
+        job_id: The commit job ID.
+    Returns:
+        None if successful, else an error message.
+    """
+    try:
+        # get current job status and do checks...
+        conn = get_config().redis_conn
+        job = conn.hget(name=COMMITS, key=job_id)
+        if job is None:
+            _logger.debug(f"Called on a commit job [{job_id}] that does not exist")
+            return "Commit job not found on server"
+        job_status: CommitJobStatus = CommitJobStatus.from_bytes(job)
+        if job_status.state != CommitStateEnum.UPLOADING:
+            _logger.debug(f"Called on a commit job [{job_id}] NOT in upload phase")
+            return "Commit job was not in upload phase"
+        if not job_status.api_triggered:
+            return "Commit job was not API triggered; multipart upload does not apply."
+
+        abort_ok = abort_multipart_upload(staged_archive_key_in_repo(job_id), job_status.mupload_id)
+        msg = f"{'Aborted ' if abort_ok else 'Failed to abort'} archive upload to S3 repo"
+        job_status.on_update(msg=msg, state=CommitStateEnum.FAIL)
+        conn.hset(name=COMMITS, key=job_id, value=job_status.to_bytes())
+
+        return None if abort_ok else f"{msg}. Contact portal admin."
+    except Exception as e:
+        _logger.error(str(e), exc_info=True)
+        return "A server error occurred while aborting multipart upload task for API-triggered commit job."
+
+
+def complete_archive_mupload(job_id: str, parts: List[Dict]) -> Optional[str]:
+    """
+    Complete the S3 multipart upload task for an API-triggered session commit job, then transition the job to the
+    preprocessing phase and queue a background task to handle that work.
+
+    Args:
+        job_id: The commit job ID.
+        parts: List of completed upload parts. Each entry is a dictionary {'ETag': str, 'PartNumber': int}
+            holding the upload part's entity tag (returned in response header when part is uploaded) and part number.
+    Returns:
+        None if successful, else an error message.
+    """
+    try:
+        # get current job status and do checks...
+        conn = get_config().redis_conn
+        job = conn.hget(name=COMMITS, key=job_id)
+        if job is None:
+            _logger.debug(f"Called on a commit job [{job_id}] that does not exist")
+            return "Commit job not found on server"
+        job_status: CommitJobStatus = CommitJobStatus.from_bytes(job)
+        if job_status.state != CommitStateEnum.UPLOADING:
+            _logger.debug(f"Called on a commit job [{job_id}] NOT in upload phase")
+            return "Commit job was not in upload phase"
+        if not job_status.api_triggered:
+            return "Commit job was not API triggered; multipart upload does not apply."
+
+        ok = finish_multipart_upload(staged_archive_key_in_repo(job_id), job_status.mupload_id, parts)
+        msg = f"{'Completed ' if ok else 'Failed to complete'} archive upload to S3 repo"
+        job_status.on_update(msg=msg, state=CommitStateEnum.FAIL if (not ok) else None)
+        conn.hset(name=COMMITS, key=job_id, value=job_status.to_bytes())
+
+        if not ok:
+            return msg
+
+        archive_key = staged_archive_key_in_repo(job_id)
+        sz = repo.file_size(archive_key)
+        if sz == 0:
+            _logger.debug(f"Uploaded archive not found in repo at: {archive_key}")
+            return "Uploaded archive not found in portal repository"
+
+        job_status.on_update(f"Archive uploaded to portal repository in S3. Queued for preprocessing...",
+                             state=CommitStateEnum.PREPROCESS)
+        conn.hset(name=COMMITS, key=job_id, value=job_status.to_bytes())
+
+        job_queue.enqueue(preprocess_commit_job, job_id, job_id=f"{job_id}-preproc", job_timeout='60m')
+
+        return None
+    except Exception as e:
+        _logger.error(str(e), exc_info=True)
+        return "A server error occurred while completing multipart upload task for API-triggered commit job."
+
+
 def on_archive_uploaded_to_repo(job_id: str) -> Union[str, CommitJobStatus]:
     """
     Update a session commit job after uploading the session ZIP archive file to the portal's S3-based repository.
@@ -924,7 +1082,7 @@ def on_archive_uploaded_to_repo(job_id: str) -> Union[str, CommitJobStatus]:
             _logger.debug(f"Staging folder for commit job [{job_id}] not found in portal workspace")
             return "Staging folder for commit job not found"
 
-        archive_key = f"/staging/{job_id}/archive.zip"
+        archive_key = staged_archive_key_in_repo(job_id)
         sz = repo.file_size(archive_key)
         if sz == 0:
             _logger.debug(f"Uploaded archive not found in repo at: {archive_key}")
@@ -970,8 +1128,12 @@ def cancel_or_remove_commit_job(job_id: str) -> Tuple[bool, str, Optional[Commit
         # remove job now if background process is not working on it. Else, if not already cancelled, move job to that
         # state and append a progress message in Redis
         if job_status.state.can_delete_job_in_this_state():
+            # when an API-triggered commit is cancelled in the upload phase, be sure to abort the S3 multipart upload
+            archive_on_repo = staged_archive_key_in_repo(job_id)
+            if job_status.state == CommitStateEnum.UPLOADING and job_status.api_triggered:
+                repo.abort_multipart_upload(archive_on_repo, job_status.mupload_id)
+
             _remove_job_subfolder(job_id)
-            archive_on_repo = f"/staging/{job_id}/{ARCHIVE_FNAME}"
             if repo.file_size(archive_on_repo) > 0:
                 repo.delete_file(archive_on_repo)
 
@@ -988,7 +1150,7 @@ def cancel_or_remove_commit_job(job_id: str) -> Tuple[bool, str, Optional[Commit
         return False, "", job_status
     except Exception as e:
         _logger.error(f"Failed to cancel or remove commit job {job_id}: {str(e)}", exc_info=True)
-        return False, "An error occurred while trying to cancel commit job on server", None
+        return False, "An error occurred while trying to cancel/remove commit job on server", None
 
 
 def preprocess_commit_job(job_id: str) -> bool:
@@ -1069,39 +1231,43 @@ def preprocess_commit_job(job_id: str) -> bool:
         except Exception:
             pass
 
+    archive_on_repo = staged_archive_key_in_repo(job_id)
+    fail_msg, job_found, perform_cleanup = "", False, False
     try:
         if _background_job_update(job_id, f"Starting preprocessing phase..."):
-            return False
+            raise Exception("Operation cancelled")
 
         # verify job status and local staging folder
         job_status = commit_job_status(job_id)
-        if isinstance(job_status, str):
+        job_found = not isinstance(job_status, str)
+        if not job_found:
             _logger.error(f"Failed to retrieve job status from Redis for {job_id}")
+            perform_cleanup = True
             return False
         elif job_status.state != CommitStateEnum.PREPROCESS:
             _logger.error(f"Commit job is not in the correct stage for background preprocessing: {job_status.state}")
+            try:
+                _background_job_update(job_id, "Preprocessing task aborted; out of sync?")
+            except Exception:
+                pass
             return False
         elif not commit_info_path.is_file():
-            _logger.error(f"Staging folder or commit information file missing for job {job_id}")
-            _background_job_update(job_id, "Error: Missing staging folder for job on server", CommitStateEnum.FAIL)
-            return False
+            _logger.error(f"Commit job information file for job {job_id} not found at: {str(commit_info_path)}")
+            raise Exception("Missing commit information file in workspace staging area")
 
         # download archive to staging folder
-        archive_on_repo = f"/staging/{job_id}/{ARCHIVE_FNAME}"
         if repo.file_size(archive_on_repo) == 0:
             _logger.error(f"Archive for commit job {job_id} not found on S3 repo")
-            _background_job_update(job_id, "Error: Session archive not found in portal repo", CommitStateEnum.FAIL)
-            return False
+            raise Exception("Missing ession archive in staging area on ortal repo")
         if _background_job_update(job_id, f"Downloading session archive from portal repo"):
-            return False
+            raise Exception("Operation cancelled")
         if not repo.download_file(archive_on_repo, zip_path, log_func=_download_progress):
             _logger.error(f"Failed to download session archive from S3 repo for commit job {job_id}")
-            _background_job_update(job_id, "Error: Unable to download session archive", CommitStateEnum.FAIL)
-            return False
+            raise Exception("Failed to download session archive from portal repo")
 
         # preprocess the archive
         if _background_job_update(job_id, f"Preprocessing session archive..."):
-            return False
+            raise Exception("Operation cancelled")
 
         with zipfile.ZipFile(zip_path, 'r') as archive:
             data_file_name_pattern = re.compile("[.]\\d\\d\\d\\d$")
@@ -1132,7 +1298,7 @@ def preprocess_commit_job(job_id: str) -> bool:
                 raise Exception("Missing Omniplex file(s) for spike-sorted unit data!")
 
             if _background_job_update(job_id, "Processing archive for trial protocols..."):
-                return False
+                raise Exception("Operation cancelled")
             existing_protos = set([str(h) for h in fetch_attribute_values(DBTable.TRIAL_PROTOCOL, 'proto_hash')])
             protocols, file_to_proto = \
                 maestro.Protocol.extract_protocols_from_session_data(archive, existing_protos)
@@ -1144,7 +1310,7 @@ def preprocess_commit_job(job_id: str) -> bool:
             unit_data: Optional[Dict[str, List[Any]]] = None
             if units_zip_info is not None:
                 if _background_job_update(job_id, f"Loading neural units file {units_zip_info.filename}..."):
-                    return False
+                    raise Exception("Operation cancelled")
                 unit_data = pickle.loads(archive.read(units_zip_info))
                 pl2_filenames = [x.filename for x in pl2s_archived]
                 if not _validate_neural_unit_data(unit_data, pl2_filenames):
@@ -1157,9 +1323,9 @@ def preprocess_commit_job(job_id: str) -> bool:
                 for pl2_zip_info in pl2s_archived:
                     save_path = _chunked_extract_from_archive(job_id, archive, pl2_zip_info, zip_path.parent)
                     if save_path is None:
-                        return False
+                        raise Exception("Operation cancelled")
                     if _process_omniplex_file(job_id, save_path, unit_data, trial_info, units):
-                        return False
+                        raise Exception("Operation cancelled")
 
                 # if there is unit data, we require metrics for each unit specified in the neural units data file,
                 # and there must be Omniplex timestamps for all trials
@@ -1172,7 +1338,7 @@ def preprocess_commit_job(job_id: str) -> bool:
 
             # add results from preprocessing to the commit information file in the local staging folder
             if _background_job_update(job_id, "Saving results from preprocessing..."):
-                return False
+                raise Exception("Operation cancelled")
             session_info, nt_ids, _, _, _ = _read_commit_info_file(commit_info_path)
             session_info.number_of_trials = len(trial_info)
             if len(units) > 0:
@@ -1192,19 +1358,28 @@ def preprocess_commit_job(job_id: str) -> bool:
                 get_config().redis_conn.rpush(f"{PROTODEFS_NS}{job_id}", *proto_defs)
                 if _background_job_update(job_id, "Preprocessing complete. User review required.",
                                           CommitStateEnum.REVIEW):
-                    return False
+                    raise Exception("Operation cancelled")
                 return True
             else:
                 if _background_job_update(job_id, "Preprocessing complete. Committing session to database...",
                                           CommitStateEnum.COMMIT):
-                    return False
+                    raise Exception("Operation cancelled")
                 return finish_commit_job(job_id)
 
     except Exception as err:
-        error_msg = f"Error during preprocessing: {str(err)}"
-        _logger.error(error_msg, exc_info=True)
-        _background_job_update(job_id, error_msg, CommitStateEnum.FAIL)
+        fail_msg = f"Error during preprocessing: {str(err)}"
+        perform_cleanup = True
+        _logger.error(fail_msg, exc_info=True)
         return False
+    finally:
+        if perform_cleanup:
+            _remove_job_subfolder(job_id)
+            repo.delete_file(archive_on_repo)
+        if (len(fail_msg) > 0) and job_found:
+            try:
+                _background_job_update(job_id, fail_msg, CommitStateEnum.FAIL)
+            except Exception:
+                pass
 
 
 def _reassemble_archive_from_chunked_upload(job_id: str) -> bool:
@@ -1960,8 +2135,17 @@ def finish_commit_job(job_id: str) -> bool:
     pushed to the commit job's state object cached in Redis. The method also checks the job's status regularly in
     case the user cancels the job through the backend.
 
-    If the operation is cancelled or fails at any point, the job is moved to the "Failed" state before returning. On
-    successful completion, the job is moved to the "Done" stage.
+    If the operation completes successfully, the job is moved to the "Done" stage in Redis, the job's staging folder
+    in the local workspace is deleted, and the session archive in the staging area in the S3 repository (not the final
+    version of the archive that's saved to "/repo") is deleted. The job status remains in Redis so that the user has a
+    record of what happened and remove the completed job at a later time.
+
+    If the operation is cancelled or fails at any point, the job is moved to the "Failed" state and the same cleanup
+    is performed, with two notable exceptions:
+        - If the job was not found in Redis, something may have gone wrong in Redis. We still try to do the cleanup, but
+          the local staging folder and staged archive in S3 may not exist.
+        - If the job was found but is not in the COMMIT state, we try to post a message to the job's progress history
+          indicating the problem. We leave the job in its current state and do no cleanup. This should never happen.
 
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
@@ -1991,11 +2175,15 @@ def finish_commit_job(job_id: str) -> bool:
     The list of trial protocols culled from the session data archive during preprocessing, stored in the commit
     information file, and possibly validated in the review phase.
     """
-    session_info: SessionInfo
+    session_info: Optional[SessionInfo] = None
     """
     Metadata about session that is supplied when the commit job is initiated and kept in the commit information file.
     It includes attributes from the Session and Session.EPhys tables.
     """
+    added_proto_hashes: List[str] = []
+    """ List containing the MD5 digest of each trial protocol that was added to the database during the commit. """
+    archive_key_final: str = ""
+    """ S3 repo key under which session archive is permanently stored after a successful commit. """
 
     # these two inner functions serve as callbacks while downloading the session archive from the S3 repo prior to
     # the database commit, or uploading the amended archive (with commit information file) to the S3 repo after the
@@ -2027,19 +2215,25 @@ def finish_commit_job(job_id: str) -> bool:
         except Exception:
             pass
 
+    fail_msg, perform_cleanup, commit_done, archive_uploaded, job_found = "", True, False, False, False
     try:
         # verify job status and commit information file.
         job_status = commit_job_status(job_id)
-        if isinstance(job_status, str):
+        job_found = not isinstance(job_status, str)
+        if not job_found:
             _logger.error(f"Failed to retrieve job status from Redis for {job_id}")
             return False
         elif job_status.state != CommitStateEnum.COMMIT:
             _logger.error(f"Commit job is not in the final commit phase: {job_status.state}")
+            try:
+                _background_job_update(job_id, f"Job not in the final commit phase: {job_status.state}. Try again?")
+            except Exception:
+                pass
+            perform_cleanup = False
             return False
         elif not commit_info_path.is_file():
             _logger.error(f"Commit job information file for job {job_id} not found at: {str(commit_info_path)}")
-            _background_job_update(job_id, "Missing commit information file", CommitStateEnum.FAIL)
-            return False
+            raise Exception("Missing commit information file in workspace staging area")
 
         # read in commit information and check if any protocols required validation
         session_info, _, trial_info, protocols, units = _read_commit_info_file(commit_info_path)
@@ -2056,16 +2250,14 @@ def finish_commit_job(job_id: str) -> bool:
                 if p.is_candidate:
                     msg = f"Error: At least one trial protocol ({p.trial.path_name} still requires user validation!"
                     _logger.debug(f"Commit job {job_id} failed: {msg}")
-                    _background_job_update(job_id, msg, CommitStateEnum.FAIL)
-                    return False
+                    raise Exception(msg)
 
         # check if session archive is in local staging folder, and download it from repo if not.
         if not zip_path.is_file():
-            archive_on_repo = f"/staging/{job_id}/{ARCHIVE_FNAME}"
+            archive_on_repo = staged_archive_key_in_repo(job_id)
             if not repo.download_file(archive_on_repo, zip_path, log_func=_download_progress):
                 _logger.error(f"Failed to download session archive from S3 repo for commit job {job_id}")
-                _background_job_update(job_id, "Error: Unable to download session archive", CommitStateEnum.FAIL)
-                return False
+                raise Exception("Error: Unable to download session archive from staging area in repo")
 
         # at this point, all trial protocols should be validated, and the original session archive should be in the
         # staging folder. Now that trial protocol definitions are finalized, update per-trial info to include the
@@ -2077,42 +2269,29 @@ def finish_commit_job(job_id: str) -> bool:
         # rewrite the commit information file to persist any changes in trial protocol definitions, as well as the
         # update to per-trial info.
         _write_commit_info_file(commit_info_path, session_info, [], trial_info, protocols, units)
-    except Exception as err:
-        error_msg = f"Error occurred before starting commit: {str(err)}"
-        _logger.error(error_msg)
-        try:
-            _background_job_update(job_id, error_msg, CommitStateEnum.FAIL)
-        except Exception:
-            pass
-        zip_path.unlink(missing_ok=True)   # always make sure large archive file is deleted from local storage!
-        return False
 
-    # here's where it all happens: the database inserts, rollback on failure, progress messages and check for
-    # cancellation.
-    commit_mgr = _SessionCommitMgr(job_id, zip_path, session_info, trial_info, protocols, units)
-    error_msg = commit_mgr.commit()
-    if error_msg and not commit_mgr.was_cancelled():
-        try:
-            _background_job_update(job_id, error_msg, CommitStateEnum.FAIL)
-        except Exception:
-            pass
-        zip_path.unlink(missing_ok=True)  # always make sure large archive file is deleted from local storage!
-        return False
-    added_proto_hashes = [p['proto_hash'] for p in commit_mgr.trial_protocols()]
+        # here's where it all happens: the database inserts, rollback on failure, progress messages and check for
+        # cancellation.
+        commit_mgr = _SessionCommitMgr(job_id, zip_path, session_info, trial_info, protocols, units)
+        error_msg = commit_mgr.commit()
+        if error_msg is not None:
+            raise Exception(error_msg)
+        commit_done = True
 
-    # at this point, the session has been committed to the database and the commit information file is complete. Now we
-    # need to add that file to the ZIP archive, then upload the amended ZIP archive to the portal backing repository. If
-    # any of those operations fail, we have to remove the session from the database!
-    archive_key_final = f"/repo/{session_info.experimenter}/" \
-                        f"{session_info.subject}_{session_info.iso_recording_date}_{session_info.suffix}.zip"
-    archive_uploaded, commit_logged = False, False
-    try:
+        added_proto_hashes = [p['proto_hash'] for p in commit_mgr.trial_protocols()]
+
+        # at this point, session has been committed to the database and the commit information file is complete. Now we
+        # need to add that file to the ZIP archive, then upload the amended ZIP archive to permanent storage in the the
+        # portal backing repository. If any of those operations fail, we have to remove the session from the database!
+        archive_key_final = f"/repo/{session_info.experimenter}/" \
+                            f"{session_info.subject}_{session_info.iso_recording_date}_{session_info.suffix}.zip"
+
         if _background_job_update(job_id, "Adding commit information to session archive..."):
             raise Exception("Operation cancelled")
         with zipfile.ZipFile(zip_path, 'a') as f:
             f.write(commit_info_path, COMMIT_INFO_FNAME)
 
-        if _background_job_update(job_id, "Transferrring archive to portal repository..."):
+        if _background_job_update(job_id, "Transferring archive to portal repository..."):
             raise Exception("Operation cancelled")
         if not repo.upload_file(zip_path, archive_key_final, log_func=_upload_progress):
             raise Exception(f"Unable to push committed session archive [{archive_key_final}] to portal repository")
@@ -2123,41 +2302,46 @@ def finish_commit_job(job_id: str) -> bool:
                                  session_info.suffix)
         if res:
             raise Exception(res)
-        commit_logged = True
 
-        # we don't need the ZIP in local storage any more -- delete it
-        zip_path.unlink(missing_ok=True)
-
-        _background_job_update(job_id, "Done!", CommitStateEnum.DONE)
+        return True
     except Exception as e:
-        # on failure, remove the archive ZIP from local storage (in case committer doesn't check job status for a while)
-        zip_path.unlink(missing_ok=True)
-
-        # if the exception occurs AFTER we've logged the session commit, don't rollback. Technically, everything is
-        # OK with the database and repository -- something went wrong with Redis at the worst possible time!
-        if commit_logged:
-            _logger.critical("Exception occurred after session successfully committed. Check Redis server.")
-            return True
-        _logger.error(f"Session commit {job_id} failed in final phase, after database insertions: {str(e)}")
-        # rollback the session commit, including any added trial protocols.
-        ok = True
-        err_msg = rollback_session_commit(session_info.session_table_entry(), added_proto_hashes)
-        if err_msg:
-            _logger.critical(f"Session commit rollback failed: {str(e)}")
-            ok = False
-        if archive_uploaded:
-            if not repo.delete_file(archive_key_final):
-                _logger.critical(f"Failed to remove session archive from repository {archive_key_final} during "
-                                 f"commit rollback")
-                ok = False
-        err_msg = f"Commit failed after database insertions; rollback {'successful' if ok else 'FAILED!'}"
-        try:
-            _background_job_update(job_id, err_msg, CommitStateEnum.FAIL)
-        except Exception:
-            pass
+        fail_msg = str(e)
         return False
+    finally:
+        # cleanup: remove workspace staging folder and delete original archive ZIP from staging area in S3
+        if perform_cleanup:
+            _remove_job_subfolder(job_id)
+            repo.delete_file(staged_archive_key_in_repo(job_id))
 
-    return True
+        # an error occurred after commit finished, so we attempt to delete the session and any added trial protocols
+        if (len(fail_msg) > 0) and commit_done:
+            _logger.error(f"Session commit {job_id} failed in final phase, after database insertions: {fail_msg}")
+            # rollback the session commit, including any added trial protocols.
+            ok = True
+            err_msg = rollback_session_commit(session_info.session_table_entry(), added_proto_hashes)
+            if err_msg:
+                _logger.critical(f"Session commit rollback failed: {str(err_msg)}")
+                ok = False
+            if archive_uploaded:
+                if not repo.delete_file(archive_key_final):
+                    _logger.critical(f"Failed to remove session archive from repository {archive_key_final} during "
+                                     f"commit rollback")
+                    ok = False
+            err_msg = f"Commit failed after database insertions; rollback {'successful' if ok else 'FAILED!'}"
+            if job_found:
+                try:
+                    _background_job_update(job_id, err_msg)
+                except Exception:
+                    pass
+
+        # transition to FAIL or DONE state, depending on whether commit succeeded. Can't do it if we didn't find the
+        # job in Redis in the first place.
+        if job_found and (commit_done or (len(fail_msg) > 0)):
+            try:
+                _background_job_update(job_id, fail_msg if (len(fail_msg) > 0) else "Done!",
+                                       CommitStateEnum.FAIL if (len(fail_msg) > 0) else CommitStateEnum.DONE)
+            except Exception:
+                pass
 
 
 class _SessionCommitMgr(SessionCommitter):
