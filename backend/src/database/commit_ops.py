@@ -697,14 +697,17 @@ def _check_pending_session_metadata(
         session_dict.update(dict(
             ephys_src=src,
             probe_type=probe,
-            sampling_rate=rate,
-            probe_x=x,
-            probe_y=y,
-            probe_depth=z,
+            sampling_rate=float(rate),
+            probe_x=float(x),
+            probe_y=float(y),
+            probe_depth=float(z),
             ba_id=ba_id,
             brain_area=ba_name
         ))
-    info = SessionInfo(session_dict)
+    try:
+        info = SessionInfo(session_dict)
+    except ValueError as e:
+        return str(e), None, []
 
     msg = check_row(DBTable.SESSION, info.session_table_entry())
     if (msg is None) and info.number_of_units > 0:

@@ -45,6 +45,19 @@ _REQ_TIMEOUT_SECONDS: float = 20
 
 
 class PortalAccessor:
+    """
+    The portal API access manager.
+
+    Instantiate this object with your portal username and password, then use the various methods to retrieve selected
+    data from the portal, or to commit data from an experiment session to the portal database.
+
+    For example::
+
+        accessor = PortalAccessor(username='<uname>', password='<pwd>', url='<root url of portal website>')
+        err_msg, subject_table = accessor.metadata_table(MetadataTable.SUBJECTS)
+        sessions = accessor.sessions(experimenter=...)
+        ...
+    """
     def __init__(self, username: str, password: str, url: str):
         """
         Create an accessor object that manages all queries to the Lisberger lab portal database via RESTful-like API
@@ -439,7 +452,7 @@ class PortalAccessor:
         """
         Start the process of committing an experiment session's worth of data to the portal database.
 
-        This API provides an alternative to using the portal website directly to initiate a session commit. It is best
+        This API provides an alternative to using the portal website to initiate a session commit. It is best
         suited to sessions in which the "review" phase can be skipped, which will be the case if no trial protocol
         presented during the experiment requires manual validation by the user. [This should be the case so long as
         every distinct protocol is presented a minimum of 3 times over the course of the session.] For such commits,
@@ -462,17 +475,24 @@ class PortalAccessor:
         cancel/remove the job if desired. However, once the experiment is fully committed to the database, the commit
         job is considered "done" and cannot be "rolled back".
 
+        If the operation fails during the upload phase, an attempt is made to abort the multipart upload and completely
+        remove the commit job from the server. Contact the portal administrator if the server fails to perform this
+        "clean-up" task, as some files may be left dangling in the commit staging area in the portal's S3-based
+        repository, or in local disk storage on the portal server itself.
+
         To use this API, you must have "commit"-level access on the portal.
 
         Args:
             zip_path: The path to the session archive ZIP.
-            unit_types: A list of length N, where N is the number of neurol units recorded during the experiment.
-                The n-th element specifies a recognized neuron type to be assigned to the n-th unit.
+            unit_types: A list of length N, where N is the number of neural units recorded during the experiment.
+                The n-th element specifies a recognized neuron type to be assigned to the n-th unit. For behavior-only
+                sessions, this must be an empty list.
             experimenter: Username of the registered portal user that conducted the experiment. Note that the
                 experimenter need not be the same as the user committing the experiment session to the database.
             subject: ID of the subject of the experiment.
             rec_date: Recording date in ISO format - 'YYYY-MM-DD'.
-            suffix: Session suffix in [1..9].
+            suffix: Session suffix in [1..9]. Typically 1, but you must use different suffixes to distinguish multiple
+                sessions recorded in the same subject by the same experimenter on the same date.
             rig: ID of the rig on which experiment was conducted.
             study: The research study to which experiment belongs -- specify either the study title or the unique
                 integer key identifying the study in the portal database.
@@ -490,13 +510,13 @@ class PortalAccessor:
             show_progress: If True, a progress message is updated on the Python console (STDOUT) while the archive is
                 uploaded.
         Returns:
-            (True, job_id) if archive file is successfully uploaded to the portal and a background job is queued to
-                perform the session commit, where `job_id` is the unique ID assigned to the session commit job on the
-                server. Otherwise: (False, string describing the error).
+            A 2-tuple (True, job_id) if archive file is successfully uploaded to the portal and a background job is
+                queued to preprocess the archive, where `job_id` is the unique ID assigned to the session commit job on
+                the server. Otherwise: (False, string describing the error).
         """
         if not (isinstance(zip_path, Path) and zip_path.is_file()):
             return False, "Archive file missing or path not specified"
-        zip_size = zip_path.stat()
+        zip_size = zip_path.stat().st_size
 
         if (out := self.authenticate()) is not None:
             return False, out
@@ -534,17 +554,21 @@ class PortalAccessor:
                     sys.stdout.write("\nStarting upload...")
                 for num, url in enumerate(urls):
                     part = num + 1
+                    t0 = time.time()
                     file_data = f.read(chunk_size)
                     res = requests.put(url, data=file_data)
+                    t_elapsed = time.time() - t0
                     if res.status_code != 200:
                         raise Exception(f"Archive upload failed on chunk {part} [{res.status_code}]")
                     etag = res.headers['ETag']
                     parts.append({'ETag': etag, 'PartNumber': part})
                     if show_progress:
-                        sys.stdout.write(f"\r{zip_path.name}: Uploaded {part} of {len(urls)} chunks...")
+                        sys.stdout.write(f"\r{zip_path.name}: Uploaded {part} of {len(urls)} chunks "
+                                         f"[in {t_elapsed: .1f}s]")
                         sys.stdout.flush()
                 if show_progress:
                     sys.stdout.write(" finishing up.\n")
+                    sys.stdout.flush()
         except Exception as e:
             upload_error = str(e)
 
@@ -602,7 +626,9 @@ class PortalAccessor:
             - `messages [List[str]]`: The job's progress history, with messages in reverse chronological order.
             - `started [float]`: The timestamp (seconds since the "epoch") when the commit job was initiated.
             - `updated [float]`: The timestamp when the commit job's progress was last updated.
-            - `state [str]`: A short description of the job's current state.
+            - `state [str]`: The job's current state, one of 'UPLOADING', 'PREPROCESS', 'REVIEW', 'CANCEL', 'FAILED',
+               or 'DONE'. If a commit job is in the 'REVIEW' state, you must use the portal's web site to review and
+               validate one or more trial protocols before committing the session data to the portal database.
             - `api_triggered [bool]`: Indicates whether the commit job was initiated via this API rather than the
               'commit' page on the portal web site.
 

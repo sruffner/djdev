@@ -40,6 +40,7 @@ from typing import Tuple, Optional, List, Dict, Any, Union
 from flask import Response, request
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 
+from config.app_logging import get_application_logger
 from database.log_ops import log_api_request
 from database.repo import initialize_multipart_upload, abort_multipart_upload
 from sglportalapi.data_containers import SessionInfo, NeuronInfo, Route, MetadataTable, RequestedData
@@ -79,6 +80,7 @@ def api_access() -> Tuple[Response, int]:
             log_api_request(route=Route.AUTHENTICATE, username=username)
         else:
             status_code, out = 400, dict(error=f"Access denied - {err_msg}")
+            get_application_logger().info(f"API access denied for username: {err_msg}")
     return Response(Route.serialize_api_response(Route.AUTHENTICATE, **out)), status_code
 
 
@@ -108,6 +110,8 @@ def metadata_table() -> Tuple[Response, int]:
     out = dict(metatable=metatable) if status_code == 200 else dict(error=err_msg)
     if status_code == 200:
         log_api_request(route=Route.METADATA_TABLE, username=get_jwt_identity()['username'], table=table_name)
+    else:
+        get_application_logger().info(f"Failed request @ {Route.METADATA_TABLE}: {err_msg}")
     return Response(Route.serialize_api_response(Route.METADATA_TABLE, **out)), status_code
 
 
@@ -177,6 +181,8 @@ def sessions() -> Tuple[Response, int]:
     if status_code == 200:
         log_api_request(route=Route.SESSIONINFO, username=get_jwt_identity()['username'],
                         experimenter=experimenter, subj_id=subj_id, when=when)
+    else:
+        get_application_logger().info(f"Failed request @ {Route.SESSIONINFO}: {err_msg}")
     return Response(Route.serialize_api_response(Route.SESSIONINFO, **out)), status_code
 
 
@@ -276,6 +282,8 @@ def session_neurons() -> Tuple[Response, int]:
     if status_code == 200:
         log_api_request(route=Route.SESSION_NEURONS, username=get_jwt_identity()['username'],
                         session_key=session_key, min_spikes=min_spikes, min_snr=min_snr)
+    else:
+        get_application_logger().info(f"Failed request @ {Route.SESSION_NEURONS}: {err_msg}")
     return Response(Route.serialize_api_response(Route.SESSION_NEURONS, **out)), status_code
 
 
@@ -347,6 +355,8 @@ def session_protocols() -> Tuple[Response, int]:
     if status_code == 200:
         log_api_request(route=Route.SESSION_PROTOCOLS, username=get_jwt_identity()['username'],
                         session_key=session_key)
+    else:
+        get_application_logger().info(f"Failed request @ {Route.SESSION_PROTOCOLS}: {err_msg}")
     return Response(Route.serialize_api_response(Route.SESSION_PROTOCOLS, **out)), status_code
 
 
@@ -414,6 +424,8 @@ def session_trial() -> Tuple[Response, int]:
     if status_code == 200:
         log_api_request(route=Route.SESSION_TRIAL, username=get_jwt_identity()['username'],
                         session_key=session_key, trial_index=trial_index, unit_ids=unit_ids, what=what)
+    else:
+        get_application_logger().info(f"Failed request @ {Route.SESSION_TRIAL}: {err_msg}")
     return Response(Route.serialize_api_response(Route.SESSION_TRIAL, **out)), status_code
 
 
@@ -458,6 +470,8 @@ def session_block() -> Tuple[Response, int]:
     if status_code == 200:
         log_api_request(route=Route.SESSION_BLOCK, username=get_jwt_identity()['username'],
                         session_key=session_key, start=start, end=end, unit_ids=unit_ids, what=what)
+    else:
+        get_application_logger().info(f"Failed request @ {Route.SESSION_BLOCK}: {err_msg}")
     return Response(Route.serialize_api_response(Route.SESSION_BLOCK, **out)), status_code
 
 
@@ -503,6 +517,8 @@ def session_protocol_reps() -> Tuple[Response, int]:
         log_api_request(route=Route.SESSION_PROTOCOL_REPS, username=get_jwt_identity()['username'],
                         session_key=session_key, proto_hash=proto_hash, completed=completed, unit_ids=unit_ids,
                         what=what)
+    else:
+        get_application_logger().info(f"Failed request @ {Route.SESSION_PROTOCOL_REPS}: {err_msg}")
     return Response(Route.serialize_api_response(Route.SESSION_PROTOCOL_REPS, **out)), status_code
 
 
@@ -550,6 +566,8 @@ def neurons() -> Tuple[Response, int]:
         log_api_request(route=Route.NEURONS, username=get_jwt_identity()['username'], min_spikes=min_spikes,
                         min_snr=min_snr, min_rate=min_rate, neuron_type=neuron_type, subj_id=subj_id,
                         study_title=study_title, proto_hash=proto_hash, min_complete=min_complete)
+    else:
+        get_application_logger().info(f"Failed request @ {Route.NEURONS}: {err_msg}")
     return Response(Route.serialize_api_response(Route.NEURONS, **out)), status_code
 
 
@@ -677,6 +695,7 @@ def commit() -> Tuple[Response, int]:
     committer = get_jwt_identity()['username']
     if not _can_commit_to_database(committer):
         out = dict(error="You do not have commit access to database")
+        get_application_logger().info(f"Failed request @ {Route.COMMIT}: Access denied")
         return Response(Route.serialize_api_response(Route.COMMIT, **out)), 400
 
     action = request.json.get('action')
@@ -705,6 +724,7 @@ def commit() -> Tuple[Response, int]:
         log_api_request(route=Route.COMMIT, username=committer, **req_args)
     else:
         out = dict(error=err_msg)
+        get_application_logger().info(f"Failed request @ {Route.COMMIT} (action={action}): {err_msg}")
     return Response(Route.serialize_api_response(Route.COMMIT, **out)), status_code
 
 
@@ -908,7 +928,7 @@ def _commit_status(committer: str, job_id: str) -> Tuple[int, str, Dict[str, Any
             if j.committer == committer:
                 status_dicts.append(dict(
                     job_id=j.id, messages=j.message_history, started=j.started, updated=j.updated,
-                    state=j.state.get_state_descriptor(), api_triggered=j.api_triggered
+                    state=j.state.name, api_triggered=j.api_triggered
                 ))
         return 200, "", dict(action='status', jobs=status_dicts)
 

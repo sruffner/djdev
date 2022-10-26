@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.4.0 (10/24/2022)
+
+- Added methods `commit_start()`, `commit_status()`, and `commit_remove()` in `sglportalapi.PortalAccessor` to support 
+committing experiment data via a Python script or in a Python console in lieu of using the web interface. The commit
+workflow was reworked so that it will be feasible to queue up any number of experiment sessions. The session archives
+are uploaded to a staging area in the portal's repository in S3 so that the relatively limited disk storage on the 
+portal server is not maxed out. Note that, while any number of session archives can be queued for committing to the
+database, the portal server only has a limited number of background workers to preprocess and commit session data. Also,
+there is no support for the interactive review phase of the session commit workflow. The review phase is skipped so long
+as no trial protocol presented during the experiment requires user validation; this will be the case if there are at 
+at least 3 reps of every distinct trial protocol presented over the course of the session.
+- Minor changes to `data_containers.SessionInfo`. The opaque integer IDs identifying the research study and brain area
+associated with the experiment session are included in `SessionInfo` but not exposed as properties (as they are intended
+only for use on the server side).
+- Incremented API_VERSION to 3. **If you have already installed the sglportalapi package, you will need to 
+upgrade to this release.**
+
 ## v0.3.0 (08/04/2022)
 
 - Added method `metadata_table()` in `sglportalpi.PortalAccessor` to retrieve the contents of selected "metadata" tables in the

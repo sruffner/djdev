@@ -284,7 +284,7 @@ def initialize_multipart_upload(file_sz: int, key: str) -> Tuple[bool, str, int,
                 ExpiresIn=3600
             )
             presigned_urls.append(url)
-        logger.info(f"Initialized multipart upload of {file_sz/MB:.1f} file object in {num_parts} parts to "
+        logger.info(f"Initialized multipart upload of {file_sz/MB:.1f}MB file object in {num_parts} parts to "
                     f"{bucket_name}:{key}; upload ID = {upload_id}")
         return True, upload_id, chunk_size, presigned_urls
     except Exception as e:

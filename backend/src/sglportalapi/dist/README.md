@@ -91,6 +91,88 @@ all_reps: List[TrialRep] = accessor.session_protocol_reps(
     sessions[0], protocols[0], completed=True, unit_ids=unit_ids)
 ```
 
+As of version 0.4.0 of the `sglportalapi` package, it is possible to use `PortalAccessor` to commit an experiment session's 
+worth of recorded data to the portal database, instead of having to upload session data through the web interface. 
+The `commit_start()` function initiates a commit job on the portal server and uploads the session archive to a staging 
+area in the portal's repository (housed in an Amazon Web Services S3 bucket). Upon (successful) return, the commit job
+is queued for preprocessing and will run to completion provided no trial protocols presented during the session require 
+manual validation (and no errors occur). If any protocol requires validation, the commit job enters a "review" phase, and
+you must use the portal's web interface to finish the commit. Other `PortalAccessor` methods let you check the status of 
+any commit jobs you started, cancel a pending commit job, and remove a failed or completed job from your commit history. 
+**You must have "commit"-level access on the portal to use these functions.**
+
+When you start a commit, you must provide some "metadata" describing the experiment session and any neural units recorded.
+This requires knowledge of information in the so-called "metadata" tables of the portal database: username of the 
+experimenter, subject ID, rig ID, name of the brain region in which any neural units were recorded, the neuron type for
+each recorded unit, and the title of the research study to which the experiment belongs. You can use the `metadata_table()`
+method to list the contents of these tables.
+
+```python
+from sglportalapi.clientside import PortalAccessor
+from sglportalapi.data_containers import MetadataTable
+from pathlib import Path
+from time import sleep
+
+accessor = PortalAccessor(username='myusername', password='mypassword', url='<portal url>')
+
+# retrieve available subject IDs, rig IDs, brain regions, and research studies.
+_, subject_table = accessor.metadata_table(MetadataTable.SUBJECTS)
+_, rig_table = accessor.metadata_table(MetadataTable.RIGS)
+...
+
+# all of the 10 recorded units happen to be Purkinje cells, except the last two
+unit_types = ['Purkinje cell'] * 8
+unit_types.extend(['Unspecified', 'Unipolar brush cell'])
+
+# the session archive includes all Maestro trial files, Omniplex file with neural unit recording, and a pickle file
+# containing information required to preprocess the unit recordings.
+zip_path = Path('/path/to/the_session_archive.zip')
+
+# session metadata
+experimenter = '<username of registered user that conducted the experiment>'
+subject = '<ID of experiment subject>'
+rec_date = '2022-10-24'
+suffix = 1  # between 1 and 9; distinguishes multiple sessions on the same date using the same subject
+rig = '<ID of rig>'
+study = '<title of research study to which experiment belongs'
+notes = '<any notes particular to the session go here; can be empty string'
+brain_area = 'Flocculus'
+src = 'Omniplex'
+probe = '32-channel'
+rate = 40000
+x, y, z = 22.5, 14.8, 23.7   # probe insertion location and depth in mm
+
+# start the commit job and then check its status every 20 seconds until it fails or completes successfully, then
+# remove the job from your commit job history (unless it has entered the review phase).
+ok, job_id = accessor.commit_start(zip_path, unit_types, experimenter, subject, rec_date, suffix, rig, study, notes,
+                                   brain_area, src, probe, rate, x, y, z)
+if not ok:
+    print(f"Failed to start session commit: {job_id}")
+else:
+    failed, done, review_required = False, False, False
+    while not done:
+        ok, jobs = accessor.commit_status(job_id)
+        if not ok:
+            failed, done = True, True
+            print(f"An error occurred while checking status of pending commit: {str(jobs)}")
+        elif jobs[0]['state'] == 'REVIEW':
+            done, review_required = True, True
+        elif jobs[0]['state'] == 'DONE':
+            done = True
+        elif jobs[0]['state'] == 'FAILED':
+            print(f"Commit job failed: {jobs[0]['messages'][0]}")
+            failed, done = True, True
+        else:
+            sleep(20)
+
+    if review_required:
+        print(f"You must review and validate one or more trial protocols in the session. Use portal web interface.")
+    else:
+        ok, err_msg, removed = accessor.commit_remove(job_id)
+        if not ok:
+            print(f"Unable to remove commit job: {err_msg}")
+```
+
 ## Documentation
 Once the `sglportalapi` package is installed on your machine, you can use the `pydoc` command
 to examine auto-generated documentation for the modules, classes, and functions defined

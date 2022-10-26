@@ -28,7 +28,7 @@ import numpy as np
 
 from sglportalapi.maestro import Protocol
 
-API_VERSION: int = 2
+API_VERSION: int = 3
 """ The current version number for the portal database access API. """
 
 
@@ -97,6 +97,35 @@ class MetadataTable:
         except Exception as e:
             raise ValueError(f"Invalid metadata table initialization dict: {str(e)}")
         self._info = info
+
+    _print_column_widths: Dict[str, List[int]] = {
+        SUBJECTS: [20, 20, 20, 5],
+        IMPLANTS: [20, 20, 60],
+        RIGS: [12, 50],
+        STUDIES: [50, 15, 80],
+        NEURON_TYPES: [50],
+        BRAIN_AREAS: [50]
+    }
+
+    def pretty_print(self) -> None:
+        """
+        Print the contents of this `MetadataTable` to the Python standard console in a table-like fashion, with column
+        headings and fixed column widths. Note that any field in a row is truncated if necessary to fit within its
+        corresponding column.
+        """
+        col_widths = MetadataTable._print_column_widths[self.table_name]
+
+        print("")
+        for i, col in enumerate(self._info['columns']):
+            print(f"{col: ^{col_widths[i]}} | ", end='')
+        print("")
+        for w in col_widths:
+            print(f"{'-' * w} | ", end='')
+        print("")
+        for row in self._info['rows']:
+            for i, w in enumerate(col_widths):
+                print(f"{row[i][0:w]: ^{w}} | ", end='')
+            print("")
 
     @staticmethod
     def from_database_rows(name: str, table_rows: List[Dict[str, Any]]) -> MetadataTable:
@@ -170,15 +199,6 @@ class SessionInfo:
     """
     Information about an experiment session stored in the Lisberger lab portal database.
     """
-    __REQUIRED_TYPES: Dict[str, type] = dict(
-        experimenter=str, subj_id=str, session_date=str, session_sfx=int, rig_id=str, study_id=int, study_title=str,
-        session_notes=str, num_trials=int, num_units=int
-
-    )
-    __EPHYS_TYPES: Dict[str, type] = dict(
-        ephys_src=str, probe_type=str, sampling_rate=float, probe_x=float, probe_y=float,
-        probe_depth=float, ba_id=int, brain_area=str
-    )
 
     @staticmethod
     def _validate_init_arg(info: Dict[str, Any]) -> None:
@@ -194,21 +214,32 @@ class SessionInfo:
         try:
             if not isinstance(info, dict):
                 raise ValueError(f'Expected a dictionary, got {type(info)}')
-            if not all([(type(info[k]) == t) for k, t in SessionInfo.__REQUIRED_TYPES.items()]):
-                raise ValueError('Invalid data type for one or more fields in session information dict')
+            for k in ['experimenter', 'subj_id', 'session_date', 'rig_id', 'study_title', 'session_notes']:
+                if not isinstance(info[k], str):
+                    raise ValueError(f"Invalid type for session metadata field '{k}': {str(type(info[k]))}")
+            for k in ['session_sfx', 'study_id', 'num_trials', 'num_units']:
+                if not isinstance(info[k], int):
+                    raise ValueError(f"Invalid type for session metadata field '{k}': {str(type(info[k]))}")
             if info['num_units'] > 0:
-                if not all([(type(info[k]) == t) for k, t in SessionInfo.__EPHYS_TYPES.items()]):
-                    raise ValueError('Invalid data type for one or more fields in session information dict')
+                for k in ['ephys_src', 'probe_type', 'brain_area']:
+                    if not isinstance(info[k], str):
+                        raise ValueError(f"Invalid type for session metadata field '{k}': {str(type(info[k]))}")
+                for k in ['sampling_rate', 'probe_x', 'probe_y', 'probe_depth']:
+                    if not isinstance(info[k], (int, float)):
+                        raise ValueError(f"Invalid type for session metadata field '{k}': {str(type(info[k]))}")
+                if not isinstance(info['ba_id'], int):
+                    raise ValueError(f"Invalid type for session metadata field 'ba_id': {str(type(info['ba_id']))}")
             else:
-                for k in SessionInfo.__EPHYS_TYPES.keys():
+                for k in ['brain_area', 'ba_id', 'ephys_src', 'probe_type', 'sampling_rate', 'probe_x',
+                          'probe_y', 'probe_depth']:
                     info[k] = None
-        except KeyError:
-            raise ValueError('One or more missing fields in session information dict')
+        except KeyError as ke:
+            raise ValueError(f'Missing session metadata field: {str(ke)}')
 
         try:
             date.fromisoformat(info['session_date'])
         except Exception:
-            raise ValueError("Invalid date string for key 'session_date'")
+            raise ValueError("Invalid date string for session metadata field 'session_date'")
 
     def __init__(self, info: Dict[str, Any]):
         """
