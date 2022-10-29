@@ -2,9 +2,9 @@
 # braincerebellumdata-test namespace. This namespace is used solely to test and evaluate the application whenever the
 # implementation changes in any way (bug fixes, new features, etc).
 #
-# Duke is in the process of transitioning from the OpenShift to Azure. The first step is to verify that customer apps
-# can be deployed successfully on the beta-test Azure cluster, and to make the necessary changes in the deployment
-# specs required because of differences in the Azure and OpenShift Kubernetes implementations.
+# Duke is in the process of transitioning from Redhat OpenShift to Microsoft Azure. The first step is to verify that
+# customer apps can be deployed successfully on the beta-test Azure cluster, and to make the necessary changes in the
+# deployment specs required because of differences in the Azure and OpenShift Kubernetes implementations.
 #
 # The application now consists of 3 interdependent deployments:
 #   1) data-store: A single-pod deployment with the application's two persistence mechanisms: the MariaDB server and its
@@ -16,48 +16,54 @@
 # The web-server backend replicas use Redis to store information on in-progress session commit jobs (so that the backend
 # itself remains stateless), and the RQ workers handle various background tasks that are queued by the web server
 # because they require extensive processing time (preprocessing a session archive; committing a session to the database
-# and saving it to the backup repository; preparing a data download file; backing up the database operations log).
+# and saving it to the backup repository; backing up the various operational logs).
 #
-# NOTES -- TODO: These apply to the OpenShift deployment. They need to be updated for the Azure deployment.
-#  1) The PVCs listed were created on the Duke OCP console. The PVs are dynamically provisioned.
-#  2) The Route resource named 'inbound-route' provides TLS edge termination to the Service portal-server, a ClusterIP
-#     type service that routes to the GUnicorn-served Dash/Flask backend listening on the node's 8050 port. With this
-#     configuration, you access the portal at https://braincerebellumdata-test.ocp.dhe.duke.edu -- BUT you must be on
-#     the Duke VPN. We'll want to configure this differently for production.
+# => NOTES.
+#  1) The application uses two PVCs: pvc-db is for the exclusive use of the MariaDB container, while pvc-backend
+#     provides persistent cluster storage for the portal server's "local workspace". The portal's backup repository
+#     is hosted on an AWS S3 bucket external to the Azure cluster. The associated persistent volumes are dynamically
+#     provisioned by Azure. Note that, initially, we used `private-azfile-standard-lrs` as the storage class for both
+#     PVCs, but this did not work with the MariaDB container, which would fail to start b/c the MariaDB daemon --
+#     acting as USER 1001 as defined in the Docker file -- was denied access to the storage volume. Once we switched
+#     the storage class for pvc-db to `default`, the MariaDB container spun up successfully.
+#  2) The Ingress resource named `sgl-portal-dkstest-in` provides TLS edge termination for `portal-server`, a ClusterIP
+#     service that routes to the GUnicorn-served Dash/Flask backend listening on the node's 8050 port. With this
+#     configuration, you access the portal at https://braincerebellumdata-test.dkstest.dhe.duke.edu/ -- BUT you must be
+#     on the Duke VPN. We'll want to configure this differently for production. Note that the OpenShift deployment
+#     used a Route resource to do this. Note the annotation `nginx.ingress.kubernetes.io/proxy-body-size: 10g` in the
+#     Ingress spec. This allows for large file uploads to the portal backend through the NGINX-mediated ingress.
 #  3) Take note of the image names for the backend, mariadb, and redis containers. These images are built in Gitlab
 #     whenever we push changes to the 'devel' branch. The image tags end in 'devel-<sha>', where <sha> is a shortened
 #     version of the commit SHA for that image. This is important. Previously, there was just the 'devel' tag, which
 #     was overwritten each time a commit to the devel branch was pushed. If a pod failed or was kicked out on the
-#     cluster, OpenShift pulled from Gitlab when recreating the pod. This meant loss of control of what is running on
-#     the cluster. THIS MEANS THAT EVERY TIME WE WANT TO DEPLOY A NEW VERSION, WE MUST UPDATE THE <sha> TAG EVERYHWERE
-#     IN THIS FILE.
+#     cluster, Azure will pull images from Gitlab when recreating the pod. This meant loss of control of what is running
+#     on the cluster. THIS MEANS THAT EVERY TIME WE WANT TO DEPLOY A NEW VERSION, WE MUST UPDATE THE <sha> TAG
+#     EVERYHWERE IN THIS FILE.
 #  4) Secrets. Several environment variables are defined in an opaque Kubernetes Secret, sgl-secret, which must be
 #     deployed prior to deploying the application. The YAML that defines the secret is excluded from the Git repo to
 #     protect those secrets.
 #
-# To deploy the portal "from scratch" in the braincerebellumdata-test namespace on the Duke OpenShift cluster, I
-# followed these steps:
-#  1) Create the two required PVCs (pvc-backend and pvc-db) on the OpenShift web console (see "Create Storage" on the
-#     console's "Storage" tab). The underlying PVs are automatically provisitioned. NOTE: If the PVCs already exist
-#     because the portal was running previously, there's no need to reprovision. But you'll have to be sure to reset
-#     the MariaDB and remove any existing content in the portal workspace directory (/portal_ws), as there reside on
-#     the persistent volumnes.
-#  2) Open a Mac OS Terminal and switch to the djdev directory. Then oc login to the OpenShift console.
-#  3) Deploy the portal secrets: oc apply -f environment/deploy-sgl-secret.yaml.
-#  4) Deploy the image pull secret so that the container images required for the portal app can be pulled from the
-#     sgl-portal Gitlab project: oc apply -f environment/gitlab-sgl-portal-pull-secret.yaml.
-#  5) Deploy the portal application: oc apply -f deploy-braincerebellumdata-test.yaml.
-#  6) Reset and seed database.
-#     a) On OpenShift web console, go to the "Terminal" tab on one of the "webserver" pods. This is effectively a
-#         terminal running within the backend container. The terminal comes up in the code/ directory, the equivalent of
-#         the backend/src folder in the djdev Pycharm project. The portal workspace directory is at ../portal_ws.
-#     b) Run python -m admin.reset to reset the database. This cleans out any old content we care about in pvc_db.
-#     c) Remove old content in the portal workspace directory -- particularly everything in the logs/ directory. You
-#        won't need to do this if the PVC 'pvc_backend' is brand-new.
-#     d) Run python -m admin.seed to seed the database with initial content. You'll be prompted to enter initial
-#        passwords for each user added to the database.
-#   Note that the portal is "alive" during these set of operations, but no one should be using it. It would probably
-#   be a good idea to disable the route until after the database is reset and seeded.
+# => Procedure to update the already deployed application IF no changes in database schema or the portal repository.
+#
+# Scenario: We're merely updating the container images for the backend, MariaDB, and Redis instance. These images
+# are kept in a container registry in the portal application's Gitlab project, and this deployment YAML is configured
+# to pull those images from Gitlab. When we update the container images, they'll have a new SHA (see discussion above).
+# Basically, we have to update the spec of each of the 3 deployments -- `data-store`, `web-server`, and `web-worker` --
+# to use the updated images.
+#  1) Connect to the Duke VPN.
+#  2) Open the Lens Desktop app (already setup to to access the braincerebellumdata-test namespace on Duke's Azure
+#     cluster, and select "Browse clusters in catalog".
+#  3) Connect to cluster "dhd-dhts-dks-dev01-cl". At this point, you should see -- under "Overview", the pods,
+#     deployments, and replica sets comprising the currently running portal application.
+#  4) Go to "Deployments" and edit each of the deployments -- data-store, web-server, and web-worker -- updating the
+#     container image (basically, you're updating the SHA) in the deployment spec for the redis, mariadb, and backend
+#     images.
+# Azure will automatically begin a rolling update of each deployment once you save the changes.
+#
+# This approach could cause issues if users are actively accessing the portal, or if any background tasks are running
+# in any of the web-worker replica pods. So it is probably NOT a good idea to do things this way in production. Better
+# to just bring the application down for a short while, after making sure no background tasks are running.
+
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -180,7 +186,7 @@ spec:
             mountPath: /bitnami/mariadb
       containers:
       - name: sgl-db
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel-4574ead8
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel-f8706acb
         imagePullPolicy: Always
         volumeMounts:
           - name: db-data
@@ -204,7 +210,7 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 5
       - name: sgl-redis
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel-4574ead8
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel-f8706acb
         imagePullPolicy: Always
         ports:
           - containerPort: 6379
@@ -255,7 +261,7 @@ spec:
             value: "6379"
       containers:
       - name: sgl-worker
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-4574ead8
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-f8706acb
         imagePullPolicy: Always
         command: ["rq"]
         args: ["worker", "--with-scheduler", "--url", "redis://$(REDIS_HOST):$(REDIS_PORT)"]
@@ -353,7 +359,7 @@ spec:
             value: data-store.braincerebellumdata-test.svc.cluster.local
       containers:
       - name: sgl-server
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-4574ead8
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-f8706acb
         imagePullPolicy: Always
         ports:
           - containerPort: 8050

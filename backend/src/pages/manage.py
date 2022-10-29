@@ -8,6 +8,9 @@ rendered in a different module:
     - curate.py: Curate database tables with lab metadata (subjects, experiment rigs, research projects, etc).
     - manage_users.py: User management functions.
     - manage_repo.py: View the contents of the portal backup repository on S3.
+    - manage_app_log.py: View the contents of the application message log, including older logs that have been saved
+      to the portal backup repository.
+    - manage_api_requests_log.py: View the contents of the API requests log.
 
 @created: 18apr2022
 @author: sruffner
@@ -15,7 +18,7 @@ rendered in a different module:
 from typing import Optional
 
 import flask_login
-from dash import html, callback, Output, Input, dcc
+from dash import html, callback, Output, Input
 import dash_bootstrap_components as dbc
 
 from app import PortalUser, load_authorized_user
@@ -32,8 +35,8 @@ _ADMIN_SECTION_LABELS = ['Curate Portal Content', 'Manage Users', 'View Backup R
 _SECTION_SELECTOR: str = 'admin_sect_select'
 """ ID of mutually exclusive Bootstrap RadioItems group used to select the admin section to display. """
 
-_SECTION_LOADING: str = 'admin_sect_loading'
-""" ID of Dash Loading component in which selected admin section is rendered (some sections load a bit slowly. """
+_SECTION_DIV: str = 'admin_sect_div'
+""" ID of HTML Div in which selected admin section is rendered. """
 
 
 def serve_layout() -> html.Div:
@@ -57,17 +60,17 @@ def serve_layout() -> html.Div:
         style=dict(display='block', borderBottom='1.5px solid rgb(176,196,222)'),
         inline=True,
     )
-    section_loading = dcc.Loading(id=_SECTION_LOADING, children=curate.layout, type='circle')
+    section_div = html.Div(id=_SECTION_DIV, children=curate.layout)
 
     card = dbc.Card([
         dbc.CardHeader("Portal Administration"),
-        dbc.CardBody([section_selector, section_loading]),
+        dbc.CardBody([section_selector, section_div]),
     ], class_name='mx-5 my-5')
 
     return html.Div(card)
 
 
-@callback(Output(_SECTION_LOADING, "children"), [Input(_SECTION_SELECTOR, "value")], prevent_initial_call=True)
+@callback(Output(_SECTION_DIV, "children"), [Input(_SECTION_SELECTOR, "value")], prevent_initial_call=True)
 def on_select_option(value):
     out = "Select one of the options above."
     if value == _CURATE:

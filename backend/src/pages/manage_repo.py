@@ -6,34 +6,50 @@ displays the contents of the portal's backing repository, which is maintained in
 in Amazon Web Services's Simple Storage Service (AWS S3).
 
 While an S3 bucket is a non-hierarchical storage system, each file is associated with a unique string key, and the
-portal repository design uses the keys to implement a file system-like hierarchy. There are 3 "folders" in the
+portal repository design uses the keys to implement a file system-like hierarchy. There several "folders" in the
 repository.
-
-The /downloads folder is temporary storage for data download packages prepared at the request of registered users. Once
-generated in response to a download request, the data file is uploaded to /downloads/<req_id>.<ext> and a presigned URL
-is passed to the client so the file can be downloaded directly from S3. Files in the /downloads folder "expire" and are
-automatically removed after 1 day.
 
 The /repo folder contains a ZIP archive for every experiment session that has been successfully committed to the portal
 databases. The archive key is uniquely defined by a session's primary key: /repo/<experimenter>/<subj>_<date>_<sfx>.zip,
 where <experimenter> is the registered username of the contributor, <subj> is the experiment subject's ID in the
 database, <date> is the session date in the string format 'YYYY-MM-DD', and 'sfx' is the session's integer suffix. Note
-that there's a separate subfolder for each portal user that has committed experiment data to the portal.
+that there's a separate "subfolder" for each experimenter contributing session data to the portal.
 
-Finally, the /logs folder contains a backup of the database operations log, database_ops.log. This log file records
-every operation on the portal database so that, in the event of a catastrophic failure, an administrative script can
-reconstruct the database with minimal user intervention, by "playing back" the database operations stored sequentially
-in the log. Of course, the time-consuming operations are the session commits, and these, of course, require the
-corresponding session archives under the /repo node.
+The /staging folder is a transient folder that will be present whenever there are session commit jobs pending on the
+portal server. When a commit job is started, the session archive is uploaded to this staging area, under the key
+/staging/<job_id>/archive.zip. The archive is kept in the S3 repo in order to support any number of pending commit
+jobs. If these archives were kept in the portal server's local disk storage, that resource could easily be swamped if
+as few as 10 jobs were pending (it cannot be too large, as local storage on Duke's Kubernetes cluster is far more
+expensive than storage in S3). Once a commit job is removed from the server, the corresponding archive is removed from
+the staging area.
 
-Currently, this page offers only a "read-only" view of the backup repository content.
+Finally, the /logs folder contains a backup of several application logs:
+   - The database operations log, database_ops.log. This log file records every operation on the portal database so
+     that, in the event of a catastrophic failure, an administrative script can reconstruct the database with minimal
+     user intervention, by "playing back" the database operations stored sequentially in the log. Of course, the
+     time-consuming operations are the session commits, and these, of course, require the corresponding session archives
+     under the /repo node.
+   - The API requests log, api_requests.log. This records all client requests to the portal application's API
+     endpoints.
+   - Application message logs. Application log messages from the backend or an RQ worker task are streamed to a log
+     file in the server's local workspace, appmessages.log. When this file reaches a certain size, it is backed up to
+     /logs/appmessages.log-YYYYMmmDD-HH.MM on S3, then truncated to 0 bytes. Here, YYYYMmmDD-HH.MM is a date-time stamp
+     indicating when the message log was backed up.
+
+While the session archive files, the database operations log, and the API requests log should never be deleted from
+the repository, the application message log backups are less critical and may be deleted from time to time. Also, if
+a commit job fails and the uploaded session archive is left "dangling" at /staging/<job_id>/archive.zip, it would be
+useful to be able to remove it. This page includes a Delete button for this purpose. Use with care -- never delete an
+archive file under the /staging node for a commit job that is still running!
+
 
 @created: 21mar2022
 @author: sruffner
 """
-from typing import Optional, List, Dict, Union
+from typing import Optional, List, Dict, Any, Tuple
 
-from dash import html, dash_table as dt
+import dash.exceptions
+from dash import html, dash_table as dt, Output, Input, callback, no_update, dcc, State, callback_context
 import dash_bootstrap_components as dbc
 import flask_login
 
@@ -41,11 +57,11 @@ from app import PortalUser, load_authorized_user
 
 import database.table_info as ti
 from database import repo
+from database.commit_ops import commit_job_status
 from sglportalapi.util import size_with_units
 
 _REPO_TABLE_ID: str = "repo-table"
-""" ID of Dash DataTable presenting a pseudo filelisting of the portal's backup repository contents. """
-
+""" ID of Dash DataTable presenting a pseudo file listing of the portal's backup repository contents. """
 _REPO_TABLE_COLS: List[ti.Column] = [
     ti.Column('name', 'File', '300px', True),
     ti.Column('last_modified', 'Last Modified', '200px', True),
@@ -53,65 +69,12 @@ _REPO_TABLE_COLS: List[ti.Column] = [
     ti.Column('size', 'Size', '100px', True),
 ]
 """ Defined columns for the repository contents table. """
-
-_OP_ALERT_ID: str = "op-alert"
-""" ID of Bootstrap Alert that displays error message at top of page if an error occurs. """
-
-
-def _fetch_repo_contents() -> Union[str, List[Dict[str, str]]]:
-    """
-    Helper method fetches the contents of the portal's backup repository and prepares the information for display in a
-    Dash DataTable.
-    """
-    folders = repo.listing()
-    if folders is None:
-        return "Unable to retrieve contents of portal's repository. Consult application logs."
-    rows = list()
-    for folder_key in sorted(folders.keys()):
-        folder_size = sum([float(file_info['size']) for file_info in folders[folder_key]])
-        rows.append(dict(name=f"***{folder_key}***", last_modified="--", storage_class="--",
-                         size=f"***{size_with_units(folder_size)}***"))
-        for info in folders[folder_key]:
-            rows.append(dict(name=f"\u21b3 {info['name']}",
-                             last_modified=info['last_modified'].strftime('%m-%d-%Y %H:%M:%S %Z'),
-                             storage_class=info['storage_class'], size=size_with_units(info['size'])))
-    return rows
-
-
-def _table_of_repo_contents(user_is_admin: bool) -> html.Div:
-    """
-    Prepare the Dash DataTable displaying information on files stored in the portal's backup repository.
-    """
-    rows = []
-    error_msg = None
-    if not user_is_admin:
-        error_msg = "You are not authorized to view the contents of the backup repository."
-    else:
-        rows = _fetch_repo_contents()
-        if isinstance(rows, str):
-            error_msg = rows
-            rows = []
-
-    data_table = dt.DataTable(
-        id=_REPO_TABLE_ID,
-        columns=[{"name": col.label, "id": col.id, "presentation": "markdown" if col.is_markdown else "input"}
-                 for col in _REPO_TABLE_COLS],
-        data=rows,
-        row_selectable=False,
-        cell_selectable=False,
-        selected_rows=[],
-        style_header={'fontWeight': 'bold'},
-        style_cell={'textAlign': 'left', 'whiteSpace': 'normal', 'height': 'auto', 'lineHeight': '18px'},
-        style_data={'whiteSpace': 'pre-wrap'},
-        style_cell_conditional=[{'if': {'column_id': col.id}, 'width': col.width} for col in _REPO_TABLE_COLS],
-        tooltip_data=None, tooltip_duration=None,
-        css=[],
-        style_table={'height': '500px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
-    )
-
-    alert = dbc.Alert(error_msg, id=_OP_ALERT_ID, color='danger', dismissable=True, fade=True,
-                      is_open=(error_msg is not None), class_name="mb-3")
-    return html.Div([alert, data_table])
+_REPO_ALERT_ID: str = "repo-alert"
+""" ID of a Bootstrap Alert in which an error message is displayed. """
+_REPO_STORE_ID: str = "repo-store"
+""" ID of a Dash Store component in which the portal's repository content list is stored when the page loads. """
+_REPO_DEL_BTN: str = "repo-delete"
+""" ID of button widget by which admin user can permanently delete a selected file in the repository, if enabled. """
 
 
 def serve_layout() -> html.Div:
@@ -127,4 +90,212 @@ def serve_layout() -> html.Div:
     if flask_login.current_user.is_authenticated:
         portal_user = load_authorized_user(flask_login.current_user.get_id())
     is_admin = (portal_user is not None) and portal_user.is_admin()
-    return _table_of_repo_contents(is_admin)
+
+    # get the full listing of the portal repository's contents, which we keep in a Store component for safekeeping
+    if not is_admin:
+        error_msg, repo_contents = "You are not authorized to view the contents of the backup repository.", {}
+    else:
+        error_msg, repo_contents = _fetch_repo_contents()
+    store = dcc.Store(id=_REPO_STORE_ID, data=repo_contents)
+
+    alert = dbc.Alert(error_msg, id=_REPO_ALERT_ID, color='danger', dismissable=True, fade=True, duration=10000,
+                      is_open=(len(error_msg) > 0), class_name="mb-3")
+
+    # initialize the Datatable to display only the folder keys, each of which is rendered in a "collapsed state" by
+    # prepending a right-pointing triangle before the folder name. In addition to the displayed table fields, each
+    # row includes attributes that help with expanding/collapsing any folder node when any cell in that node's row is
+    # "clicked". NOTE that the presence of a right-pointing or down-pointing arrow as the first character in the 'name'
+    # field indicates a folder in the collapsed or expanded state!
+    rows = []
+    for folder_key in sorted(repo_contents.keys()):
+        folder_size = sum([float(file_info['size']) for file_info in repo_contents[folder_key]])
+        rows.append(dict(s3_key=folder_key, name=f"\u25b8  ***{folder_key}***", last_modified="--", storage_class="--",
+                         size=f"***{size_with_units(folder_size)} [{len(repo_contents[folder_key])} files]***"))
+
+    data_table = dt.DataTable(
+        id=_REPO_TABLE_ID,
+        columns=[{"name": col.label, "id": col.id, "presentation": "markdown" if col.is_markdown else "input"}
+                 for col in _REPO_TABLE_COLS],
+        data=rows,
+        row_selectable=False,
+        cell_selectable=True,
+        selected_rows=[],
+        style_header={'fontWeight': 'bold'},
+        style_cell={'textAlign': 'left', 'whiteSpace': 'normal', 'height': 'auto', 'lineHeight': '18px'},
+        style_data={'whiteSpace': 'pre-wrap'},
+        style_data_conditional=[
+            {
+                "if": {"state": "selected"},
+                "backgroundColor": "inherit !important",
+                "border": "inherit !important",
+            }
+        ],
+        style_cell_conditional=[{'if': {'column_id': col.id}, 'width': col.width} for col in _REPO_TABLE_COLS],
+        tooltip_data=None, tooltip_duration=None,
+        css=[],
+        style_table={'height': '500px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
+    )
+
+    delete_btn = dbc.Button("Delete", id=_REPO_DEL_BTN, disabled=True, n_clicks=0)
+    del_row = dbc.Row(dbc.Col(delete_btn, width='auto'), justify='end', class_name='mt-2')
+
+    return html.Div([store, alert, data_table, del_row])
+
+
+def _fetch_repo_contents() -> Tuple[str, Dict[str, List[Dict[str, Any]]]]:
+    """
+    Fetch the portal repository's contents list. The 'last_modified' field for each file object is converted from a
+    `datetime` to a string, since `datetime` cannot be JSONified for storage in the Dash Store component on this page.
+
+    Returns:
+        A 2-tuple ("", C) on successs, where C is the repository content listing, ready to be cached in the Store
+            component. Returns (error message, {}) on failure.
+    """
+    out = repo.listing()
+    if isinstance(out, str):
+        return out, {}
+    else:
+        repo_contents = out
+        # convert the "last modified" fields to strings, as they cannot be JSONified for the Store component
+        for k in repo_contents.keys():
+            for info in repo_contents[k]:
+                info['last_modified'] = info['last_modified'].strftime('%m-%d-%Y %H:%M:%S %Z')
+        return "", repo_contents
+
+
+@callback(
+    [Output(_REPO_TABLE_ID, "data"), Output(_REPO_TABLE_ID, "style_data_conditional"),
+     Output(_REPO_TABLE_ID, "active_cell"), Output(_REPO_DEL_BTN, "disabled")],
+    [Input(_REPO_TABLE_ID, "active_cell"), Input(_REPO_STORE_ID, 'modified_timestamp')],
+    [State(_REPO_TABLE_ID, "data"), State(_REPO_STORE_ID, "data"), State(_REPO_TABLE_ID, 'active_cell')],
+    prevent_initial_call=True)
+def on_repo_listing_or_selection_changed(active_cell, store_ts, current_rows, repo_folders, curr_active_cell):
+    style_data_conditional = [
+        {"if": {"state": "selected"}, "background-color": "inherit !important", "border": "inherit !important"}
+    ]
+    del_disabled = True
+
+    ctx = callback_context
+    if not ctx.triggered:
+        raise dash.exceptions.PreventUpdate
+    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ""
+    if trigger_id == _REPO_STORE_ID:
+        if store_ts is None:
+            raise dash.exceptions.PreventUpdate
+        # repo listing has changed bc user deleted a file object. Update table rows, but keep expanded those folders
+        # that were expanded prior to the deletion
+        previously_expanded = set()
+        for i, r in enumerate(current_rows):
+            if r['storage_class'] == '--':
+                if ((i + 1) < len(current_rows)) and (current_rows[i+1]['storage_class'] != '--'):
+                    previously_expanded.add(r['s3_key'])
+        rows = []
+        for folder_key in sorted(repo_folders.keys()):
+            folder_size = sum([float(file_info['size']) for file_info in repo_folders[folder_key]])
+            arrow_char = "\u25be" if (folder_key in previously_expanded) else "\u25b8"
+            rows.append(
+                dict(s3_key=folder_key, name=f"{arrow_char}  ***{folder_key}***", last_modified="--",
+                     storage_class="--",
+                     size=f"***{size_with_units(folder_size)} [{len(repo_folders[folder_key])} files]***"))
+            # is the folder currently expanded? If so, append all the file objects in that folder
+            if folder_key in previously_expanded:
+                for info in repo_folders[folder_key]:
+                    rows.append(
+                        dict(s3_key=f"{folder_key}/{info['name']}", name=f"\u21b3 {info['name']}",
+                             last_modified=info['last_modified'], storage_class=info['storage_class'],
+                             size=size_with_units(info['size'])))
+        current_rows = rows
+
+        # if the active cell is still among the rows of the updated table, be sure to set background for that
+        # entire row. Also check if that cell corresponds to a deletable file
+        if 0 <= curr_active_cell['row'] < len(current_rows):
+            active_cell = curr_active_cell
+            style_data_conditional = [
+                {"if": {"row_index": active_cell['row']}, "background-color": "rgba(176, 196, 222, 0.5)"},
+                {"if": {"state": "selected"}, "background-color": "rgba(176, 196, 222, 0.5)",
+                 "border": "inherit !important"}
+            ]
+            row = current_rows[active_cell['row']]
+            s3_key, is_folder = row['s3_key'], row['storage_class'] == '--'
+            del_disabled = is_folder or not (s3_key.startswith('/staging') or
+                                             s3_key.startswith('/logs/appmessages.log'))
+    elif isinstance(active_cell, dict) and (active_cell['row'] >= 0):
+        style_data_conditional = [
+            {"if": {"row_index": active_cell['row']}, "background-color": "rgba(176, 196, 222, 0.5)"},
+            {"if": {"state": "selected"}, "background-color": "rgba(176, 196, 222, 0.5)",
+             "border": "inherit !important"}
+        ]
+
+        row = current_rows[active_cell['row']]
+        s3_key, collapsed, expanded = row['s3_key'], row['name'].startswith('\u25b8'), row['name'].startswith('\u25be')
+        if not (collapsed or expanded):
+            del_disabled = not (s3_key.startswith('/staging') or s3_key.startswith('/logs/appmessages.log'))
+            return no_update, style_data_conditional, no_update, del_disabled
+
+        if collapsed:
+            # toggle right arrow down as an indication that folder node is expanded
+            row['name'] = f"\u25be  ***{s3_key}***"
+            # insert a row for each file object under that folder.
+            idx = active_cell['row'] + 1
+            for info in repo_folders[s3_key]:
+                current_rows.insert(
+                    idx,
+                    dict(s3_key=f"{s3_key}/{info['name']}", name=f"\u21b3 {info['name']}",
+                         last_modified=info['last_modified'], storage_class=info['storage_class'],
+                         size=size_with_units(info['size']))
+                )
+                idx += 1
+            active_cell['row'] = -1
+        else:
+            # toggle down arrow to right as an indication that folder node is collapsed
+            row['name'] = f"\u25b8  ***{s3_key}***"
+            # remove all file object nodes after the folder node (until we hit EOL or another folder node)
+            idx = active_cell['row'] + 1
+            while (idx < len(current_rows)) and not \
+                    (current_rows[idx]['name'].startswith('\u25b8') or current_rows[idx]['name'].startswith('\u25be')):
+                current_rows.pop(idx)
+            active_cell['row'] = -1
+
+    return current_rows, style_data_conditional, active_cell, del_disabled
+
+
+@callback(
+    [Output(_REPO_STORE_ID, "data"), Output(_REPO_ALERT_ID, "children"), Output(_REPO_ALERT_ID, "is_open")],
+    [Input(_REPO_DEL_BTN, "n_clicks")], [State(_REPO_TABLE_ID, "active_cell"), State(_REPO_TABLE_ID, "data")],
+    prevent_initial_call=True)
+def on_delete(n_delete, active_cell, current_rows):
+    if n_delete is not None:
+        row_idx = active_cell['row'] if isinstance(active_cell, dict) else -1
+        if isinstance(current_rows, list) and (row_idx > -1) and (row_idx < len(current_rows)):
+            row: dict = current_rows[row_idx]
+            emsg, repo_contents = _delete_file_in_repo(row['s3_key'])
+            return repo_contents if len(emsg) == 0 else no_update, emsg, len(emsg) > 0
+
+    raise dash.exceptions.PreventUpdate
+
+
+def _delete_file_in_repo(file_key: str) -> Tuple[str, Dict[str, List[Dict[str, Any]]]]:
+    """
+    Helper method for on_delete(). Deletes the specified file in the portal repository and retrieves the updated
+    listing of the  repository contents.
+
+    Args:
+        file_key: The key of the file object to be removed from the portal repository in S3.
+    Returns:
+        A 2-tuple ("", listing) on success, where listing is the repository contents listing ready to be cached in the
+            Store component on this page. On failure: (error message, {})
+
+    """
+    if not (file_key.startswith('/staging') or file_key.startswith('/logs/appmessages.log')):
+        return "The selected file may not be removed from the portal repository", {}
+    elif file_key.startswith('/staging'):
+        parts = file_key.split('/')
+        if (len(parts) == 4) and (parts[3] == 'archive.zip'):
+            job_status = commit_job_status(parts[2])
+            if not isinstance(job_status, str):
+                return "Cannot remove archive for an in-progress session commit job", {}
+
+    if not repo.delete_file(file_key):
+        return "Unable to remove selected file from portal repository", {}
+
+    return _fetch_repo_contents()

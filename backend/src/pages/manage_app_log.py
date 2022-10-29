@@ -12,7 +12,7 @@ in a read-only text area. The older log files in the repository may be permanent
 """
 from typing import Optional
 
-from dash import html, callback, Output, Input, dcc, State, no_update
+from dash import html, callback, Output, Input, State, no_update
 import dash_bootstrap_components as dbc
 
 import flask_login
@@ -26,11 +26,6 @@ _SELECT_ID: str = "admin-log-select"
 """ ID of Bootstrap Select used to select an application message log for viewing. """
 _CONTENT_AREA_ID: str = "admin-log-content"
 """ ID of a Textarea component that displays the content of the currently selected application message log. """
-_CONTENT_LOADING_ID: str = "admin-log-loading"
-""" 
-ID of the Dash Loading component encapsulating the Textarea to display a loading indicator when it takes a significant
-amount of time to retrieve the selected log's content.
-"""
 _DELETE_ID: str = "admin-log-delete-btn"
 """ ID of button that deletes the currently selected application message log. """
 
@@ -70,8 +65,7 @@ def serve_layout() -> html.Div:
         dbc.Col([remove_btn], width='auto')
     ], justify='between', class_name='mb-3')
     content_area = dbc.Textarea(id=_CONTENT_AREA_ID, rows=20, size='sm', readonly=True, wrap=False, value=initial_log)
-    loading_content = dcc.Loading(id=_CONTENT_LOADING_ID, children=content_area, type='circle')
-    return html.Div([control_row, loading_content])
+    return html.Div([control_row, content_area])
 
 
 @callback([Output(_CONTENT_AREA_ID, "value"), Output(_DELETE_ID, "disabled")], [Input(_SELECT_ID, "value")])

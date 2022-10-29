@@ -542,9 +542,9 @@ def _remove_job_subfolder(job_id: str) -> None:
     staging_dir = _get_job_subfolder(job_id)
     try:
         if staging_dir.exists():
-            shutil.rmtree(str(staging_dir))
-    except OSError:
-        _logger.error(f"Failed to delete staging directory in repository at {str(staging_dir)}", exc_info=True)
+            shutil.rmtree(str(staging_dir), ignore_errors=True)
+    except Exception:
+        _logger.error(f"Unexpected error deleting staging directory in repository at {str(staging_dir)}")
 
 
 def initiate_session_commit(
