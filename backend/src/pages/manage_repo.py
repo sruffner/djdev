@@ -75,48 +75,41 @@ _REPO_STORE_ID: str = "repo-store"
 """ ID of a Dash Store component in which the portal's repository content list is stored when the page loads. """
 _REPO_DEL_BTN: str = "repo-delete"
 """ ID of button widget by which admin user can permanently delete a selected file in the repository, if enabled. """
+_REPO_FILE_COUNT_BADGE: str = "repo-file-count-badge"
+""" 
+ID of a Bootstrap Badge component that reflects how many file objects are in the repo. It is wrapped by a Loading 
+component in order to display a loading spinner while the repository content listing is fetched.
+"""
+_REPO_LOADING: str = "repo-loading-indicatior"
+""" ID of the Loading component that displays a spinner when the repository content listing is fetched. """
 
 
 def serve_layout() -> html.Div:
     """
     Serve the layout for the "backup repository contents" page. The page includes a table listing all files stored in
-    the portal's backup repository, in a pseudo hierarchical fashion. The page content is read-only at this time. Only
-    authorized users with administrative privileges should have access to this page.
+    the portal's backup repository, in a pseudo hierarchical fashion. Certain non-essential file objects in the repo
+    may be deleted via this page. Only authorized users with administrative privileges should have access.
 
     Returns:
         An HTML Div rendering the user account management page.
     """
-    portal_user: Optional[PortalUser] = None
-    if flask_login.current_user.is_authenticated:
-        portal_user = load_authorized_user(flask_login.current_user.get_id())
-    is_admin = (portal_user is not None) and portal_user.is_admin()
+    # the repository listing is cached in a Store component, but retrieving it takes a little while. So we delay
+    # retrieval until after initial load
+    store = dcc.Store(id=_REPO_STORE_ID, data={})
+    loading_badge = dbc.Badge("Total files: ", id=_REPO_FILE_COUNT_BADGE, color='primary', )
 
-    # get the full listing of the portal repository's contents, which we keep in a Store component for safekeeping
-    if not is_admin:
-        error_msg, repo_contents = "You are not authorized to view the contents of the backup repository.", {}
-    else:
-        error_msg, repo_contents = _fetch_repo_contents()
-    store = dcc.Store(id=_REPO_STORE_ID, data=repo_contents)
-
-    alert = dbc.Alert(error_msg, id=_REPO_ALERT_ID, color='danger', dismissable=True, fade=True, duration=10000,
-                      is_open=(len(error_msg) > 0), class_name="mb-3")
-
-    # initialize the Datatable to display only the folder keys, each of which is rendered in a "collapsed state" by
-    # prepending a right-pointing triangle before the folder name. In addition to the displayed table fields, each
-    # row includes attributes that help with expanding/collapsing any folder node when any cell in that node's row is
-    # "clicked". NOTE that the presence of a right-pointing or down-pointing arrow as the first character in the 'name'
-    # field indicates a folder in the collapsed or expanded state!
-    rows = []
-    for folder_key in sorted(repo_contents.keys()):
-        folder_size = sum([float(file_info['size']) for file_info in repo_contents[folder_key]])
-        rows.append(dict(s3_key=folder_key, name=f"\u25b8  ***{folder_key}***", last_modified="--", storage_class="--",
-                         size=f"***{size_with_units(folder_size)} [{len(repo_contents[folder_key])} files]***"))
+    alert = dbc.Alert("", id=_REPO_ALERT_ID, color='danger', dismissable=True, fade=True, duration=10000,
+                      is_open=False)
+    alert_row = dbc.Row([
+        dbc.Col(dcc.Loading(html.H5(loading_badge), id=_REPO_LOADING, type='circle', className='me-auto'), width=2),
+        dbc.Col(alert, width=10)
+    ], class_name='mb-2')
 
     data_table = dt.DataTable(
         id=_REPO_TABLE_ID,
         columns=[{"name": col.label, "id": col.id, "presentation": "markdown" if col.is_markdown else "input"}
                  for col in _REPO_TABLE_COLS],
-        data=rows,
+        data=[],
         row_selectable=False,
         cell_selectable=True,
         selected_rows=[],
@@ -136,10 +129,10 @@ def serve_layout() -> html.Div:
         style_table={'height': '500px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
     )
 
-    delete_btn = dbc.Button("Delete", id=_REPO_DEL_BTN, disabled=True, n_clicks=0)
-    del_row = dbc.Row(dbc.Col(delete_btn, width='auto'), justify='end', class_name='mt-2')
+    delete_btn = dbc.Button("Delete", id=_REPO_DEL_BTN, disabled=True)
+    delete_row = dbc.Row(dbc.Col(delete_btn, width='auto'), justify='end', class_name='mt-3')
 
-    return html.Div([store, alert, data_table, del_row])
+    return html.Div([store, alert_row, data_table, delete_row])
 
 
 def _fetch_repo_contents() -> Tuple[str, Dict[str, List[Dict[str, Any]]]]:
@@ -182,8 +175,9 @@ def on_repo_listing_or_selection_changed(active_cell, store_ts, current_rows, re
     if trigger_id == _REPO_STORE_ID:
         if store_ts is None:
             raise dash.exceptions.PreventUpdate
-        # repo listing has changed bc user deleted a file object. Update table rows, but keep expanded those folders
-        # that were expanded prior to the deletion
+        # handles two scenarios: (1) The repo listing is fetched and put in Store after initial layout. (2) The repo
+        # listing has changed bc user deleted a file object. In the latter case, this updates the table rows, but keeps
+        # expanded those folders that were expanded prior to the deletion.
         previously_expanded = set()
         for i, r in enumerate(current_rows):
             if r['storage_class'] == '--':
@@ -208,7 +202,7 @@ def on_repo_listing_or_selection_changed(active_cell, store_ts, current_rows, re
 
         # if the active cell is still among the rows of the updated table, be sure to set background for that
         # entire row. Also check if that cell corresponds to a deletable file
-        if 0 <= curr_active_cell['row'] < len(current_rows):
+        if isinstance(curr_active_cell, dict) and 0 <= curr_active_cell['row'] < len(current_rows):
             active_cell = curr_active_cell
             style_data_conditional = [
                 {"if": {"row_index": active_cell['row']}, "background-color": "rgba(176, 196, 222, 0.5)"},
@@ -260,16 +254,34 @@ def on_repo_listing_or_selection_changed(active_cell, store_ts, current_rows, re
 
 
 @callback(
-    [Output(_REPO_STORE_ID, "data"), Output(_REPO_ALERT_ID, "children"), Output(_REPO_ALERT_ID, "is_open")],
-    [Input(_REPO_DEL_BTN, "n_clicks")], [State(_REPO_TABLE_ID, "active_cell"), State(_REPO_TABLE_ID, "data")],
-    prevent_initial_call=True)
+    [Output(_REPO_STORE_ID, "data"), Output(_REPO_FILE_COUNT_BADGE, "children"), Output(_REPO_ALERT_ID, "children"),
+     Output(_REPO_ALERT_ID, "is_open")],
+    [Input(_REPO_DEL_BTN, "n_clicks")], [State(_REPO_TABLE_ID, "active_cell"), State(_REPO_TABLE_ID, "data")])
 def on_delete(n_delete, active_cell, current_rows):
-    if n_delete is not None:
+    if n_delete is None:
+        # initial call -- retrieve repo listing
+        portal_user: Optional[PortalUser] = None
+        if flask_login.current_user.is_authenticated:
+            portal_user = load_authorized_user(flask_login.current_user.get_id())
+        is_admin = (portal_user is not None) and portal_user.is_admin()
+        if not is_admin:
+            return no_update, no_update, "You are not authorized to view repository contents", True
+        emsg, repo_contents = _fetch_repo_contents()
+        if len(emsg) > 0:
+            return no_update, no_update, emsg, True
+        else:
+            file_count = sum([len(v) for _, v in repo_contents.items()])
+            return repo_contents, f"Total files: {file_count}", "", False
+    else:
         row_idx = active_cell['row'] if isinstance(active_cell, dict) else -1
         if isinstance(current_rows, list) and (row_idx > -1) and (row_idx < len(current_rows)):
             row: dict = current_rows[row_idx]
             emsg, repo_contents = _delete_file_in_repo(row['s3_key'])
-            return repo_contents if len(emsg) == 0 else no_update, emsg, len(emsg) > 0
+            if len(emsg) > 0:
+                return no_update, no_update, emsg, True
+            else:
+                file_count = sum([len(v) for _, v in repo_contents.items()])
+                return repo_contents, f"Total files: {file_count}", "", False
 
     raise dash.exceptions.PreventUpdate
 
