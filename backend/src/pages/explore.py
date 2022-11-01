@@ -131,24 +131,24 @@ _SEARCH_TABLE_ID: str = "search_table"
 """ The ID assigned to the Dash DataTable presenting filtered search results. """
 
 _SESSION_TABLE_COLS: List[ti.Column] = [
-    ti.Column('session_date', 'Date', '125px', False),
-    ti.Column('full_name', 'Experimenter', '150px', False),
-    ti.Column('subj_id', 'Subject', '75px', False),
-    ti.Column('study_title', 'Research Project', '250px', False),
-    ti.Column('num_units', '#Units', '75px', False),
-    ti.Column('num_trials', '#Trials', '75px', False),
-    ti.Column('committed', 'Added on', '125px', False),
+    ti.Column('session_date', 'Date', '125px', True),
+    ti.Column('full_name', 'Experimenter', '150px', True),
+    ti.Column('subj_id', 'Subject', '75px', True),
+    ti.Column('study_title', 'Research Project', '250px', True),
+    ti.Column('num_units', '#Units', '75px', True),
+    ti.Column('num_trials', '#Trials', '75px', True),
+    ti.Column('commit_datetime', 'Added on', '125px', True),
 ]
 """ Defined columns for the search results table when searching by experiment session. """
 
 _NEURON_TABLE_COLS: List[ti.Column] = [
-    ti.Column('session_date', 'Recorded On', '100px', False),
-    ti.Column('unit_id', 'Unit #', '50px', False),
-    ti.Column('nt_name', 'Neuron Type', '100px', False),
-    ti.Column('unit_rate', 'Rate (Hz)', '100px', False),
-    ti.Column('unit_spikes', '#Spikes', '100px', False),
-    ti.Column('full_name', 'Experimenter', '150px', False),
-    ti.Column('subj_id', 'Subject', '100px', False)
+    ti.Column('session_date', 'Recorded On', '100px', True),
+    ti.Column('unit_id', 'Unit #', '50px', True),
+    ti.Column('nt_name', 'Neuron Type', '100px', True),
+    ti.Column('unit_rate', 'Rate (Hz)', '100px', True),
+    ti.Column('unit_spikes', '#Spikes', '100px', True),
+    ti.Column('full_name', 'Experimenter', '150px', True),
+    ti.Column('subj_id', 'Subject', '100px', True)
 ]
 """ Defined columns for the search results table when searching by neuron. """
 
@@ -226,6 +226,7 @@ def _fetch_search_results(mode: int = _SESSION_MODE, restrictions: Optional[List
         for row in rows:
             row['full_name'] = user_map[row['experimenter']]
             row['study_title'] = study_map[row['study_id']]
+            row['commit_datetime'] = row['committed'].strftime("%d %b %Y [%I:%M%p %Z]")
 
     return rows
 

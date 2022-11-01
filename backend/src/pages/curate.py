@@ -119,10 +119,10 @@ def _make_table_for(table_id: str, rows: List[Dict[str, AttributeValue]], cols: 
 _SUBJ_TABLE_ID: str = "subj-table"
 """ The ID assigned to the Dash DataTable presenting all experiment subjects in the Lisberger lab database. """
 _SUBJ_TABLE_COLS: List[Column] = [
-    Column('subj_id', 'Subject ID', '100px', False),
-    Column('species', 'Species', '125px', False),
-    Column('dob', 'Date of Birth', '75px', False),
-    Column('sex', 'Sex', '50px', False)
+    Column('subj_id', 'Subject ID', '100px', True),
+    Column('species', 'Species', '125px', True),
+    Column('dob', 'Date of Birth', '75px', True),
+    Column('sex', 'Sex', '50px', True)
 ]
 """ Defined columns for the experiment subjects table. """
 _SUBJ_ID_INPUT: str = "subj-id-input"
@@ -224,12 +224,12 @@ ID assigned to the Dash DataTable presenting the implant history for a given exp
 lab database.
 """
 _IMPLANT_TABLE_COLS: List[Column] = [
-    Column('implant_date', 'Surgery Date', '125px', False),
-    Column('st_ap', 'AP(mm)', '50px', False),
-    Column('st_ml', 'ML(mm)', '50px', False),
-    Column('st_dv', 'DV(mm)', '50px', False),
-    Column('ap_angle', 'AP \u03b8\u00b0', '50px', False),
-    Column('ml_angle', 'ML \u03b8\u00b0', '50px', False)
+    Column('implant_date', 'Surgery Date', '125px', True),
+    Column('st_ap', 'AP(mm)', '50px', True),
+    Column('st_ml', 'ML(mm)', '50px', True),
+    Column('st_dv', 'DV(mm)', '50px', True),
+    Column('ap_angle', 'AP \u03b8\u00b0', '50px', True),
+    Column('ml_angle', 'ML \u03b8\u00b0', '50px', True)
 ]
 """ 
 Defined columns for the experiment subjects table. The subject ID is not shown, because the table only lists the
@@ -506,8 +506,8 @@ def _implant_table_callback(*args):
 _RIG_TABLE_ID: str = "rig-table"
 """ The ID assigned to the Dash DataTable presenting all experiment rigs in the Lisberger lab database. """
 _RIG_TABLE_COLS: List[Column] = [
-    Column('rig_id', 'Rig ID', '100px', False),
-    Column('rig_loc', 'Location', '300px', False)
+    Column('rig_id', 'Rig ID', '100px', True),
+    Column('rig_loc', 'Location', '300px', True)
 ]
 """ Defined columns for the experiment rigs table. """
 _RIG_ID_INPUT: str = "rig-id-input"
@@ -627,7 +627,7 @@ def rig_table_callback(*args):
 
 _BA_TABLE_ID: str = "ba-table"
 """ The ID assigned to the Dash DataTable presenting the table of brain areas in the lab database. """
-_BA_TABLE_COLS: List[Column] = [Column('ba_name', 'Brain Area', '200px', False)]
+_BA_TABLE_COLS: List[Column] = [Column('ba_name', 'Brain Area', '200px', True)]
 """ Defined columns for the brain areas table. """
 _BA_NAME_INPUT: str = "ba-name-input"
 """ ID of text input widget for displaying/setting the 'ba_name' attribute of a new or existing brain area. """
@@ -643,7 +643,7 @@ _BA_ALERT: str = "ba-alert"
 _NT_TABLE_ID: str = "nt-table"
 """ The ID assigned to the Dash DataTable presenting the table of neuron types in the lab database. """
 _NT_TABLE_COLS: List[Column] = [
-    Column('nt_name', 'Neuron Type', '200px', False)
+    Column('nt_name', 'Neuron Type', '200px', True)
 ]
 """ Defined columns for the brain areas table. """
 _NT_NAME_INPUT: str = "nt-name-input"
@@ -852,10 +852,9 @@ def neuron_type_table_callback(*args):
 _STUDY_TABLE_ID: str = "study-table"
 """ The ID assigned to the Dash DataTable presenting the table of research studies in the lab database. """
 _STUDY_TABLE_COLS: List[Column] = [
-    Column('study_title', 'Title', '200px', False),
-    Column('study_lead_full', 'Project Lead', '200px', False),
-    Column('study_desc', 'Description', '700px', False),
-    Column('n_pubs', '#Pubs', '30px', False)   # how many publications are associated with this study?
+    Column('title_lead', 'Title/Lead', '400px', True),  # composed field with study_title and full name of study_lead
+    Column('study_desc', 'Description', '700px', True),
+    Column('n_pubs', '#Pubs', '30px', True)   # how many publications are associated with this study?
 ]
 """ Defined columns for the research studies table. """
 _STUDY_TITLE_INPUT: str = "study-title-input"
@@ -880,7 +879,7 @@ _STUDY_PUBS_CARD: str = "study-pubs_card"
 _PUB_TABLE_ID: str = "pub-table"
 """ The ID assigned to the Dash DataTable presenting the table of research publications in the lab database. """
 _PUB_TABLE_COLS: List[Column] = [
-    Column('citation', 'Citation', '700px', False),
+    Column('citation', 'Citation', '700px', True),
     Column('link', 'Link', '50px', True)   # uses Markdown to present the pub DOI as a link to the online publication
 ]
 """ Defined columns for the brain areas table. """
@@ -907,10 +906,10 @@ def _prepare_rows_for_study_table() -> Optional[List[Dict[str, AttributeValue]]]
 
     Returns:
         The list of table rows that are displayed in the research studies table. Each row is a dictionary with these
-            keys: 'study_id' (the integer ID, not shown in table); 'study_title'; 'study_lead' (the username for the
-            project lead, not shown in table); 'study_lead_full' (the full name of the project lead); 'study_desc';
-            and 'n_pubs' (# of publications related to study). If an error occurs while retrieving database content,
-            returns None.
+            keys: 'study_id' (the integer ID, not shown in table); 'study_title' (not shown); 'study_lead' (the username
+            for the project lead, not shown in table); 'title_lead' (composed field with study title and full name of
+            the project lead); 'study_desc'; and 'n_pubs' (# of publications related to study). If an error occurs while
+            retrieving database content, returns None.
     """
     rows = fetch_rows(DBTable.STUDY)
     study_to_pub_rows = fetch_rows(DBTable.STUDY_TO_PUB)
@@ -918,13 +917,12 @@ def _prepare_rows_for_study_table() -> Optional[List[Dict[str, AttributeValue]]]
     if (rows is None) or (study_to_pub_rows is None) or (user_rows is None):
         get_application_logger().debug("Unable to prepare rows for research studies table; database retrieval error")
         return None
+    user_to_full = {r['username']: r['full_name'] for r in user_rows}
     for r in rows:
         r['n_pubs'] = [(k['study_id'] == r['study_id']) for k in study_to_pub_rows].count(True)
-        for user_row in user_rows:
-            if user_row['username'] == r['study_lead']:
-                r['study_lead_full'] = user_row['full_name']
-                break
-        if 'study_lead_full' not in r:
+        try:
+            r['title_lead'] = f"**{r['study_title']}**\n*{user_to_full[r['study_lead']]}*"
+        except KeyError:
             get_application_logger().debug(
                 f"Database inconsistency! Did not find study lead with username '{r['study_lead']}'.")
             return None
@@ -1006,7 +1004,7 @@ def _research_tabpane() -> html.Div:
     if (rows is None) or (user_rows is None) or (pub_rows is None):
         rows, pub_rows, error_msg = [], [], _TABLE_RETRIEVE_ERROR
 
-    study_table = _make_table_for(_STUDY_TABLE_ID, rows, _STUDY_TABLE_COLS, height=500, num_lines_per_row=8)
+    study_table = _make_table_for(_STUDY_TABLE_ID, rows, _STUDY_TABLE_COLS, height=500, num_lines_per_row=5)
 
     title_grp = dbc.InputGroup([
         dbc.InputGroupText("Title"),

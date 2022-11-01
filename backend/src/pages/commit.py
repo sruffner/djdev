@@ -879,10 +879,14 @@ def _layout_session_metadata_card() -> Tuple[dbc.Card, Optional[str]]:
         dbc.InputGroupText("# Units Recorded"),
         dbc.Input(id=_NUM_UNITS_INPUT_ID,  type='number', minlength=1, maxlength=3, value=0)
     ], size='sm')
+
+    # the neuron types table: The neuron type for each recorded unit is editable via a dropdown menu which lets user
+    # select any neuron tye present in the database. We use the DataTable's 'css' property to modify the default
+    # styling of the embedded dropdown renderer.
     nt_table = dt.DataTable(
         id=_NT_TABLE_ID,
         columns=[
-            {"name": "Unit", "id": "index", "presentation": "input", "editable": False},
+            {"name": "Unit", "id": "index", "presentation": "markdown", "editable": False},
             {"name": "Neuron Type", "id": "nt_name", "presentation": "dropdown"}
         ],
         data=[],
@@ -904,7 +908,19 @@ def _layout_session_metadata_card() -> Tuple[dbc.Card, Optional[str]]:
             {'if': {'column_id': 'nt_name'}, 'width': 300}
         ],
         tooltip_data=None, tooltip_duration=None,
-        css=[],
+        css=[
+            {"selector": ".dash-spreadsheet-container .Select-value-label",
+             "rule": "font-family: sans-serif; color: var(--bs-body-color)"},
+            {"selector": ".dash-spreadsheet .Select-option", "rule": "font-family: sans-serif; color: steelblue"},
+            {"selector": ".dash-spreadsheet .Select-menu-outer", "rule": "border: thin steelblue solid"},
+            {"selector": ".dash-spreadsheet .Select-arrow", "rule": "border-top-color: var(--muted)"},
+            {"selector": ".dash-spreadsheet .Select-control:hover .Select-arrow",
+             "rule": "border-top-color: steelblue"},
+            {"selector": ".dash-spreadsheet .is-open > .Select-control .Select-arrow",
+             "rule": "border-bottom-color: steelblue"},
+            {"selector": ".dash-spreadsheet .Select-option.is-focused",
+             "rule": "background-color: steelblue; color: white"}
+        ],
         style_table={'height': '300px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
     )
     nt_div_with_dropdown_container = html.Div([
@@ -1120,7 +1136,8 @@ def update_commit_modal(*args):
         ofs = 3
         ok, job_id = initiate_session_commit(
             is_api=False, committer=committer, unit_types=unit_types, experimenter=args[ofs], subject=args[ofs+1],
-            rec_date=args[ofs+3], suffix=int(args[ofs+4]), rig=args[ofs+2], study=int(args[ofs+5]), notes=args[ofs+6],
+            rec_date=args[ofs+3], suffix=int(args[ofs+4]), rig=args[ofs+2], study=int(args[ofs+5]),
+            notes="None" if not isinstance(args[ofs+6], str) else args[ofs+6],
             brain_area=int(args[ofs+13]), src=args[ofs+7], probe=args[ofs+8], rate=float(args[ofs+9]),
             x=float(args[ofs+10]), y=float(args[ofs+11]), z=float(args[ofs+12])
         )

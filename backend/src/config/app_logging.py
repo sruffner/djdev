@@ -47,7 +47,7 @@ from datetime import datetime
 from pathlib import Path
 from random import random
 from threading import Thread
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 import yaml
 from redis import RedisError
@@ -245,6 +245,8 @@ def force_flush_application_message_log() -> None:
             messages = res[1]
     except RedisError as e:
         warn_msg = f"Error flushing Redis cache; some log messages may be lost: {str(e)}"
+    if messages is None:
+        return
 
     log_path = Path(cfg.workspace_dir, _APPMSGLOG_DIR_NAME, _APPMSGLOG_FILE_NAME)
     try:
@@ -289,7 +291,8 @@ def list_application_message_logs() -> List[str]:
     Get a list of application message log names. The list will always include "Recent", which refers to the latest
     messages cached in Redis or flushed to the current log file in the portal server workspace directory. Older log
     files are backed up in the portal repository on S3 and named by a datetime string (eg, '19Apr2022-22.58') indicating
-    approximately when the log file was moved to S3.
+    approximately when the log file was moved to S3. If unable to access the older logs on S3, then the returned list
+    will only include "Recent".
 
     Returns:
         List of existing application message log names, as described, in reverse chronological order, with the "Recent"
@@ -297,17 +300,18 @@ def list_application_message_logs() -> List[str]:
     """
     out = ["Recent"]
     repo_listing = database.repo.listing()
-    log_dir = f"/{_APPMSGLOG_DIR_NAME}"
-    msg_log_prefix = f"{_APPMSGLOG_FILE_NAME}-"  # what follows this prefix is a datetime string '%Y%b%d-%H.%M'
-    if log_dir in repo_listing:
-        for key in repo_listing[log_dir]:
-            if key['name'].startswith(msg_log_prefix):
-                out.append(key['name'][len(msg_log_prefix):])
+    if isinstance(repo_listing, dict):
+        log_dir = f"/{_APPMSGLOG_DIR_NAME}"
+        msg_log_prefix = f"{_APPMSGLOG_FILE_NAME}-"  # what follows this prefix is a datetime string '%Y%b%d-%H.%M'
+        if log_dir in repo_listing:
+            for key in repo_listing[log_dir]:
+                if key['name'].startswith(msg_log_prefix):
+                    out.append(key['name'][len(msg_log_prefix):])
     # NOTE: list is already sorted b/c the repo file listing is in reverse chronological order already
     return out
 
 
-def get_message_log_contents(log_name: str) -> str:
+def get_message_log_contents(log_name: str) -> Tuple[bool, str]:
     """
     Retrieve the contents of the application message log specified.
 
@@ -316,8 +320,8 @@ def get_message_log_contents(log_name: str) -> str:
             list_application_message_logs().
 
     Returns:
-        Content of the specified application message log. If an error occurs or log was not found, an appropriate
-            error message is returned instead.
+        A 2-tuple (True, L), where L is the text content of the specified application message log. If an error occurs or
+            the log was not found, returns (False, error description).
     """
     if log_name == 'Recent':
         try:
@@ -331,17 +335,17 @@ def get_message_log_contents(log_name: str) -> str:
             messages = cfg.redis_conn.lrange(_APPMSGLOG_BUF_KEY, start=0, end=-1)
             if isinstance(messages, list) and (len(messages) > 0):
                 contents += "\r\n".join([msg.decode() for msg in messages])
-            return contents
+            return True, contents
         except Exception:
-            get_application_logger().error("Failed to retrieve current application message log", exc_info=True)
-            return "An error occurred while retrieving most recent application message log"
+            get_application_logger().error("Failed to retrieve most recent app log", exc_info=True)
+            return False, "An error occurred while retrieving most recent application message log"
     else:
         log_file_key = f"/{_APPMSGLOG_DIR_NAME}/{_APPMSGLOG_FILE_NAME}-{log_name}"
         contents = database.repo.read_text_file(log_file_key)
         if contents is None:
-            return "Log file not found, or unable to retrieve it from portal repository"
+            return False, "Log file not found, or unable to retrieve it from portal repository"
         else:
-            return contents
+            return True, contents
 
 
 def delete_application_message_log(log_name: str) -> bool:

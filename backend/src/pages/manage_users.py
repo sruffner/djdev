@@ -28,12 +28,12 @@ _USER_TABLE_ID: str = "user-account-table"
 """ The ID assigned to the Dash DataTable presenting all user accounts registered on the Lisberger lab portal. """
 
 _USER_TABLE_COLS: List[ti.Column] = [
-    ti.Column('username', 'Username', '100px', False),
+    ti.Column('username', 'Username', '100px', True),
     ti.Column('profile', 'Profile', '300px', True),
-    ti.Column('access', 'Privileges', '60px', False),
-    ti.Column('registered', 'Registered', '75px', False),
-    ti.Column('last_login', 'Last Login', '150px', False),
-    ti.Column('pwd_changed', 'Password Updated', '75px', False)
+    ti.Column('access', 'Privileges', '60px', True),
+    ti.Column('registered', 'Registered', '75px', True),
+    ti.Column('last_login', 'Last Login', '150px', True),
+    ti.Column('pwd_changed', 'Password Updated', '75px', True)
 ]
 """ Defined columns for the user accounts table. Multiple attributes listed in 'profile' column. """
 
