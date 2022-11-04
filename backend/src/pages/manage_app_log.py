@@ -61,7 +61,11 @@ def serve_layout() -> html.Div:
         dbc.Col([remove_btn], width='auto')
     ], justify='between', class_name='mb-3')
     content_area = dbc.Textarea(id=_CONTENT_AREA_ID, rows=20, size='sm', readonly=True, wrap=False, value="Loading...")
-    return html.Div([dcc.Loading(control_row, id=_APPLOG_LOADING_ID, type='circle', className='me-auto'), content_area])
+    return html.Div([
+        dbc.Spinner(control_row, id=_APPLOG_LOADING_ID, type='border', delay_hide=250, delay_show=250, color='info',
+                    spinner_style=dict(position='absolute', left='0px')),
+        content_area
+    ])
 
 
 @callback([Output(_CONTENT_AREA_ID, "value"), Output(_DELETE_ID, "disabled")], [Input(_SELECT_ID, "value")])

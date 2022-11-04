@@ -101,9 +101,12 @@ def serve_layout() -> html.Div:
     alert = dbc.Alert("", id=_REPO_ALERT_ID, color='danger', dismissable=True, fade=True, duration=10000,
                       is_open=False)
     alert_row = dbc.Row([
-        dbc.Col(dcc.Loading(html.H5(loading_badge), id=_REPO_LOADING, type='circle', className='me-auto'), width=2),
+        dbc.Col(dbc.Spinner(html.H5(loading_badge), id=_REPO_LOADING, type='border',
+                            delay_hide=250, delay_show=250, color='primary',
+                            spinner_style=dict(position='absolute', left='0px')),
+                width=2),
         dbc.Col(alert, width=10)
-    ], class_name='mb-2')
+    ])
 
     data_table = dt.DataTable(
         id=_REPO_TABLE_ID,

@@ -212,7 +212,7 @@ def serve_layout() -> html.Div:
     registered user, you can download the package and use it as you wish. ***Note that every package download
     and all API requests are recorded in an effort to protect the provenance of the experimental data
     stored in the portal.***
-    ''', style=dict(color='black', backgroundColor='lightsteelblue'))
+    ''', style=dict(color='black', backgroundColor='lightsteelblue', padding='0.5em'))
 
     download_row = dbc.Row([
         dbc.Button('Download API Client Package', id=_DOWNLOAD_BTN, size='lg', disabled=not enable),
@@ -221,7 +221,7 @@ def serve_layout() -> html.Div:
 
     content_markdown = dcc.Markdown(id=_MARKDOWN_ID, children=sglportalapi.readme(),
                                     style=dict(maxHeight='600px', overflowY='scroll',
-                                               border='1px solid rgb(176,196,222)'))
+                                               border='1px solid rgb(176,196,222)', padding='0.5em'))
 
     options: List[Tuple[str, str]] = [("README", "README"), ("CHANGELOG", "CHANGELOG")]
     for mod in [sglportalapi.clientside, sglportalapi.data_containers, sglportalapi.maestro]:
