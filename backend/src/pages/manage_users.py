@@ -192,7 +192,8 @@ def serve_layout() -> html.Div:
     form_rows.append(dbc.Row([dbc.Label("", width=2), dbc.Col([entry_widget, feedback], width=8)], class_name='mb-2'))
 
     form_rows.append(dbc.Row([
-        dbc.Col(dbc.Alert("", id=_REG_ALERT_ID, color='danger', dismissable=True, fade=True, is_open=False), width=10)
+        dbc.Col(dbc.Alert("", id=_REG_ALERT_ID, color='danger', dismissable=True, fade=True, duration=10000,
+                          is_open=False), width=10)
     ]))
     user_form = dbc.Form(form_rows)
 

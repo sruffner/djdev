@@ -432,11 +432,16 @@ def _layout_protocol_div(proto: Optional[Protocol]) -> List[Any]:
     needs_validation = False if (proto is None) else proto.is_candidate
     valid_btn = dbc.Button("Validate" if needs_validation else "\u2713 Validated", id=_PROTO_VALID_BTN_ID,
                            disabled=(not needs_validation), size='sm')
-    tool_tip = dbc.Tooltip(
-        "Any trial protocol based on fewer than 3 reps and not matching an existing protocol in the database must "
-        "be manually verified by the user. Add any missing random variables (eg, a random-duration fixation "
-        "segment) to the definition (if any), then press this button to validate the protocol.",
-        target=_PROTO_VALID_BTN_ID)
+    markdown = dcc.Markdown('''
+    Any trial protocol **based on fewer than 3 reps and not matching an existing protocol in the database** must
+    be manually verified by the user. Add any missing random variables (eg, a random-duration fixation 
+    segment) to the definition (if any), then press this button to validate the protocol.
+    ''')
+    help_popover = dbc.Popover(
+        dbc.PopoverBody(markdown), target=_PROTO_VALID_BTN_ID, trigger='hover', placement='top-end',
+        delay=dict(show=750, hide=0)
+    )
+
     reps_badge = dbc.Badge(f"# reps = {proto.num_reps if proto else 0} ", color='info', class_name='ms-2 me-5')
     add_rv_btn = dbc.Button("Add Random Var:", id=_PROTO_ADD_RV_BTN_ID, size='sm')
     n_segs = proto.trial.num_segments if proto else 0
@@ -469,7 +474,7 @@ def _layout_protocol_div(proto: Optional[Protocol]) -> List[Any]:
         )
     ], size='sm')
     validate_row = dbc.Row([
-        dbc.Col([valid_btn, tool_tip], width='auto', class_name='me-1'),
+        dbc.Col([valid_btn, help_popover], width='auto', class_name='me-1'),
         dbc.Col(reps_badge, width='auto', class_name='me-3'),
         dbc.Col(dbc.Row([
             dbc.Col(add_rv_btn, width='auto', class_name='me-2'),

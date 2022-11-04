@@ -15,7 +15,7 @@ any experiment session for derivate studies. Those with 'commit'-level access ca
 to the database, while 'admin'-level users can add/modify metadata tables, perform user management, and examine the
 contents of the portal's backup repository (hosted in an AWS S3 bucket provided by Duke IT Services).
 
-A test version of the portal is now live [on the Duke OpenShift cluster](https://braincerebellumdata-test.ocp.dhe.duke.edu/explore).
+A test version of the portal is now live [on the Duke Azure cluster](https://braincerebellumdata-test.dkstest.dhe.duke.edu/).
 You must be inside the Duke firewall or on the VPN to access the site.
 
 When an experiment session is committed to the portal database, the Maestro trial files
@@ -134,8 +134,8 @@ subject = '<ID of experiment subject>'
 rec_date = '2022-10-24'
 suffix = 1  # between 1 and 9; distinguishes multiple sessions on the same date using the same subject
 rig = '<ID of rig>'
-study = '<title of research study to which experiment belongs'
-notes = '<any notes particular to the session go here; can be empty string'
+study = '<title of research study to which experiment belongs>'
+notes = '<any notes particular to the session go here; can be empty string>'
 brain_area = 'Flocculus'
 src = 'Omniplex'
 probe = '32-channel'

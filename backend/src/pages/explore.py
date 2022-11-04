@@ -805,16 +805,16 @@ def _trial_data_tabpane(session: Dict[str, Any]) -> html.Div:
     help_badge = dbc.Badge("?", pill=True, id=_TD_HELP_BADGE_ID, class_name='float-end', color='info',
                            style={'font-size': 18})
     markdown = dcc.Markdown(
-        '''Select a trial protocol, then select an individual trial response or an aggregate response statistic. 
+        '''Select a trial protocol, then select an individual trial response or an aggregate response statistic.
         *Aggregate response data is available only for those trial protocols for which 3 or more **successfully 
         completed** trial reps were recorded. In addition, the trial protocol can have no random variables, or a 
         single random-duration segment (highlighted in red in the figures for "Mean firing rate" and "Discharge 
-        statistics").*  \n  \nClick the "Download" button if you wish to download response data for this session 
-        (you must be logged into the portal with download access).'''
+        statistics").*'''
     )
     help_popover = dbc.Popover(
-        [dbc.PopoverBody(markdown)],
-        id=_TD_HELP_POPOVER_ID, target=_TD_HELP_BADGE_ID, trigger='hover', placement='top-end')
+        [dbc.PopoverHeader("Instructions"), dbc.PopoverBody(markdown)],
+        id=_TD_HELP_POPOVER_ID, target=_TD_HELP_BADGE_ID, trigger='hover', placement='top-end'
+    )
 
     nav_row = dbc.Row([
         dbc.Col(dbc.Row([

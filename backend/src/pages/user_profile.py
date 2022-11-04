@@ -101,7 +101,9 @@ def serve_layout() -> html.Div:
         id=_CURRENT_PWD_ID, type='password', minlength=8, maxlength=32,
         placeholder="Verify current password"
     )
-    form_rows.append(dbc.Row([dbc.Label("Current password", width=2), dbc.Col(entry_widget, width=6)],
+    feedback = dbc.FormFeedback("Must be 8-32 characters long, with at least 1 digit and 1 uppercase letter",
+                                type='invalid')
+    form_rows.append(dbc.Row([dbc.Label("Current password", width=2), dbc.Col([entry_widget, feedback], width=6)],
                              class_name='mb-2'))
     entry_widget = dbc.Input(id=_NEW_PWD_ID, type='password', minlength=8, maxlength=32,
                              placeholder="Enter new password")
@@ -116,7 +118,7 @@ def serve_layout() -> html.Div:
 
     # alert raised when a password change fails - displays a brief error message. Otherwise hidden.
     form_rows.append(dbc.Row(
-        dbc.Col(dbc.Alert("", id=_PWD_ALERT_ID, dismissable=True, is_open=False), width=10)
+        dbc.Col(dbc.Alert("", id=_PWD_ALERT_ID, dismissable=True, fade=True, duration=10000, is_open=False), width=10)
     ))
 
     password_card = dbc.Card([
@@ -138,7 +140,7 @@ def profile_entry_feedback(*args):
     ctx = callback_context
     if (ctx.triggered is None) or len(ctx.triggered) == 0:
         return tuple(out)
-    # normally, only one field changes at a time -- but all get set on page layout or refresh; and some browsers will
+    # normally, only one field changes at a time -- but all get set on page layout or refresh; and some browsers
     # could auto-fill multiple fields (like name and email address) in one go
     for trigger in ctx.triggered:
         trigger_id = trigger['prop_id'].split('.')[0]
@@ -185,13 +187,13 @@ def update_profile_callback(*args):
 
 
 @callback(
-    [Output(_NEW_PWD_ID, 'valid'), Output(_NEW_PWD_ID, 'invalid'), Output(_CONFIRM_PWD_ID, 'valid'),
-     Output(_CONFIRM_PWD_ID, 'invalid')],
-    [Input(_NEW_PWD_ID, 'value'), Input(_CONFIRM_PWD_ID, 'value')],
-    [State(_NEW_PWD_ID, 'value'), State(_CONFIRM_PWD_ID, 'value')]
+    [Output(_CURRENT_PWD_ID, 'valid'), Output(_CURRENT_PWD_ID, 'invalid'), Output(_NEW_PWD_ID, 'valid'),
+     Output(_NEW_PWD_ID, 'invalid'), Output(_CONFIRM_PWD_ID, 'valid'), Output(_CONFIRM_PWD_ID, 'invalid')],
+    [Input(_CURRENT_PWD_ID, 'value'), Input(_NEW_PWD_ID, 'value'), Input(_CONFIRM_PWD_ID, 'value')],
+    [State(_CURRENT_PWD_ID, 'value'), State(_NEW_PWD_ID, 'value'), State(_CONFIRM_PWD_ID, 'value')]
 )
 def password_entry_feedback(*args):
-    out = [no_update] * 4
+    out = [no_update] * 6
     ctx = callback_context
     if (ctx.triggered is None) or len(ctx.triggered) == 0:
         return tuple(out)
@@ -199,19 +201,22 @@ def password_entry_feedback(*args):
     # failed for whatever reason
     for trigger in ctx.triggered:
         trigger_id = trigger['prop_id'].split('.')[0]
-        if trigger_id == _NEW_PWD_ID:
-            is_set, is_valid = (args[0] is not None) and (len(args[0]) > 0), validate_password(args[0]) is None
+        if trigger_id == _CURRENT_PWD_ID:
+            is_set, is_valid = isinstance(args[0], str) and (len(args[0]) > 0), validate_password(args[0]) is None
             out[0:2] = is_set and is_valid, is_set and not is_valid
-            # confirm password entry is ignored if current password is invalid
-            c_set = is_valid and (args[3] is not None) and (len(args[3]) > 0)
-            c_valid = is_valid and (args[0] == args[3])
-            out[2:4] = c_set and c_valid, c_set and not c_valid
+        elif trigger_id == _NEW_PWD_ID:
+            is_set, is_valid = isinstance(args[1], str) and (len(args[1]) > 0), validate_password(args[1]) is None
+            out[2:4] = is_set and is_valid, is_set and not is_valid
+            # confirm password entry is ignored if new password is invalid
+            c_set = is_valid and isinstance(args[5], str) and (len(args[5]) > 0)
+            c_valid = is_valid and (args[1] == args[5])
+            out[4:6] = c_set and c_valid, c_set and not c_valid
         elif trigger_id == _CONFIRM_PWD_ID:
-            # confirm password entry is ignored if current password is invalid
-            is_valid = validate_password(args[2]) is None
-            c_set = is_valid and (args[1] is not None) and (len(args[1]) > 0)
-            c_valid = is_valid and (args[1] == args[2])
-            out[2:4] = c_set and c_valid, c_set and not c_valid
+            # confirm password entry is ignored if new password is invalid
+            is_valid = validate_password(args[4]) is None
+            c_set = is_valid and isinstance(args[2], str) and (len(args[2]) > 0)
+            c_valid = is_valid and (args[2] == args[4])
+            out[4:6] = c_set and c_valid, c_set and not c_valid
     return tuple(out)
 
 
