@@ -123,7 +123,7 @@ import zipfile
 import numpy as np
 import scipy.signal
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Union, List, Dict, Any, Optional, Tuple, IO
 
@@ -728,31 +728,29 @@ def _check_pending_session_metadata(
     return "", info, nt_ids
 
 
-def get_pending_commit_jobs_for(username: str) -> Union[str, List[CommitJobStatus]]:
+def get_pending_commit_jobs_for(username: Optional[str] = None) -> Union[str, List[CommitJobStatus]]:
     """
-    Retrieve status information for all in-progress session commit jobs belonging to the specified user.
+    Retrieve status information for all session commit jobs pending on the portal server, or the subset of those that
+    belonging to a specific portal user.
 
     Args:
-        username: The username of the registered portal user requesting the session commit. The username is only
-            checked for validity; it is ASSUMED that the specified user is currently logged-in and has the necessary
-            privileges to commit experiment data to the portal.
+        username: If None, method returns status information for all in-progress session commit jobs, across all portal
+            users. Otherwise, it should be the username of a registered portal user, and the method only returns those
+            pending jobs that were initiated by that user. In the latter case, if the specified user does not exist or
+            lacks commit-level privileges, the method will return an empty list
     Returns:
-        On failure, returns a brief error description. Otherwise, returns a list job status objects for the pending
-            commit jobs belonging to the user. Jobs are listed in descending order by start time, with the most
-            recently initiated job first.
-    Raises:
-        ValueError: If committer's username is invalid.
+        On failure, returns a brief error description. Otherwise, a list of job status objects, one for each pending
+            commit job. Jobs are listed in descending order by start time, with the most recently initiated job first.
+            If a username is specified, but that user does not exist or lacks commit-level privileges, then the pending
+            jobs list will be empty.
     """
-    if not (isinstance(username, str) and validate_username(username)):
-        raise ValueError('Invalid username')
-
     try:
         conn = get_config().redis_conn
         raw_jobs: Dict = conn.hgetall(name=COMMITS)  # IMPORTANT: Returns Dict[job_id, CommitJobStatus as byte string]
         out: List[CommitJobStatus] = list()
         for _, r in raw_jobs.items():
             job_status: CommitJobStatus = CommitJobStatus.from_bytes(r)
-            if job_status.committer == username:
+            if (username is None) or (job_status.committer == username):
                 out.append(job_status)
         out.sort(key=lambda j: j.started, reverse=True)
         return out
@@ -861,8 +859,6 @@ def transfer_archive_to_repo(job_id: str) -> bool:
     Returns:
         True if successful; False otherwise.
     """
-    _logger.debug(f"Started archive transfer to S3 for commit job {job_id}")
-
     # callback during upload to repo which updates job progress. Stop reporting progress if user cancels. We cannot
     # stop the upload, but there's no point in posting further progress messages!
     t_last_update: float = -1
@@ -880,6 +876,8 @@ def transfer_archive_to_repo(job_id: str) -> bool:
             pass
 
     try:
+        if _background_job_update(job_id, "Starting archive transfer to S3", log=True):
+            raise Exception("Operation cancelled")
         # validate job state and reassemble archive from chunks
         job_status = commit_job_status(job_id)
         if isinstance(job_status, str):
@@ -902,7 +900,7 @@ def transfer_archive_to_repo(job_id: str) -> bool:
         key = f"/staging/{job_id}/{ARCHIVE_FNAME}"
         if not repo.upload_file(zip_path, key, log_func=_upload_progress):
             raise Exception(f"Failed to transfer archive to {key} in S3")
-        if _background_job_update(job_id, "Archive transfer complete."):
+        if _background_job_update(job_id, "Archive transfer complete.", log=True):
             raise Exception("Operation cancelled")
         zip_path.unlink(missing_ok=True)
 
@@ -1191,8 +1189,6 @@ def preprocess_commit_job(job_id: str) -> bool:
     Returns:
         True if successful; False otherwise.
     """
-    _logger.debug(f"Started preprocessing phase for commit job {job_id}")
-
     commit_info_path = Path(_get_job_subfolder(job_id), COMMIT_INFO_FNAME)
     """ Location of the commit information file in job's staging folder within local portal workspace. """
     zip_path: Path = Path(_get_job_subfolder(job_id), ARCHIVE_FNAME)
@@ -1237,7 +1233,7 @@ def preprocess_commit_job(job_id: str) -> bool:
     archive_on_repo = staged_archive_key_in_repo(job_id)
     fail_msg, job_found, perform_cleanup = "", False, False
     try:
-        if _background_job_update(job_id, f"Starting preprocessing phase..."):
+        if _background_job_update(job_id, f"Starting preprocessing phase...", log=True):
             raise Exception("Operation cancelled")
 
         # verify job status and local staging folder
@@ -1269,7 +1265,7 @@ def preprocess_commit_job(job_id: str) -> bool:
             raise Exception("Failed to download session archive from portal repo")
 
         # preprocess the archive
-        if _background_job_update(job_id, f"Preprocessing session archive..."):
+        if _background_job_update(job_id, f"Preprocessing session archive...", log=True):
             raise Exception("Operation cancelled")
 
         with zipfile.ZipFile(zip_path, 'r') as archive:
@@ -1312,7 +1308,7 @@ def preprocess_commit_job(job_id: str) -> bool:
 
             unit_data: Optional[Dict[str, List[Any]]] = None
             if units_zip_info is not None:
-                if _background_job_update(job_id, f"Loading neural units file {units_zip_info.filename}..."):
+                if _background_job_update(job_id, f"Loading neural units file {units_zip_info.filename}...", log=True):
                     raise Exception("Operation cancelled")
                 unit_data = pickle.loads(archive.read(units_zip_info))
                 pl2_filenames = [x.filename for x in pl2s_archived]
@@ -1329,6 +1325,9 @@ def preprocess_commit_job(job_id: str) -> bool:
                         raise Exception("Operation cancelled")
                     if _process_omniplex_file(job_id, save_path, unit_data, trial_info, units):
                         raise Exception("Operation cancelled")
+                    # discard Omniplex file (which is huge) once we're done processing it. If session requires manual
+                    # review, we don't want to leave this in the local staging folder!
+                    save_path.unlink(missing_ok=True)
 
                 # if there is unit data, we require metrics for each unit specified in the neural units data file,
                 # and there must be Omniplex timestamps for all trials
@@ -1340,7 +1339,7 @@ def preprocess_commit_job(job_id: str) -> bool:
                         raise Exception(f"Missing Omniplex start/stop timestamps for {key}")
 
             # add results from preprocessing to the commit information file in the local staging folder
-            if _background_job_update(job_id, "Saving results from preprocessing..."):
+            if _background_job_update(job_id, "Saving results from preprocessing...", log=True):
                 raise Exception("Operation cancelled")
             session_info, nt_ids, _, _, _ = _read_commit_info_file(commit_info_path)
             session_info.number_of_trials = len(trial_info)
@@ -1356,16 +1355,16 @@ def preprocess_commit_job(job_id: str) -> bool:
             # period of time. Otherwise, proceed immediately (on the same background task) to the final commit.
             requires_review = any([p.is_candidate for p in protocols])
             if requires_review:
-                zip_path.unlink()
+                zip_path.unlink(missing_ok=True)
                 proto_defs = [p.to_bytes() for p in protocols]
                 get_config().redis_conn.rpush(f"{PROTODEFS_NS}{job_id}", *proto_defs)
                 if _background_job_update(job_id, "Preprocessing complete. User review required.",
-                                          CommitStateEnum.REVIEW):
+                                          CommitStateEnum.REVIEW, log=True):
                     raise Exception("Operation cancelled")
                 return True
             else:
                 if _background_job_update(job_id, "Preprocessing complete. Committing session to database...",
-                                          CommitStateEnum.COMMIT):
+                                          CommitStateEnum.COMMIT, log=True):
                     raise Exception("Operation cancelled")
                 return finish_commit_job(job_id)
 
@@ -1451,7 +1450,7 @@ def _reassemble_archive_from_chunked_upload(job_id: str) -> bool:
 
 
 def _background_job_update(job_id: str, msg: str, next_state: Optional[CommitStateEnum] = None,
-                           dont_fail: bool = False, overwrite: bool = False) -> bool:
+                           dont_fail: bool = False, overwrite: bool = False, log: bool = False) -> bool:
     """
     Helper method used to update progress and, optionally, the state of a commit job. Intended for use ONLY within the
     background workers that handle the uploading, preprocessing and final commit phases of a job, this method will
@@ -1471,6 +1470,7 @@ def _background_job_update(job_id: str, msg: str, next_state: Optional[CommitSta
             progress message. This flag should be set if the background task is unable to stop work immediately.
         overwrite: If True, overwrite the most recent progress message with the new one. This is useful when posting
             updates about a long running task indicating percent complete.
+        log: If True, the progress message is also written to the application logger at INFO level. Default = False.
     Returns:
         True if job was in the "Cancelled" state and therefore moved to the "Failed" state; False otherwise.
     Raises:
@@ -1492,6 +1492,9 @@ def _background_job_update(job_id: str, msg: str, next_state: Optional[CommitSta
     if (job_status.state == CommitStateEnum.CANCEL) and (next_state != CommitStateEnum.DONE) and not dont_fail:
         next_state = CommitStateEnum.FAIL
         was_cancelled = True
+
+    if log and isinstance(msg, str):
+        _logger.info(f"Commit {job_id}: {msg}")
 
     job_status.on_update(msg="Background task cancelled!" if was_cancelled else msg, overwrite=overwrite,
                          state=next_state)
@@ -1560,7 +1563,7 @@ def _chunked_extract_from_archive(job_id: str, archive: zipfile.ZipFile, pl2_inf
     size_in_mb: float = pl2_info.file_size / (1024 * 1024)
     if pl2_info.file_size < 300:
         msg = f"Extracting Omniplex file {pl2_info.filename} (size={size_in_mb:.1f} MB)"
-        if _background_job_update(job_id, msg):
+        if _background_job_update(job_id, msg, log=True):
             return None
         save_path = Path(archive.extract(pl2_info, str(dst)))
         return save_path
@@ -1627,7 +1630,7 @@ def _process_omniplex_file(job_id: str, omniplex_file: Path, unit_data: Dict[str
     """
     with open(omniplex_file, 'rb') as fp:
         msg = f"Processing trial timing information in Omniplex file {omniplex_file.name}..."
-        if _background_job_update(job_id, msg):
+        if _background_job_update(job_id, msg, log=True):
             return True
         info = PL2.load_file_information(fp)
         timings_dict = _get_trial_timing_from_pl2_file(fp, info)
@@ -1793,7 +1796,7 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
             progress messages.
     """
     msg = f"Calculating metrics for {len(spikes)} neural unit(s) on Omniplex channel {channel_id} ..."
-    if _background_job_update(job_id, msg):
+    if _background_job_update(job_id, msg, log=True):
         return None
 
     # wide-band or narrow-band channel. Extract Plexon-assigned channel number (a positive integer)
@@ -2155,8 +2158,6 @@ def finish_commit_job(job_id: str) -> bool:
     Returns:
         True if successful, in which case the session is fully committed to the database; False otherwise.
     """
-    _logger.debug(f"Started final commit phase for commit job {job_id}")
-
     commit_info_path = Path(_get_job_subfolder(job_id), COMMIT_INFO_FNAME)
     """ Location of the commit information file in job's staging folder within local portal workspace. """
     zip_path: Path = Path(_get_job_subfolder(job_id), ARCHIVE_FNAME)
@@ -2220,6 +2221,9 @@ def finish_commit_job(job_id: str) -> bool:
 
     fail_msg, perform_cleanup, commit_done, archive_uploaded, job_found = "", True, False, False, False
     try:
+        if _background_job_update(job_id, "Started final commit phase...", log=True):
+            raise Exception("Operation cancelled")
+
         # verify job status and commit information file.
         job_status = commit_job_status(job_id)
         job_found = not isinstance(job_status, str)
@@ -2257,6 +2261,8 @@ def finish_commit_job(job_id: str) -> bool:
 
         # check if session archive is in local staging folder, and download it from repo if not.
         if not zip_path.is_file():
+            if _background_job_update(job_id, "Downloading session archive from S3 repo...", log=True):
+                raise Exception("Operation cancelled")
             archive_on_repo = staged_archive_key_in_repo(job_id)
             if not repo.download_file(archive_on_repo, zip_path, log_func=_download_progress):
                 _logger.error(f"Failed to download session archive from S3 repo for commit job {job_id}")
@@ -2275,6 +2281,8 @@ def finish_commit_job(job_id: str) -> bool:
 
         # here's where it all happens: the database inserts, rollback on failure, progress messages and check for
         # cancellation.
+        if _background_job_update(job_id, "Committing session to database...", log=True):
+            raise Exception("Operation cancelled")
         commit_mgr = _SessionCommitMgr(job_id, zip_path, session_info, trial_info, protocols, units)
         error_msg = commit_mgr.commit()
         if error_msg is not None:
@@ -2289,12 +2297,12 @@ def finish_commit_job(job_id: str) -> bool:
         archive_key_final = f"/repo/{session_info.experimenter}/" \
                             f"{session_info.subject}_{session_info.iso_recording_date}_{session_info.suffix}.zip"
 
-        if _background_job_update(job_id, "Adding commit information to session archive..."):
+        if _background_job_update(job_id, "Adding commit information to session archive...", log=True):
             raise Exception("Operation cancelled")
         with zipfile.ZipFile(zip_path, 'a') as f:
             f.write(commit_info_path, COMMIT_INFO_FNAME)
 
-        if _background_job_update(job_id, "Transferring archive to portal repository..."):
+        if _background_job_update(job_id, "Transferring archive to portal repository...", log=True):
             raise Exception("Operation cancelled")
         if not repo.upload_file(zip_path, archive_key_final, log_func=_upload_progress):
             raise Exception(f"Unable to push committed session archive [{archive_key_final}] to portal repository")
@@ -2333,7 +2341,7 @@ def finish_commit_job(job_id: str) -> bool:
             err_msg = f"Commit failed after database insertions; rollback {'successful' if ok else 'FAILED!'}"
             if job_found:
                 try:
-                    _background_job_update(job_id, err_msg)
+                    _background_job_update(job_id, err_msg, log=True)
                 except Exception:
                     pass
 
@@ -2342,7 +2350,8 @@ def finish_commit_job(job_id: str) -> bool:
         if job_found and (commit_done or (len(fail_msg) > 0)):
             try:
                 _background_job_update(job_id, fail_msg if (len(fail_msg) > 0) else "Done!",
-                                       CommitStateEnum.FAIL if (len(fail_msg) > 0) else CommitStateEnum.DONE)
+                                       CommitStateEnum.FAIL if (len(fail_msg) > 0) else CommitStateEnum.DONE,
+                                       log=True)
             except Exception:
                 pass
 
@@ -2943,3 +2952,97 @@ def _read_commit_info_file(file_path: Path) -> \
     except Exception as e:
         emsg = f"Failed to read commit information file - {str(e)}"
         raise Exception(emsg)
+
+
+def queue_task_to_clean_commit_staging_areas(delay_minutes: float = 0) -> None:
+    """
+    Queue a background task that scans the local and remote session commit staging areas for any ophaned folders and
+    files from commit jobs that were "lost" due to a prior system crash/restart, or other reason.
+
+    Intended for administrative use only.
+
+    Args:
+        delay_minutes: If > 0, the background task is enqueued after the specfied delay in minutes. Default is 0,
+            meaning the task is queued immediately.
+    """
+    if delay_minutes <= 0:
+        job_queue.enqueue(clean_commit_staging_areas, job_id=f"clean-commit-staging", job_timeout='60m')
+    else:
+        job_queue.enqueue_in(timedelta(minutes=delay_minutes), func=clean_commit_staging_areas)
+
+
+def clean_commit_staging_areas() -> bool:
+    """
+    This method, intended to be called on a background process independent from the backend server, removes orphaned
+    files from the session commit staging areas in the portal server's local workspace and in the backing repository in
+    AWS S3.
+
+    Status information on pending session commit jobs is kept in a dedicated key on the Redis server. The current
+    implementation uses an in-memory Redis cache; it is NOT backed up to a persistent store. If the Redis server goes
+    down for whatever reason, all pending commit job state is lost. However, the session archives and other files
+    associated with those jobs are left "orphaned" in the portal workspace staging folder and/or the staging area in
+    the portal's S3-based backing repository. (The session archives for all pending commits are uploaded to the S3
+    staging area because the server can only spawn a few workers to do commit tasks, but there's no limit on how many
+    experiment sessions may be queued for committing to the portal database.)
+
+    This method gets a up-to-date list of all pending commit jobs from Redis, then removes any orphaned commit job files
+    in both the local and S3-based staging areas. It should be run on a daily basis to avoid wasting local and S3
+    storage on these orphaned files, which can be very large (session archives can be hundreds of MB to 10GB in size!).
+
+    The method logs INFO messages to indicate what files/folders were removed, if any.
+
+    Returns:
+        True if successful; else False.
+
+    """
+    _logger.info("Scanning local and remote staging areas for orphaned commit job folders/files...")
+
+    # get the current list of pending session commit jobs
+    jobs = get_pending_commit_jobs_for(None)
+    if isinstance(jobs, str):
+        _logger.error(f"Unable to retrieve status pending session commit jobs [{jobs}]. Stopping.")
+        return False
+    job_ids: List[str] = [job.id for job in jobs]
+
+    # remove any subfolder in the local staging folder that does not correspond to an existing job. The subfolder name
+    # is the job ID.
+    n_found, n_removed = 0, 0
+    staging_dir = Path(get_config().dash_upload_dir)
+    for child in staging_dir.iterdir():
+        if not (child.name in job_ids):
+            n_found += 1
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+                ok = not child.exists()
+                if ok:
+                    n_removed += 1
+                _logger.info(f"{'Removed' if ok else 'Could not remove'} orphaned commit job folder in local staging "
+                             f"area: {child.name}")
+            else:
+                child.unlink(missing_ok=True)
+                ok = not child.exists()
+                if ok:
+                    n_removed += 1
+                _logger.info(f"{'Removed' if ok else 'Could not remove'} unexpected file in local staging "
+                             f"area: {child.name}")
+    _logger.info(f"Cleaned {n_removed} of {n_found} orphaned files/folders from local commit staging area.")
+
+    # remove any session archives in the repository staging area that do not correspond to an existing job.
+    n_found, n_removed = 0, 0
+    s3_listing = repo.listing()
+    if s3_listing is None:
+        _logger.error("Unable to get repository file listing. Stopping.")
+        return False
+    for k, v in s3_listing.items():
+        if k.startswith("/staging/"):
+            job_id = k[9:]
+            if not (job_id in job_ids):
+                n_found += 1
+                for file_info in v:  # there should be just one file, archive.zip, under each job.
+                    ok = repo.delete_file(f"{k}/{file_info['name']}")
+                    if ok:
+                        n_removed += 1
+                    _logger.info(f"{'Removed' if ok else 'Could not remove'} orphaned session archive in remote "
+                                 f"staging area at: {k}/{file_info['name']}")
+    _logger.info(f"Cleaned {n_removed} of {n_found} orphaned session archives from remote commit staging area.")
+    return True

@@ -134,9 +134,9 @@ _APPMSGLOG_FLUSH_KEY: str = 'applogflush'
 Redis STRING key exists for 10 seconds after a background task is queued to flush the log message cache to file to
 disable queueing additional flushes while that task completes its work.
 """
-_APPMSGLOG_FLUSH_LIMIT: int = 50
+_APPMSGLOG_FLUSH_LIMIT: int = 100
 """ Application log message cache is flushed to the log file whenever it exceeds this size. """
-_APPMSGLOG_FILE_SIZE_LIMIT: int = 100*KB
+_APPMSGLOG_FILE_SIZE_LIMIT: int = 1000*KB
 """ 
 The application log file in portal workspace is backed up to the portal repository and then truncated to 0 whenever
 it exceeds this file size in bytes.
@@ -263,7 +263,7 @@ def force_flush_application_message_log() -> None:
         pass
 
 
-def push_orhaned_application_message_log_to_repo() -> None:
+def push_orphaned_application_message_log_to_repo() -> None:
     """
     When the current application log file in the portal workspace directory gets big enough, it is renamed as
     "$APPLOGNAME-<datetime>.log" and moved to the portal backup repository in S3, and the default log file is recreated

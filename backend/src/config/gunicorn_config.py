@@ -1,4 +1,8 @@
 # configuration settings for the GUnicorn WSGI server that runs the Dash-based portal backend
+from random import random
+
+from database.commit_ops import queue_task_to_clean_commit_staging_areas
+
 bind = ['0.0.0.0:8050']
 # uncomment next line only when debugging -- every client acccess request is logged to stdou
 # accesslog = '-'
@@ -16,7 +20,8 @@ from database.log_ops import schedule_log_backup_if_necessary
 def when_ready(server):
     app_log.get_application_logger().info(f"The GUnicorn-served backend has started.")
     schedule_log_backup_if_necessary(soon=True)
-    app_log.push_orhaned_application_message_log_to_repo()
+    app_log.push_orphaned_application_message_log_to_repo()
+    queue_task_to_clean_commit_staging_areas(delay_minutes=10+4*random())
 
 
 # noinspection PyUnusedLocal

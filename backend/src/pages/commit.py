@@ -2,8 +2,8 @@
 commit.py: The "commit session" page in web-based interface to the Lisberger laboratory database.
 
 This web page displays all pending session commit jobs initiated by the current login user with 'commit' level access.
-The user can check the status of any pending jobs, initiate a new commit, review a candidate session after the archive
-has been pre-processed, submit the reviewed session to be committed to the database, cancel any failed or in-progress
+You can check the status of any pending jobs, initiate a new commit, review a candidate session after the archive has
+been pre-processed, submit the reviewed session to be committed to the database, cancel any failed or in-progress
 commit, or remove any completed commit jobs.
 
 Preprocessing very large session archives and committing the data to the portal database can take many seconds or even
@@ -12,22 +12,27 @@ preprocessed session includes one or more trial protocols requiring manual valid
 responsive, the server queues background "workers" (Redis Queue, or RQ) to handle the pre-processing and final commit
 stages. When the review phase can be skipped, the job proceeds to completion without any user intervention.
 
-TODO: COMPLETE DESCRIPTION. Also, drop description of issue with dash_uploader -- if our new approach works!
+Click the 'New commit..." button to commit a new experiment session to the portal database. A modal dialog is raised in
+which you must enter required session metadata (experimenter username, subject ID, recording date, etc). If the metadata
+is validated successfully, another modal dialog is raised by which you upload the session archive, via the Dash Uploader
+component. Depending on the size of the archive, the upload can take a significant amount of time, and you must not
+close the browser tab while the upload is in progress (the uploader component includes a dynamic progress bar). The
+modal's "close" button reads "Uploading..." and is disabled until the upload has finished, after which it reads "Done"
+and is reenabled so that you can close the dialog.
 
-TODO: IMPLEMENTATION ISSUES --
- - Working with dash_uploader is a real pain in the ass. The problem is that you can't easily give it a new "upload_id"
-   for each separate upload, so it's hard to reuse. Even though I create a NEW uploader component when the user presses
-   the button to start a commit, behind the scenes the upload ID assigned to the previous uploader component gets used,
-   and so the file ends up in the wrong folder ($REPO_HOME/staging/stale_upload_id) on the server. I always have to
-   have an uploader in the layout, or the Dash callback definitions don't work.
-     -- New approach #1: Since we only allow the user to upload one archive at a time, we assign a UUID as the upload ID
-     ON THE CLIENT SIDE and, when the upload is done, pass that to the server so that it can find the folder containing
-     the uploaded file, which it then renames with the commit job ID (so we don't have to move a huge file).
-     -- Slight variation: Just use the authenticated username as the upload ID. Then it's easy for server to check for
-     the uploaded file, and to report progress during the upload.
-     -- Using the username as upload ID would expose the username in plain-text in the Resumable JS component. Perhaps
-     we should stick with a UUID, but pass that UUID to the server when a new commit is started -- and the server could
-     cache it so that it can report on upload progress.
+Once the archive is uploaded, the commit job enters the preprocessing phase on the server, which happens in a background
+worker on the portal server. The new commit job is summarized in a new row in the user's pending jobs table on this
+page. You can select the row and click "Refresh" to refresh its status, or "Messages" to display a small modal listing
+the job's progress message history. Once preprocessing is complete, the job will enter the "Review" phase if you must
+review and validate any trial protocols found. In this case, click the "Review" button to raise a modal to perform the
+necessary validations; once finished, press "Commit" to start the final commit phase, which again happens automatically
+in a background task on the server. If no user review is required, the job proceeds immediately to the final commit
+phase after preprocessing has finished.
+
+While a commit job is in the long-running preprocessing or final commit stages (or waiting until a worker is available
+to run those tasks), you can opt to cancel the job by selecting the relevant row in the jobs table and pressing
+the "Cancel/Remove" button. Use the same button to remove sucessfully completed session commit jobs from your commit job
+history.
 
 @author: sruffner
 @created: 18oct2021
@@ -1187,10 +1192,12 @@ def show_hide_upload_modal(*args):
         else:
             return True, _layout_upload_modal(job_id), no_update
     else:
+        # NOTE: On hiding dialog, do NOT remove its children. Else you get a Dash "nonexistent object as input" error
+        # the next time you raise the dialog!
         job_id = args[-1]
         if trigger == _UPLOAD_CANCEL_BTN:
             _, err_msg, _ = cancel_or_remove_commit_job(job_id)
-            return False, [], err_msg if len(err_msg) > 0 else no_update
+            return False, no_update, err_msg if len(err_msg) > 0 else no_update
         else:   # _UPLOAD_DONE_BTN
             res = on_archive_uploaded_to_workspace(job_id)
-            return False, [], res if isinstance(res, str) else no_update
+            return False, no_update, res if isinstance(res, str) else no_update

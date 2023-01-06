@@ -78,7 +78,8 @@ metadata:
 spec:
   ingressClassName: dhe-nginx
   tls:
-    - host: braincerebellumdata-test.dkstest.dhe.duke.edu
+    - hosts:
+        - braincerebellumdata-test.dkstest.dhe.duke.edu
   rules:
     - host: braincerebellumdata-test.dkstest.dhe.duke.edu
       http:
@@ -186,7 +187,7 @@ spec:
             mountPath: /bitnami/mariadb
       containers:
       - name: sgl-db
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel-f8706acb
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel-a2be0635
         imagePullPolicy: Always
         volumeMounts:
           - name: db-data
@@ -199,6 +200,12 @@ spec:
                 key: mariadb_root_password
         ports:
           - containerPort: 3360
+        startupProbe:
+          exec:
+            command: [ "sh", "-c", "exec mariadb-admin status -uroot -p$MARIADB_ROOT_PASSWORD" ]
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          failureThreshold: 60   # Give container up to 10 minutes to start up (for crash recovery, etc)
         livenessProbe:
           exec:
             command: ["sh", "-c", "exec mariadb-admin status -uroot -p$MARIADB_ROOT_PASSWORD"]
@@ -207,10 +214,10 @@ spec:
         readinessProbe:
           exec:
             command: ["sh", "-c", "exec mariadb-admin status -uroot -p$MARIADB_ROOT_PASSWORD"]
-          initialDelaySeconds: 5
+          initialDelaySeconds: 20
           periodSeconds: 5
       - name: sgl-redis
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel-f8706acb
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel-a2be0635
         imagePullPolicy: Always
         ports:
           - containerPort: 6379
@@ -261,7 +268,7 @@ spec:
             value: "6379"
       containers:
       - name: sgl-worker
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-f8706acb
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-a2be0635
         imagePullPolicy: Always
         command: ["rq"]
         args: ["worker", "--with-scheduler", "--url", "redis://$(REDIS_HOST):$(REDIS_PORT)"]
@@ -359,7 +366,7 @@ spec:
             value: data-store.braincerebellumdata-test.svc.cluster.local
       containers:
       - name: sgl-server
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-f8706acb
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-a2be0635
         imagePullPolicy: Always
         ports:
           - containerPort: 8050

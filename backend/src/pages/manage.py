@@ -8,6 +8,8 @@ rendered in a different module:
     - curate.py: Curate database tables with lab metadata (subjects, experiment rigs, research projects, etc).
     - manage_users.py: User management functions.
     - manage_repo.py: View the contents of the portal backup repository on S3.
+    - manage_commits.py: View session commit jobs still in progress on the portal server, and optionally cancel/remove
+      any job.
     - manage_app_log.py: View the contents of the application message log, including older logs that have been saved
       to the portal backup repository.
     - manage_api_requests_log.py: View the contents of the API requests log.
@@ -22,13 +24,12 @@ from dash import html, callback, Output, Input
 import dash_bootstrap_components as dbc
 
 from app import PortalUser, load_authorized_user
-from pages import manage_users, manage_repo, curate, manage_app_log, manage_api_requests_log
+from pages import manage_users, manage_repo, curate, manage_app_log, manage_api_requests_log, manage_commits
 
-
-_CURATE, _USERS, _REPO, _APP_LOG, _API_REQ = 'curate', 'users', 'repo', 'app-log', 'api-req'
-_ADMIN_SECTIONS = [_CURATE, _USERS, _REPO, _APP_LOG, _API_REQ]
+_CURATE, _USERS, _REPO, _COMMITS, _APP_LOG, _API_REQ = 'curate', 'users', 'repo', 'commits', 'app-log', 'api-req'
+_ADMIN_SECTIONS = [_CURATE, _USERS, _REPO, _COMMITS, _APP_LOG, _API_REQ]
 """ The different sections on the Portal Administration page. """
-_ADMIN_SECTION_LABELS = ['Curate Portal Content', 'Manage Users', 'View Backup Repository on S3',
+_ADMIN_SECTION_LABELS = ['Curate Portal Content', 'Manage Users', 'View Backup Repo on S3', 'Manage Session Commits',
                          'Portal Server Messages', 'Portal API Request History']
 """ User-friendly labels for the different admin sections. """
 
@@ -79,6 +80,8 @@ def on_select_option(value):
         out = manage_users.serve_layout()
     elif value == _REPO:
         out = manage_repo.serve_layout()
+    elif value == _COMMITS:
+        out = manage_commits.serve_layout()
     elif value == _APP_LOG:
         out = manage_app_log.serve_layout()
     elif value == _API_REQ:
