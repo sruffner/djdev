@@ -214,8 +214,7 @@ def on_repo_listing_or_selection_changed(active_cell, store_ts, current_rows, re
             ]
             row = current_rows[active_cell['row']]
             s3_key, is_folder = row['s3_key'], row['storage_class'] == '--'
-            del_disabled = is_folder or not (s3_key.startswith('/staging') or
-                                             s3_key.startswith('/logs/appmessages.log'))
+            del_disabled = is_folder or not _can_delete_file_in_repo(s3_key)
     elif isinstance(active_cell, dict) and (active_cell['row'] >= 0):
         style_data_conditional = [
             {"if": {"row_index": active_cell['row']}, "background-color": "rgba(176, 196, 222, 0.5)"},
@@ -226,7 +225,7 @@ def on_repo_listing_or_selection_changed(active_cell, store_ts, current_rows, re
         row = current_rows[active_cell['row']]
         s3_key, collapsed, expanded = row['s3_key'], row['name'].startswith('\u25b8'), row['name'].startswith('\u25be')
         if not (collapsed or expanded):
-            del_disabled = not (s3_key.startswith('/staging') or s3_key.startswith('/logs/appmessages.log'))
+            del_disabled = not _can_delete_file_in_repo(s3_key)
             return no_update, style_data_conditional, no_update, del_disabled
 
         if collapsed:
@@ -289,6 +288,24 @@ def on_delete(n_delete, active_cell, current_rows):
     raise dash.exceptions.PreventUpdate
 
 
+def _can_delete_file_in_repo(file_key: str) -> bool:
+    """
+    Helper method checks whether the specified file in the portal repository may be permanently deleted by a portal
+    administrator using this page. The following files may be removed:
+        - Old application message logs: /logs/appmessages.log-<datetime stamp>
+        - Old API request logs: /logs/api_requests.log-<datetime stamp>
+        - Files in the session commit staging area, under the /staging key.
+
+    Args:
+        file_key: Key of a file object in the portal repository in S3.
+    Returns:
+        True if file object may be deletec via action on this page; else False.
+    """
+    return isinstance(file_key, str) and (file_key.startswith('/staging') or
+                                          file_key.startswith('/logs/appmessages.log-') or
+                                          file_key.startswith('/logs/api_requests.log-'))
+
+
 def _delete_file_in_repo(file_key: str) -> Tuple[str, Dict[str, List[Dict[str, Any]]]]:
     """
     Helper method for on_delete(). Deletes the specified file in the portal repository and retrieves the updated
@@ -301,7 +318,7 @@ def _delete_file_in_repo(file_key: str) -> Tuple[str, Dict[str, List[Dict[str, A
             Store component on this page. On failure: (error message, {})
 
     """
-    if not (file_key.startswith('/staging') or file_key.startswith('/logs/appmessages.log')):
+    if not _can_delete_file_in_repo(file_key):
         return "The selected file may not be removed from the portal repository", {}
     elif file_key.startswith('/staging'):
         parts = file_key.split('/')

@@ -1055,6 +1055,14 @@ class Route:
         return route in cls._KNOWN_ROUTES
 
     @classmethod
+    def route_descriptors(cls) -> Dict[str, str]:
+        """
+        A dictionary mapping each unique API endpoint path (eg. '/api') to a short descriptor, usually the name of
+        the corresponding API function. Includes the non-API route for downloading the API client package.
+        """
+        return {k: cls._ROUTE_TO_DESCRIBE_INFO[k][0] for k in cls._ROUTE_TO_DESCRIBE_INFO.keys()}
+
+    @classmethod
     def describe_api_request(cls, entry: Dict[str, Any]) -> Tuple[str, str]:
         """
         Provide a descriptor and parameter list for a logged API request.
@@ -1070,6 +1078,7 @@ class Route:
         """
         try:
             desc, param_list = cls._ROUTE_TO_DESCRIBE_INFO[entry['route']]
+            desc = f"**{desc}**"
             params = ", ".join([f"**{p}**={entry[p]}" for p in param_list if p in entry])
             return desc, params
         except Exception:
@@ -1078,17 +1087,17 @@ class Route:
     _ROUTE_TO_DESCRIBE_INFO: Dict[str, Tuple[str, List[str]]] = {
         '/api_client': ('API client package download', []),   # not really an API, but the URL for the download page
         AUTHENTICATE: ('API client access granted', []),
-        SESSIONINFO: ('**sessions**', ['experimenter', 'subj_id', 'when']),
-        SESSION_NEURONS: ('**session_neurons**', ['session_key', 'min_spikes', 'min_snr']),
-        SESSION_PROTOCOLS: ('**session_protocols**', ['session_key']),
-        SESSION_TRIAL: ('**session_trial**', ['session_key', 'trial_index', 'unit_ids', 'what']),
-        SESSION_BLOCK: ('**session_trial_block**', ['session_key', 'start', 'end', 'unit_ids', 'what']),
-        SESSION_PROTOCOL_REPS: ('**session_protocol_reps**',
+        SESSIONINFO: ('sessions', ['experimenter', 'subj_id', 'when']),
+        SESSION_NEURONS: ('session_neurons', ['session_key', 'min_spikes', 'min_snr']),
+        SESSION_PROTOCOLS: ('session_protocols', ['session_key']),
+        SESSION_TRIAL: ('session_trial', ['session_key', 'trial_index', 'unit_ids', 'what']),
+        SESSION_BLOCK: ('session_trial_block', ['session_key', 'start', 'end', 'unit_ids', 'what']),
+        SESSION_PROTOCOL_REPS: ('session_protocol_reps',
                                 ['session_key', 'proto_hash', 'completed', 'unit_ids', 'what']),
-        METADATA_TABLE: ('**metadata_table**', ['table']),
-        NEURONS: ('**neurons**', ['min_spikes', 'min_snr', 'min_rate', 'neuron_type', 'subj_id', 'study_title',
-                                  'proto_hash', 'min_complete']),
-        COMMIT: ('**commit**', ['action', 'session', 'unit_types', 'size', 'job_id', 'parts'])
+        METADATA_TABLE: ('metadata_table', ['table']),
+        NEURONS: ('neurons', ['min_spikes', 'min_snr', 'min_rate', 'neuron_type', 'subj_id', 'study_title',
+                              'proto_hash', 'min_complete']),
+        COMMIT: ('commit', ['action', 'session', 'unit_types', 'size', 'job_id', 'parts'])
     }
     """
     Maps API route name to a tuple (D, L), where D is a short description of the API function and L is a list of

@@ -23,7 +23,8 @@ administrative use. It has 4 columns:
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
-from dash import html, dash_table as dt, Output, Input, callback, State, no_update
+import dash.exceptions
+from dash import html, dash_table as dt, Output, Input, callback, State, no_update, callback_context
 import dash_bootstrap_components as dbc
 import flask_login
 
@@ -32,6 +33,7 @@ from app import PortalUser, load_authorized_user
 import database.table_info as ti
 from database.log_ops import get_api_request_log_contents, list_api_request_logs, \
     delete_api_request_log
+from database.table_ops import fetch_attribute_values
 from sglportalapi.data_containers import Route
 
 _SELECT_ID: str = "api-log-select"
@@ -52,6 +54,15 @@ _API_LOG_TABLE_COLS: List[ti.Column] = [
     ti.Column('params', 'Parameters', '500px', True)
 ]
 """ Defined columns for the API requests log table. """
+
+_FILTER_USER_SEL: str = "api-filt-user-sel"
+""" ID of Bootstrap Select used to filter API requests log table by the requesting user. """
+_FILTER_REQ_SEL: str = "api-filt-req-sel"
+""" ID of Bootstrap Select used to filter API requests log table by the request route. """
+_CLEAR_FILTERS_BTN: str = "api-filt-clr"
+""" ID of button that clears any filters applied to the API requests log table. """
+_FILTER_UNUSED: str = "<none>"
+""" Selection value indicating that the filter is not used. """
 
 
 def serve_layout() -> html.Div:
@@ -101,26 +112,80 @@ def serve_layout() -> html.Div:
         style_table={'height': '500px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
     )
 
+    clear_btn = dbc.Button("Clear Filters", id=_CLEAR_FILTERS_BTN, disabled=True, size='sm')
+
+    # note: fail silently if we can't get user list; just won't be able to filter by user.
+    users = fetch_attribute_values(ti.DBTable.USER, 'username')
+    users.sort()
+    users.insert(0, _FILTER_UNUSED)
+    filter_user_sel_grp = dbc.InputGroup([
+        dbc.InputGroupText("User ="),
+        dbc.Select(
+            id=_FILTER_USER_SEL,
+            options=[{"label": u, "value": u} for u in users],
+            value=_FILTER_UNUSED
+        )
+    ], size='sm')
+
+    options = [{'label': v, 'value': k} for k, v in Route.route_descriptors().items()]
+    options.sort(key=lambda x: x['label'])
+    options.insert(0, {'label': _FILTER_UNUSED, 'value': _FILTER_UNUSED})
+    filter_req_sel_grp = dbc.InputGroup([
+        dbc.InputGroupText("Request ="),
+        dbc.Select(
+            id=_FILTER_REQ_SEL,
+            options=options,
+            value=_FILTER_UNUSED
+        )
+    ], size='sm')
+
+    filter_row = dbc.Row([
+        dbc.Col(clear_btn, width='auto', class_name='me-4'),
+        dbc.Col(filter_user_sel_grp, width='auto', class_name='me-2'),
+        dbc.Col(filter_req_sel_grp, width='auto')
+    ], class_name='g-0 mt-3')
+
     return html.Div([
-        dbc.Spinner(control_row, id=_LOADING_SPINNER_ID, type='border', delay_hide=250, delay_show=250, color='info',
-                    spinner_style=dict(position='absolute', left='0px')),
-        data_table
+        control_row,
+        dbc.Spinner(data_table, id=_LOADING_SPINNER_ID, type='border', delay_hide=250, delay_show=250, color='info'),
+        filter_row
     ])
 
 
-@callback([Output(_API_LOG_TABLE_ID, "data"), Output(_DELETE_ID, "disabled")], [Input(_SELECT_ID, "value")])
-def on_select_log(sel_value):
-    if sel_value is None:
-        return [], True
+@callback([Output(_API_LOG_TABLE_ID, "data"), Output(_DELETE_ID, "disabled"), Output(_CLEAR_FILTERS_BTN, "disabled")],
+          [Input(_SELECT_ID, "value"), Input(_FILTER_USER_SEL, "value"), Input(_FILTER_REQ_SEL, "value")],
+          [State(_SELECT_ID, "value"), State(_FILTER_USER_SEL, "value"), State(_FILTER_REQ_SEL, "value")])
+def on_select_log(*args):
+    ctx = callback_context
+    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ""
+    if trigger_id == "":
+        raise dash.exceptions.PreventUpdate
     else:
+
+        sel_value = args[0 if trigger_id == _SELECT_ID else 3]
+        username = args[1 if trigger_id == _FILTER_USER_SEL else 4]
+        route = args[2 if trigger_id == _FILTER_REQ_SEL else 5]
+        clear_disabled = (username == _FILTER_UNUSED) and (route == _FILTER_UNUSED)
+
         portal_user: Optional[PortalUser] = None
         if flask_login.current_user.is_authenticated:
             portal_user = load_authorized_user(flask_login.current_user.get_id())
         is_admin = (portal_user is not None) and portal_user.is_admin()
         if not is_admin:
-            return [], True
-        table_rows = _fetch_api_requests_log(sel_value)
-        return table_rows, sel_value == 'Recent'
+            return [], True, clear_disabled
+        table_rows = _fetch_api_requests_log(sel_value,
+                                             username=None if username == _FILTER_UNUSED else username,
+                                             route=None if route == _FILTER_UNUSED else route)
+        return table_rows, sel_value == 'Recent', clear_disabled
+
+
+@callback([Output(_FILTER_USER_SEL, "value"), Output(_FILTER_REQ_SEL, "value")],
+          Input(_CLEAR_FILTERS_BTN, "n_clicks"), prevent_initial_call=True)
+def on_clear_filters(n_clear):
+    if n_clear:
+        return _FILTER_UNUSED, _FILTER_UNUSED
+    else:
+        return no_update, no_update
 
 
 @callback(
@@ -154,10 +219,11 @@ def on_delete_selected_log(n_clicks, sel_value, curr_options):
         return no_update, no_update
 
 
-def _fetch_api_requests_log(log_name: str) -> List[Dict[str, str]]:
+def _fetch_api_requests_log(
+        log_name: str, username: Optional[str] = None, route: Optional[str] = None) -> List[Dict[str, str]]:
     """
     Helper method fetches all entries from the specified API requests log file and prepares the information for display
-    in the Dash DataTable on this page.
+    in the Dash DataTable on this page, optionally filtering entries by username and/or route name
 
     The method discards consecutive entries that differ only in timestamp, keeping only the last in the sequence. This
     "hack fix" was introduced primarily to get rid of many repeat "commit" status requests from the same user, since a
@@ -166,6 +232,9 @@ def _fetch_api_requests_log(log_name: str) -> List[Dict[str, str]]:
 
     Args:
         log_name: Name of the API request log to display, as listed in the selection widget on this page.
+        username: If not None, only include API requests from the specified portal user.
+        route: If not None, only include entries corresponding to the the specified API route. Note that for
+            Route.COMMIT, only entries corresponding to the **start** of a session commit job are included.
     Returns:
         List of all API request log entries, ready to be loaded into the DataTable on this page. If an error occurs,
             returns a brief error description. On error, returns empty list.
@@ -179,12 +248,17 @@ def _fetch_api_requests_log(log_name: str) -> List[Dict[str, str]]:
     rows = list()
     last_entry: Optional[Dict[str, Any]] = None
     for entry in reversed(entries):
-        same = (last_entry is not None) and all([k in entry for k in last_entry.keys()])
+        same = (last_entry is not None) and (entry.keys() == last_entry.keys())
         same = same and all([((k == 'ts') or (entry[k] == last_entry[k])) for k in entry.keys()])
         if not same:
+            last_entry = entry
+            if ((username is not None) and (entry['username'] != username)) or \
+                    ((route is not None) and (entry['route'] != route)):
+                continue
+            if route == Route.COMMIT and entry['action'] != 'start':
+                continue
             desc, params = Route.describe_api_request(entry)
             timestamp = datetime.fromisoformat(entry['ts']).isoformat(sep=' ', timespec='seconds')
             rows.append(dict(uname=f"***{entry['username']}***", ts=timestamp, desc=desc, params=params))
-            last_entry = entry
 
     return rows
