@@ -1,38 +1,50 @@
 """
-manage_api_requests_log.py: Management page that displays the portal's API requests log.
+manage_api_requests_log.py: Management page that displays the portal's API requests logs.
 
 This page should only be accessible when a user with 'admin'-level privileges is currently logged into the portal. It
-displays the contents of the portal's API requests log, a dedicated file in the portal workspace in which all API client
-package downloads and all successful requests to the portal's API endpoints are recorded.
+displays the contents of the portal's API requests history, which is stored in one or more binary log files:
+    - The most recent API requests are logged in a file in the portal server's local workspace. This log is tagged as
+      the "Recent" logs.
+    - Timestamped logs stored in the portal repository. When the dedicated log file on the portal server exceeds a
+      certain size, it is backed up to the portal repository in S3 at /logs/api_requests.log-<TS>, where <TS> is a
+      timestamp string. The log file on the server itself is then truncated to 0 to accept new log entries. The older
+      logs are tagged byh their timestamp, which has the form "YYYYMonDD-HH:MM".
 
-Currently this page displays an unfiltered tabular view of all entries in the API requests log, listed in reverse
-chronological order. As the log grows with use, we will likely need to revisit both the implementation of the log and
-this view.
-
-The tabular view of the API request entries is very terse and intended only for administrative use. It has 4 columns:
- - 'User': The username of the registered portal user that made the request.
- - 'Time': The date/time stamp of the request.
- - 'Request': The request type. One of 'API client download', 'sessions', 'session_neurons', 'session_protocols',
-   'session_trial', 'sesion_trial_block', 'session_protocol_reps'. With the exception of the first, these are the
-   names of the clientside API function that sends the request.
- - 'Params': List of request parameters -- varies with the request type.
+Currently, this page provides access to any of these API request logs, displaying an unfiltered tabular view of all
+entries in the selected log, listed in reverse chronological order. The tabular view is very terse and intended only for
+administrative use. It has 4 columns:
+    - 'User': The username of the registered portal user that made the request.
+    - 'Time': The date/time stamp of the request.
+    - 'Request': The request type. One of 'API client download', 'sessions', 'session_neurons', 'session_protocols',
+      'commit', and so on. With the exception of the first, these are the names of the clientside API function that
+      sends the request.
+    - 'Params': List of request parameters -- varies with the request type.
 """
 from datetime import datetime
-from typing import Optional, List, Dict, Union, Any
+from typing import Optional, List, Dict, Any
 
-from dash import html, dash_table as dt
+from dash import html, dash_table as dt, Output, Input, callback, State, no_update
 import dash_bootstrap_components as dbc
 import flask_login
 
 from app import PortalUser, load_authorized_user
 
 import database.table_info as ti
-from database.log_ops import read_log_entries
+from database.log_ops import get_api_request_log_contents, list_api_request_logs, \
+    delete_api_request_log
 from sglportalapi.data_containers import Route
 
+_SELECT_ID: str = "api-log-select"
+""" ID of Bootstrap Select used to select a particular API request log for viewing. """
+_DELETE_ID: str = "api-log-delete-btn"
+""" ID of button that deletes the currently selected API request log. """
+_LOADING_SPINNER_ID: str = "api-log-spinner"
+""" 
+ID of a Bootstrap Spinner component that appears when the application log list is being retrieved or a selected log's 
+content is being retrieved for display. These operations may take a little while.
+"""
 _API_LOG_TABLE_ID: str = "api-log-table"
-""" ID of Dash DataTable listing all entries read from the API requests log. """
-
+""" ID of Dash DataTable listing all entries read from a selected API requests log. """
 _API_LOG_TABLE_COLS: List[ti.Column] = [
     ti.Column('uname', 'User', '100px', True),
     ti.Column('ts', 'Time', '200px', True),
@@ -41,54 +53,36 @@ _API_LOG_TABLE_COLS: List[ti.Column] = [
 ]
 """ Defined columns for the API requests log table. """
 
-_OP_ALERT_ID: str = "api-log-op-alert"
-""" ID of Bootstrap Alert that displays error message at top of page if an error occurs. """
 
-
-def _fetch_api_requests_log() -> Union[str, List[Dict[str, str]]]:
+def serve_layout() -> html.Div:
     """
-    Helper method fetches all entries from the portal's API requests log and prepares the information for display in a
-    Dash DataTable.
-    """
-    entries: List[Dict[str, Any]]
-    try:
-        entries = read_log_entries(is_api_log=True)
-    except Exception:
-        return "Unable to retrieve contents of portal's API requests log. Consult application logs."
+    Serve the layout for the "API Requests Log" page. The page includes a dropdown menu to select which log to view, a
+    Dash DataTable for perusing the content of the selected log file, and a button to delete any older log files backed
+    up in the portal repository. Only authorized users with administrative privileges should have access to this page.
 
-    rows = list()
-    for entry in reversed(entries):
-        desc, params = Route.describe_api_request(entry)
-        timestamp = datetime.fromisoformat(entry['ts']).isoformat(sep=' ', timespec='seconds')
-        rows.append(dict(uname=f"***{entry['username']}***", ts=timestamp, desc=desc, params=params))
-
-    return rows
-
-
-def _table_of_api_log_entries(user_is_admin: bool) -> html.Div:
-    """
-    Prepare the Dash DataTable displaying all entries from the API requests log.
-
-    Args:
-        user_is_admin: True only if current user has admin privileges on portal.
     Returns:
-        An HTML Div with a read-only Dash Datatable listing all entries in the portal's API requests log.
+        An HTML Div rendering the page.
     """
-    rows = []
-    error_msg = None
-    if not user_is_admin:
-        error_msg = "You are not authorized to view the API requests log."
-    else:
-        rows = _fetch_api_requests_log()
-        if isinstance(rows, str):
-            error_msg = rows
-            rows = []
+    select_grp = dbc.InputGroup([
+        dbc.InputGroupText("Select log"),
+        dbc.Select(
+            id=_SELECT_ID,
+            options=[],
+            value=None
+        )
+    ])
+
+    remove_btn = dbc.Button("Delete permanently", id=_DELETE_ID, disabled=True, class_name='me-2')
+    control_row = dbc.Row([
+        dbc.Col(dbc.Row([dbc.Col(select_grp, width='auto')], class_name='g-0'), width='auto', class_name='me-4'),
+        dbc.Col([remove_btn], width='auto')
+    ], justify='between', class_name='mb-3')
 
     data_table = dt.DataTable(
         id=_API_LOG_TABLE_ID,
         columns=[{"name": col.label, "id": col.id, "presentation": "markdown" if col.is_markdown else "input"}
                  for col in _API_LOG_TABLE_COLS],
-        data=rows,
+        data=[],
         row_selectable=False,
         cell_selectable=False,
         selected_rows=[],
@@ -107,22 +101,90 @@ def _table_of_api_log_entries(user_is_admin: bool) -> html.Div:
         style_table={'height': '500px', 'overflowY': 'scroll', 'border': '1px solid lightgray'},
     )
 
-    alert = dbc.Alert(error_msg, id=_OP_ALERT_ID, color='danger', dismissable=True, fade=True,
-                      is_open=(error_msg is not None), class_name="mb-3")
-    return html.Div([alert, data_table])
+    return html.Div([
+        dbc.Spinner(control_row, id=_LOADING_SPINNER_ID, type='border', delay_hide=250, delay_show=250, color='info',
+                    spinner_style=dict(position='absolute', left='0px')),
+        data_table
+    ])
 
 
-def serve_layout() -> html.Div:
-    """
-    Serve the layout for the "API Requests Log" page. The page includes a table listing all entries from the portal's
-    API requests log. The page content is read-only at this time. Only authorized users with administrative privileges
-    should have access to this page.
+@callback([Output(_API_LOG_TABLE_ID, "data"), Output(_DELETE_ID, "disabled")], [Input(_SELECT_ID, "value")])
+def on_select_log(sel_value):
+    if sel_value is None:
+        return [], True
+    else:
+        portal_user: Optional[PortalUser] = None
+        if flask_login.current_user.is_authenticated:
+            portal_user = load_authorized_user(flask_login.current_user.get_id())
+        is_admin = (portal_user is not None) and portal_user.is_admin()
+        if not is_admin:
+            return [], True
+        table_rows = _fetch_api_requests_log(sel_value)
+        return table_rows, sel_value == 'Recent'
 
-    Returns:
-        An HTML Div rendering the user account management page.
-    """
+
+@callback(
+    [Output(_SELECT_ID, "value"), Output(_SELECT_ID, "options")],
+    [Input(_DELETE_ID, "n_clicks")], [State(_SELECT_ID, "value"), State(_SELECT_ID, "options")]
+)
+def on_delete_selected_log(n_clicks, sel_value, curr_options):
     portal_user: Optional[PortalUser] = None
     if flask_login.current_user.is_authenticated:
         portal_user = load_authorized_user(flask_login.current_user.get_id())
     is_admin = (portal_user is not None) and portal_user.is_admin()
-    return _table_of_api_log_entries(is_admin)
+
+    if n_clicks is None:
+        # initial load -- get list of API request logs, but only if user has admin access.
+        if not is_admin:
+            return "Recent", [{'label': 'Recent', 'value': 'Recent'}]
+        log_names = list_api_request_logs()
+        options = [{'label': name, 'value': name} for name in log_names]
+        return "Recent", options
+    elif sel_value is not None:
+        if not is_admin:
+            return no_update, no_update
+        ok = delete_api_request_log(sel_value)
+        if not ok:
+            return no_update, no_update
+        else:
+            # remove the just-deleted log from the existing list of app logs
+            options = [opt for opt in curr_options if opt != sel_value]
+            return "Recent", options
+    else:
+        return no_update, no_update
+
+
+def _fetch_api_requests_log(log_name: str) -> List[Dict[str, str]]:
+    """
+    Helper method fetches all entries from the specified API requests log file and prepares the information for display
+    in the Dash DataTable on this page.
+
+    The method discards consecutive entries that differ only in timestamp, keeping only the last in the sequence. This
+    "hack fix" was introduced primarily to get rid of many repeat "commit" status requests from the same user, since a
+    user script might poll a commit job's status frequently to determine when it has finished. Eventually, such repeat
+    requests should not be logged in the first place (or only the last request in the sequence should be logged).
+
+    Args:
+        log_name: Name of the API request log to display, as listed in the selection widget on this page.
+    Returns:
+        List of all API request log entries, ready to be loaded into the DataTable on this page. If an error occurs,
+            returns a brief error description. On error, returns empty list.
+    """
+    entries: List[Dict[str, Any]]
+    try:
+        entries = get_api_request_log_contents(log_name)
+    except Exception:
+        return []
+
+    rows = list()
+    last_entry: Optional[Dict[str, Any]] = None
+    for entry in reversed(entries):
+        same = (last_entry is not None) and all([k in entry for k in last_entry.keys()])
+        same = same and all([((k == 'ts') or (entry[k] == last_entry[k])) for k in entry.keys()])
+        if not same:
+            desc, params = Route.describe_api_request(entry)
+            timestamp = datetime.fromisoformat(entry['ts']).isoformat(sep=' ', timespec='seconds')
+            rows.append(dict(uname=f"***{entry['username']}***", ts=timestamp, desc=desc, params=params))
+            last_entry = entry
+
+    return rows

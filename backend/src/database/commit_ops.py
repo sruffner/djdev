@@ -2967,8 +2967,11 @@ def queue_task_to_clean_commit_staging_areas(delay_minutes: float = 0) -> None:
     """
     if delay_minutes <= 0:
         job_queue.enqueue(clean_commit_staging_areas, job_id=f"clean-commit-staging", job_timeout='60m')
+        _logger.info("Queued background task to clean commit staging areas.")
     else:
-        job_queue.enqueue_in(timedelta(minutes=delay_minutes), func=clean_commit_staging_areas)
+        job_queue.enqueue_in(timedelta(minutes=delay_minutes), func=clean_commit_staging_areas,
+                             job_id=f"clean-commit-staging", job_timeout='60m')
+        _logger.info(f"Queueing background task to clean commit staging areas {delay_minutes:.1f} min from now.")
 
 
 def clean_commit_staging_areas() -> bool:

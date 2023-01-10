@@ -174,6 +174,25 @@ def read_text_file(key: str) -> Optional[str]:
         return None
 
 
+def read_binary_file(key: str) -> Optional[bytes]:
+    """
+    Read the contents of a binary file in the portal repository.
+
+    Args:
+        key: The file object key.
+
+    Returns:
+        The binary file's content. Returns None if file not found in repository, or some other error occurs.
+    """
+    try:
+        session = _aws_session()
+        s3_resource = session.resource('s3')
+        return s3_resource.Object(app_cfg.get_config().repo_bucket, key).get()["Body"].read()
+    except Exception:
+        app_log.get_application_logger().error(f"Failed to read binary file at {key} in S3 repo", exc_info=True)
+        return None
+
+
 def download_url_for(key: str) -> Optional[str]:
     """
     Generate a URL by which a data file previously prepared in response to an experiment data download request may be

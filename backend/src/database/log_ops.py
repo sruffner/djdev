@@ -40,11 +40,20 @@ single log file that grows over time.
 
 The log file is stored in the same folder as the database operations log: $WS/logs/api_requests.log. The same locking
 scheme (but using a different lock file) is used to guard access to the log file, and the requests log is backed up to
-S3 as part of the same background task that backs up the database operations log file.
+S3 as part of the same background task that backs up the database operations log file. However, because the API requests
+log can potentially grow much larger than the database operations log, and its contents are not as vital, the backup
+scheme is different:
+    * Backup to S3 only happens once api_requests.log exceeds 200KB in size.
+    * To backup the log, it is renamed as 'api_requests.log-<TS>', where <TS> is a timestamp in the form
+      'YYYYMonDD-HH.MM', then pushed into the portal repository in S3 under the /logs prefix. A new log api_requests.log
+      file is created in the local portal workspace to accumulate new API requests. Thus, if the portal crashes, the
+      most recent API request history should be found in the portal workspace volume at /logs/api_requests.log, while
+      older request logs will be found in the datetime-stamped files in the portal repository in S3.
 
-Authoer: saruffner
+Author: saruffner
 """
 import base64
+import io
 import json
 import struct
 import sys
@@ -62,7 +71,7 @@ from config.app_logging import get_application_logger
 from config.config import get_config
 from database import repo
 from database.table_info import DBTable, AttributeValue
-from sglportalapi.util import size_with_units
+from sglportalapi.util import size_with_units, KB
 
 _LOG_DIR_NAME: str = 'logs'
 """ Name of portal workspace directory for portal logs. """
@@ -81,6 +90,8 @@ _API_LOG_FILE_PATH: Path = Path(get_config().workspace_dir, _LOG_DIR_NAME, _API_
 """ The location of the API requests log file in the portal's file system-based backing repository. """
 _API_LOG_LOCK_PATH: Path = Path(get_config().workspace_dir, _LOG_DIR_NAME, '.api-lock')
 """ Lock file for advisory interprocess lock to mediate exclusive access to the API requests log. """
+_API_LOG_FILE_LIMIT: int = 200*KB
+""" API requests log in portal workspace is backed up to repository whenever it exceeds this size. """
 
 
 class FailedToAcquireLockException(Exception):
@@ -356,47 +367,79 @@ def schedule_log_backup_if_necessary(soon: bool = False) -> None:
 
 def backup_log_to_repo() -> None:
     """
-    Push a copy of the current database operations log and the current API requests log in the portal workspace to the
-    backing repository on S3.
+    Backup the database operations log and API requests log to the backing repository on S3.
 
     This method is intended to be called on a background process independent from the Dash/Flask backend server.
 
-    If the current size of either log in the portal workspace exceeds the size of its backup copy in the portal
-    repository, the method copies the log to a temporary file (in case other processes are updating the log file
-    at the same time), then uploads that temporary file to the repository, replacing the old backup copy of the log.
+    Since the API requests log could grow much larger than and is less vital than the database operations log, the
+    backup procedure for each is different.
+        * There is just one database operations log. The most current log is in the portal workspace, while its most
+          recent backup is in the portal repository under the same name. Whenever the current log exceeds the size of
+          its backup copy, this method copies the log to a temporary file (in case other processses are updating the
+          log at the same time), then uploads that temporary file to the repository, replacing the old backup copy.
+        * When the API requests log in the portal workspace exceeds 200KB, it is renamed as api_requests.log-<TS>, where
+          <TS> is a timestamp in the form 'YYYYMonDD-HH.MM' (so the next request entry logged will create a new
+          api_requests.log file). The timestamped log file is then pushed to the repository.
     """
-    # we need to get the current size N of each log file while holding the corresponding interprocess lock. After
-    # releasing the lock, another server replica could append entries to a log file, but that's OK. We only copy what
-    # was there when we checked.
     _ensure_logs_directory_exists()
-    for lock_path, log_path in [(_LOG_LOCK_PATH, _LOG_FILE_PATH), (_API_LOG_LOCK_PATH, _API_LOG_FILE_PATH)]:
-        curr_size = 0
-        try:
-            with WithTimeout(lock_path, 1):
-                curr_size = log_path.stat().st_size
-        except Exception:
-            pass
 
-        key = f"/{_LOG_DIR_NAME}/{log_path.name}"
-        if curr_size > repo.file_size(key):
-            tmp_file_path = Path(_LOG_FILE_DIR, f"tmp_{str(uuid.uuid4())}.log")
+    # backup database operations log if it is larger than its backup copy on S3
+    curr_size = 0
+    try:
+        with WithTimeout(_LOG_LOCK_PATH, 1):
+            curr_size = _LOG_FILE_PATH.stat().st_size
+    except Exception:
+        pass
+
+    key = f"/{_LOG_DIR_NAME}/{_LOG_FILE_PATH.name}"
+    if curr_size > repo.file_size(key):
+        tmp_file_path = Path(_LOG_FILE_DIR, f"tmp_{str(uuid.uuid4())}.log")
+        try:
+            with open(_LOG_FILE_PATH, 'rb') as src, open(tmp_file_path, 'wb') as dst:
+                data = src.read(curr_size)
+                dst.write(data)
+            if not repo.upload_file(tmp_file_path, key):
+                get_application_logger().error(
+                    f"Failed to backup {_LOG_FILE_PATH.name} to portal repository; check system logs.")
+            else:
+                get_application_logger().info(f"Backed up {_LOG_FILE_PATH.name} "
+                                              f"({size_with_units(curr_size)}) to portal repository.")
+        except Exception:
+            get_application_logger().error(f"Internal error while backing up {_LOG_FILE_PATH.name}.", exc_info=True)
+        finally:
             try:
-                with open(log_path, 'rb') as src, open(tmp_file_path, 'wb') as dst:
-                    data = src.read(curr_size)
-                    dst.write(data)
-                if not repo.upload_file(tmp_file_path, key):
-                    get_application_logger().error(
-                        f"Failed to backup {log_path.name} to portal repository; check system logs.")
-                else:
-                    get_application_logger().info(f"Backed up {log_path.name} "
-                                                  f"({size_with_units(curr_size)}) to portal repository.")
+                tmp_file_path.unlink(missing_ok=True)
             except Exception:
-                get_application_logger().error(f"Internal error while backing up {log_path.name}.", exc_info=True)
-            finally:
-                try:
-                    tmp_file_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                pass
+
+    # when current API requests log exceeds size limit, rename with timestamp appended and push to repository.
+    api_log_backup: Optional[Path] = None
+    try:
+        with WithTimeout(_API_LOG_LOCK_PATH, 1):
+            if _API_LOG_FILE_PATH.stat().st_size >= _API_LOG_FILE_LIMIT:
+                now = datetime.now()
+                api_log_backup = Path(_LOG_FILE_DIR, f"{_API_LOG_FILE_NAME}-{now.strftime('%Y%b%d-%H.%M')}")
+                _API_LOG_FILE_PATH.rename(api_log_backup)
+    except Exception:
+        pass
+
+    if (api_log_backup is not None) and api_log_backup.is_file():
+        key = f"/{_LOG_DIR_NAME}/{api_log_backup.name}"
+        try:
+            if not repo.upload_file(api_log_backup, key):
+                get_application_logger().error(
+                    f"Failed to backup {api_log_backup.name} to portal repository; check system logs.")
+            else:
+                get_application_logger().info(
+                    f"Backed up API requests log to {key} in portal repository."
+                )
+        except Exception:
+            get_application_logger().error(f"Internal error while uploading {api_log_backup.name}.", exc_info=True)
+        finally:
+            try:
+                api_log_backup.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def read_log_entries(is_api_log: bool = False) -> List[Dict[str, Any]]:
@@ -413,7 +456,7 @@ def read_log_entries(is_api_log: bool = False) -> List[Dict[str, Any]]:
     Raises:
         OSError: If log file not found in portal workspace directory, or if any error occurs while reading the file.
         EOFError: If end-of-file is reached in the middle of a log entry.
-        JSONDecodError: If an error occurs while parsing any entry.
+        JSONDecodeError: If an error occurs while parsing any entry.
     """
     log_path = _API_LOG_FILE_PATH if is_api_log else _LOG_FILE_PATH
     lock_path = _API_LOG_LOCK_PATH if is_api_log else _LOG_LOCK_PATH
@@ -487,3 +530,80 @@ def dump_log(out: Optional[TextIO] = sys.stdout, is_api_log: bool = False) -> No
     for i, entry in enumerate(entries):
         print(f"{i:04}: {entry}", file=out)
     print(f"\n****** END {log_name} log history ******\n", file=out, flush=True)
+
+
+def list_api_request_logs() -> List[str]:
+    """
+    Get a list of API request log names. The list will always include "Recent", which refers to the most recent API
+    request history stored in a dedicated lof file in the portal server workspace directory. Older logs are backed up
+    in the portal repository on S3 and include a datetime string (eg., '19Apr2022-22.58') in the file name, indicating
+    approximately when the log file was moved to S3. If unable to access the older logs on S3, then the returned list
+    will only include "Recent".
+
+    Returns:
+        List of existing API request history log files, as described, in reverse chronological order, with the "Recent"
+            entry first.
+    """
+    out = ["Recent"]
+    repo_listing = repo.listing()
+    if isinstance(repo_listing, dict):
+        log_dir = f"/{_LOG_DIR_NAME}"
+        api_log_prefix = f"{_API_LOG_FILE_NAME}-"  # what follows this prefix is a datetime string '%Y%b%d-%H.%M'
+        if log_dir in repo_listing:
+            for key in repo_listing[log_dir]:
+                if key['name'].startswith(api_log_prefix) and (key['name'] != api_log_prefix):
+                    out.append(key['name'][len(api_log_prefix):])
+    # NOTE: list is already sorted b/c the repo file listing is in reverse chronological order already
+    return out
+
+
+def get_api_request_log_contents(log_name: str) -> List[Dict[str, Any]]:
+    """
+    Retrieve the contents of the API request history log specified.
+
+    Args:
+        log_name: Name of the API request log to retrieve -- see list_api_request_logs().
+    Returns:
+        List of all entries read from the log file.
+    Raises:
+        OSError: If log file not found in portal workspace directory, or if any error occurs while reading the file.
+        EOFError: If end-of-file is reached in the middle of a log entry.
+        JSONDecodeError: If an error occurs while parsing any entry.
+    """
+    if log_name == 'Recent':
+        return read_log_entries(is_api_log=True)
+    else:
+        log_file_key = f"/{_LOG_DIR_NAME}/{_API_LOG_FILE_NAME}-{log_name}"
+        entries: List[Dict[str, Any]] = list()
+        contents = repo.read_binary_file(log_file_key)
+        if contents is None:
+            raise Exception(f"Failed to retrieve API requests log {log_file_key} from portal repository.")
+        f = io.BytesIO(contents)
+        int_sz = struct.calcsize('<i')
+        while True:
+            size_bytes = f.read(int_sz)
+            if len(size_bytes) == 0:
+                break
+            elif len(size_bytes) != int_sz:
+                raise EOFError('Hit EOF in the middle of a log entry')
+            entry_size, = struct.unpack('<i', size_bytes)
+            raw_entry = f.read(entry_size)
+            if len(raw_entry) != entry_size:
+                raise EOFError('Hit EOF in the middle of a log entry')
+            entry = json.loads(raw_entry, object_hook=_LogEntryJSONEncoder.decoder_hook)
+            entries.append(entry)
+        return entries
+
+
+def delete_api_request_log(log_name: str) -> bool:
+    """
+    Permanently delete an API requests log from the portal repository.
+
+    Args:
+        log_name: Name of the API request log to be deleted -- one of the log names returned by the method
+            list_api_request_logs() -- other than 'Recent', which cannot be deleted.
+    Returns:
+        True if successful; False otherwise.
+    """
+    return repo.delete_file(f"/{_LOG_DIR_NAME}/{_API_LOG_FILE_NAME}-{log_name}")
+

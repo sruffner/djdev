@@ -30,8 +30,8 @@ _DELETE_ID: str = "app-log-delete-btn"
 """ ID of button that deletes the currently selected application message log. """
 _APPLOG_LOADING_ID: str = "app-log-loading-indicator"
 """ 
-ID of a Dash Loading component that displays a spinner when the application log list is being retrieved or a
-a selected log's contents is being retrieved for display. These operations may take a little while.
+ID of a Bootstrap Spinner component that appears when the application log list is being retrieved or a selected log's 
+content is being retrieved for display. These operations may take a little while.
 
 """
 

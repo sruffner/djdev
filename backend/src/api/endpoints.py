@@ -720,7 +720,8 @@ def commit() -> Tuple[Response, int]:
     else:
         status_code, err_msg, out = 400, f"Unrecognized session commit job request: action={action}", {}
 
-    if status_code == 200:
+    # don't log commit status requests, since these might be sent frequently by a script, clogging the API req history.
+    if status_code == 200 and not (action == 'status'):
         log_api_request(route=Route.COMMIT, username=committer, **req_args)
     else:
         out = dict(error=err_msg)
