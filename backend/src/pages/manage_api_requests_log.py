@@ -225,11 +225,6 @@ def _fetch_api_requests_log(
     Helper method fetches all entries from the specified API requests log file and prepares the information for display
     in the Dash DataTable on this page, optionally filtering entries by username and/or route name
 
-    The method discards consecutive entries that differ only in timestamp, keeping only the last in the sequence. This
-    "hack fix" was introduced primarily to get rid of many repeat "commit" status requests from the same user, since a
-    user script might poll a commit job's status frequently to determine when it has finished. Eventually, such repeat
-    requests should not be logged in the first place (or only the last request in the sequence should be logged).
-
     Args:
         log_name: Name of the API request log to display, as listed in the selection widget on this page.
         username: If not None, only include API requests from the specified portal user.
@@ -246,19 +241,14 @@ def _fetch_api_requests_log(
         return []
 
     rows = list()
-    last_entry: Optional[Dict[str, Any]] = None
     for entry in reversed(entries):
-        same = (last_entry is not None) and (entry.keys() == last_entry.keys())
-        same = same and all([((k == 'ts') or (entry[k] == last_entry[k])) for k in entry.keys()])
-        if not same:
-            last_entry = entry
-            if ((username is not None) and (entry['username'] != username)) or \
-                    ((route is not None) and (entry['route'] != route)):
-                continue
-            if route == Route.COMMIT and entry['action'] != 'start':
-                continue
-            desc, params = Route.describe_api_request(entry)
-            timestamp = datetime.fromisoformat(entry['ts']).isoformat(sep=' ', timespec='seconds')
-            rows.append(dict(uname=f"***{entry['username']}***", ts=timestamp, desc=desc, params=params))
+        if ((username is not None) and (entry['username'] != username)) or \
+                ((route is not None) and (entry['route'] != route)):
+            continue
+        if route == Route.COMMIT and entry['action'] != 'start':
+            continue
+        desc, params = Route.describe_api_request(entry)
+        timestamp = datetime.fromisoformat(entry['ts']).isoformat(sep=' ', timespec='seconds')
+        rows.append(dict(uname=f"***{entry['username']}***", ts=timestamp, desc=desc, params=params))
 
     return rows

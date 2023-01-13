@@ -35,8 +35,7 @@ The portal implements a number of API 'endpoints' by which a client can retrieve
 portal database outside the context of a web browser. A clientside Python package is available for download that handles
 the details of sending requests to and unpacking the responses from these endpoints. This is the preferred method by
 which registered portal users can retrieve selected data sets for scripted analysis. All API endpoint requests,
-including requests to download the clientside package, are recorded in the API Requests Log, also implemented as a
-single log file that grows over time.
+including requests to download the clientside package, are recorded in the API requests log.
 
 The log file is stored in the same folder as the database operations log: $WS/logs/api_requests.log. The same locking
 scheme (but using a different lock file) is used to guard access to the log file, and the requests log is backed up to
@@ -171,8 +170,8 @@ def _append_log_entry(entry: Dict[str, Any], is_api_log: bool = False) -> None:
     acquiring an interprocess lock on the dedicated log file, and then appending the byte sequence -- preceded by its
     length -- to that file.
 
-    After appending the log entry, it will schedule a backup of the operations log file to portal's backup repository
-    in S3 (if needed).
+    After appending the log entry, it will schedule a backup of the log files to portal's backup repository in S3 (if
+    needed).
 
     Args:
         entry: The new entry.
@@ -188,7 +187,7 @@ def _append_log_entry(entry: Dict[str, Any], is_api_log: bool = False) -> None:
         with open(log_path, 'ab') as f:
             f.write(struct.pack('<i', len(raw_bytes)))
             f.write(raw_bytes)
-    schedule_log_backup_if_necessary()
+    schedule_log_backup_if_necessary(is_api_log)
 
 
 def log_add_table_row(table_id: DBTable, row: Dict[str, AttributeValue]) -> Optional[str]:
@@ -320,6 +319,10 @@ def log_api_request(route: str, username: str, **kwargs) -> None:
         username: Username of the registered portal user that initiated the API request.
         **kwargs: The request parameters (if any).
     """
+
+    # TODO: I took out code in endpoints.py that prevented logging of commit status requests. After testing new
+    #  backup scheme for API requests log, either put back that code or prevent logging of commit status requests here.
+
     entry = dict(route=route, username=username, ts=datetime.now().isoformat())
     if isinstance(kwargs, dict):
         for k, v in kwargs.items():
@@ -332,42 +335,64 @@ def log_api_request(route: str, username: str, **kwargs) -> None:
         get_application_logger().info(f"Unlogged API request: {str(entry)}")
 
 
-def schedule_log_backup_if_necessary(soon: bool = False) -> None:
+_DATABASE_OPS_BACKUP_JOB_ID: str = "backup_db_ops"
+""" RQ job ID for scheduled background task to backup the database operations log to the portal repository. """
+_API_REQ_BACKUP_JOB_ID: str = "backup_api_req"
+""" RQ job ID for scheduled background task to backup API requests log to the portal repository. """
+
+
+def schedule_log_backup_if_necessary(is_api_log: bool, at_startup: bool = False) -> None:
     """
-    Schedule a background job to push copies of the database operations log and API requests log from the portal
-    workspace to the backing repository.
+    Schedule a background job to backup either the database operations log or the API requests log from the portal
+    workspace to the portal repository in S3, but only if necessary. If a backup job has already started or is already
+    queued/scheduled, no action is taken.
 
     The two dedicated log files are located in the portal workspace directory, on a file system mount accessible to the
-    backend server process. The database operations log contains the entire history of operations on the portal database
-    and is essential if we ever need to reconstruct the database. The API requests log keeps a record of all requests
-    received by the portal's API endpoints, as well as any request to download the clientside Python package by which
-    users can programmatically access those endpoints; this log is important for data provenance reasons.
+    backend server process. The database operations log contains the **entire** history of operations on the portal
+    database and is essential if we ever need to reconstruct the database.
 
-    Both are backed up regularly to the portal's backing repository, which also stores the ZIP archives for experiment
-    sessions that have been committed to the database. That repository is maintained in an Amazon S3 bucket provisioned
-    by the Lisberger lab.
-
-    Call this method to schedule a log backup job. If a job is already scheduled, no action is taken.
+    The API requests log keeps a record of requests received by the portal's API endpoints, as well as any request to
+    download the clientside Python package by which users can programmatically access those endpoints; this log is
+    important for data provenance reasons. However, unlike the database operations log, it is backed up to a datetime-
+    stamped file in the repository, then truncated to 0 bytes. To review the entire API request history, a portal
+    administrator can scan the contents of both the local workspace version of the log (most recent history) and any
+    datetime-stamped versions stored in the repository.
 
     Args:
-        soon: If True, the backup is scheduled to take place one minute from "now". Otherwise, it is scheduled to
-            happen in 24 hours. Default = False. If either log has never been backed up, this argument is ignored and a
-            backup is scheduled for 1 minute from now.
+        is_api_log: True to schedule a backup of the API requests log; else, the database operations log.
+        at_startup: True if this method is called during portal server startup. In this scenario, the database
+            operations log backup is scheduled for 1 minute from "now"; else it is scheduled to happen in 24 hours.
+            Ignored when backing up API requests log.
     """
-    job_queue = Queue(connection=get_config().redis_conn)
-    if len(job_queue.scheduled_job_registry) == 0:
-        if (not soon) and (0 == repo.file_size(f"/{_LOG_DIR_NAME}/{_LOG_FILE_NAME}")):
-            soon = True
-        if (not soon) and (0 == repo.file_size(f"/{_LOG_DIR_NAME}/{_API_LOG_FILE_NAME}")):
-            soon = True
-        delta = timedelta(minutes=1) if soon else timedelta(hours=24)
-        job_queue.enqueue_in(time_delta=delta, func=backup_log_to_repo)
-        get_application_logger().info(f"Scheduled logs backup {'1 min' if soon else '24 hr'} from now.")
+    if not is_api_log:
+        # for database ops log, we try to schedule a backup every 24 hours. At startup, or if the log is not backed up
+        # in the repo. schedule it to happen within a minute. If a backup job is already in the works, do nothing.
+        job_queue = Queue(connection=get_config().redis_conn)
+        job = job_queue.fetch_job(_DATABASE_OPS_BACKUP_JOB_ID)
+        if (job is None) or (job.get_status() not in ['scheduled', 'queued', 'started']):
+            soon = at_startup or (0 == repo.file_size(f"/{_LOG_DIR_NAME}/{_LOG_FILE_NAME}"))
+            delta = timedelta(minutes=1) if soon else timedelta(hours=24)
+            job_queue.enqueue_in(delta, backup_log_to_repo, False, job_id=_DATABASE_OPS_BACKUP_JOB_ID)
+            get_application_logger().info(f"Scheduled database ops log backup {'1 min' if soon else '24 hr'} from now.")
+    else:
+        # for API requests log, backup only once log exceeds a certain size and only if a backup job is not already in
+        # the works.
+        needs_backup = False
+        try:
+            needs_backup = (_API_LOG_FILE_PATH.stat().st_size > _API_LOG_FILE_LIMIT)
+        except Exception:
+            pass
+        if needs_backup:
+            job_queue = Queue(connection=get_config().redis_conn)
+            job = job_queue.fetch_job(_API_REQ_BACKUP_JOB_ID)
+            if (job is None) or (job.get_status() not in ['scheduled', 'queued', 'started']):
+                job_queue.enqueue_in(timedelta(minutes=1), backup_log_to_repo, True, job_id=_API_REQ_BACKUP_JOB_ID)
+                get_application_logger().info(f"Scheduled API requests log backup 1 min from now.")
 
 
-def backup_log_to_repo() -> None:
+def backup_log_to_repo(is_api_log: bool) -> None:
     """
-    Backup the database operations log and API requests log to the backing repository on S3.
+    Backup the database operations log OR the API requests log to the backing repository on S3.
 
     This method is intended to be called on a background process independent from the Dash/Flask backend server.
 
@@ -380,66 +405,71 @@ def backup_log_to_repo() -> None:
         * When the API requests log in the portal workspace exceeds 200KB, it is renamed as api_requests.log-<TS>, where
           <TS> is a timestamp in the form 'YYYYMonDD-HH.MM' (so the next request entry logged will create a new
           api_requests.log file). The timestamped log file is then pushed to the repository.
+
+    Args:
+        is_api_log: True to backup the API requests log, False to backup the database operations log.
     """
     _ensure_logs_directory_exists()
 
-    # backup database operations log if it is larger than its backup copy on S3
-    curr_size = 0
-    try:
-        with WithTimeout(_LOG_LOCK_PATH, 1):
-            curr_size = _LOG_FILE_PATH.stat().st_size
-    except Exception:
-        pass
-
-    key = f"/{_LOG_DIR_NAME}/{_LOG_FILE_PATH.name}"
-    if curr_size > repo.file_size(key):
-        tmp_file_path = Path(_LOG_FILE_DIR, f"tmp_{str(uuid.uuid4())}.log")
+    if not is_api_log:
+        # backup database operations log if it is larger than its backup copy on S3
+        curr_size = 0
         try:
-            with open(_LOG_FILE_PATH, 'rb') as src, open(tmp_file_path, 'wb') as dst:
-                data = src.read(curr_size)
-                dst.write(data)
-            if not repo.upload_file(tmp_file_path, key):
-                get_application_logger().error(
-                    f"Failed to backup {_LOG_FILE_PATH.name} to portal repository; check system logs.")
-            else:
-                get_application_logger().info(f"Backed up {_LOG_FILE_PATH.name} "
-                                              f"({size_with_units(curr_size)}) to portal repository.")
+            with WithTimeout(_LOG_LOCK_PATH, 1):
+                curr_size = _LOG_FILE_PATH.stat().st_size
         except Exception:
-            get_application_logger().error(f"Internal error while backing up {_LOG_FILE_PATH.name}.", exc_info=True)
-        finally:
+            pass
+
+        key = f"/{_LOG_DIR_NAME}/{_LOG_FILE_PATH.name}"
+        if curr_size > repo.file_size(key):
+            tmp_file_path = Path(_LOG_FILE_DIR, f"tmp_{str(uuid.uuid4())}.log")
             try:
-                tmp_file_path.unlink(missing_ok=True)
+                with open(_LOG_FILE_PATH, 'rb') as src, open(tmp_file_path, 'wb') as dst:
+                    data = src.read(curr_size)
+                    dst.write(data)
+                if not repo.upload_file(tmp_file_path, key):
+                    get_application_logger().error(
+                        f"Failed to backup {_LOG_FILE_PATH.name} to portal repository; check system logs.")
+                else:
+                    get_application_logger().info(f"Backed up {_LOG_FILE_PATH.name} "
+                                                  f"({size_with_units(curr_size)}) to portal repository.")
             except Exception:
-                pass
+                get_application_logger().error(f"Internal error while backing up {_LOG_FILE_PATH.name}.", exc_info=True)
+            finally:
+                try:
+                    tmp_file_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
-    # when current API requests log exceeds size limit, rename with timestamp appended and push to repository.
-    api_log_backup: Optional[Path] = None
-    try:
-        with WithTimeout(_API_LOG_LOCK_PATH, 1):
-            if _API_LOG_FILE_PATH.stat().st_size >= _API_LOG_FILE_LIMIT:
-                now = datetime.now()
-                api_log_backup = Path(_LOG_FILE_DIR, f"{_API_LOG_FILE_NAME}-{now.strftime('%Y%b%d-%H.%M')}")
-                _API_LOG_FILE_PATH.rename(api_log_backup)
-    except Exception:
-        pass
-
-    if (api_log_backup is not None) and api_log_backup.is_file():
-        key = f"/{_LOG_DIR_NAME}/{api_log_backup.name}"
+    else:
+        # when current API requests log exceeds size limit, rename with timestamp appended and push to repository.
+        api_log_backup: Optional[Path] = None
         try:
-            if not repo.upload_file(api_log_backup, key):
-                get_application_logger().error(
-                    f"Failed to backup {api_log_backup.name} to portal repository; check system logs.")
-            else:
-                get_application_logger().info(
-                    f"Backed up API requests log to {key} in portal repository."
-                )
+            with WithTimeout(_API_LOG_LOCK_PATH, 1):
+                if _API_LOG_FILE_PATH.stat().st_size >= _API_LOG_FILE_LIMIT:
+                    now = datetime.now()
+                    api_log_backup = Path(_LOG_FILE_DIR, f"{_API_LOG_FILE_NAME}-{now.strftime('%Y%b%d-%H.%M')}")
+                    _API_LOG_FILE_PATH.rename(api_log_backup)
         except Exception:
-            get_application_logger().error(f"Internal error while uploading {api_log_backup.name}.", exc_info=True)
-        finally:
+            pass
+
+        if (api_log_backup is not None) and api_log_backup.is_file():
+            key = f"/{_LOG_DIR_NAME}/{api_log_backup.name}"
             try:
-                api_log_backup.unlink(missing_ok=True)
+                if not repo.upload_file(api_log_backup, key):
+                    get_application_logger().error(
+                        f"Failed to backup {api_log_backup.name} to portal repository; check system logs.")
+                else:
+                    get_application_logger().info(
+                        f"Backed up API requests log to {key} in portal repository."
+                    )
             except Exception:
-                pass
+                get_application_logger().error(f"Internal error while uploading {api_log_backup.name}.", exc_info=True)
+            finally:
+                try:
+                    api_log_backup.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
 
 def read_log_entries(is_api_log: bool = False) -> List[Dict[str, Any]]:
@@ -606,4 +636,3 @@ def delete_api_request_log(log_name: str) -> bool:
         True if successful; False otherwise.
     """
     return repo.delete_file(f"/{_LOG_DIR_NAME}/{_API_LOG_FILE_NAME}-{log_name}")
-

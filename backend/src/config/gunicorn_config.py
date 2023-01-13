@@ -19,7 +19,7 @@ from database.log_ops import schedule_log_backup_if_necessary
 # noinspection PyUnusedLocal
 def when_ready(server):
     app_log.get_application_logger().info(f"The GUnicorn-served backend has started.")
-    schedule_log_backup_if_necessary(soon=True)
+    schedule_log_backup_if_necessary(False, at_startup=True)
     app_log.push_orphaned_application_message_log_to_repo()
     queue_task_to_clean_commit_staging_areas(delay_minutes=10+4*random())
 

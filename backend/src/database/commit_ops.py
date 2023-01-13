@@ -1296,7 +1296,8 @@ def preprocess_commit_job(job_id: str) -> bool:
             if (units_zip_info is not None) and (len(pl2s_archived) == 0):
                 raise Exception("Missing Omniplex file(s) for spike-sorted unit data!")
 
-            if _background_job_update(job_id, "Processing archive for trial protocols..."):
+            if _background_job_update(job_id, f"Found {len(trial_info)} trial files. Processing archive for trial "
+                                              f"protocols.", log=True):
                 raise Exception("Operation cancelled")
             existing_protos = set([str(h) for h in fetch_attribute_values(DBTable.TRIAL_PROTOCOL, 'proto_hash')])
             protocols, file_to_proto = \
@@ -1442,7 +1443,7 @@ def _reassemble_archive_from_chunked_upload(job_id: str) -> bool:
                 target_file.write(stored_chunk_file.read())
             if (time.time() - t0) > 10:
                 msg = f"Reassembling session archive from chunked upload: {i} of {num_chunks} chunks processed."
-                if _background_job_update(job_id, msg, overwrite=True):
+                if _background_job_update(job_id, msg, overwrite=True, log=((i == 1) or (i == num_chunks - 1))):
                     return False
                 t0 = time.time()
     shutil.rmtree(temp_dir)
@@ -1571,7 +1572,7 @@ def _chunked_extract_from_archive(job_id: str, archive: zipfile.ZipFile, pl2_inf
     # Large file extract in chunks
     t0 = time.time()
     msg = f"Extracting Omniplex file {pl2_info.filename}: 0 of {size_in_mb:.1f} MB ..."
-    if _background_job_update(job_id, msg):
+    if _background_job_update(job_id, msg, log=True):
         return None
     save_path = Path(dst, pl2_info.filename)
     bytes_written: int = 0
@@ -1669,18 +1670,23 @@ def _get_trial_timing_from_pl2_file(fp: IO, info: Optional[Dict[str, Any]] = Non
     This method loads and parses the relevant event data channels to extract, for each successfully saved data file,
     the filename, and the timestamps of the two XS2 pulses bracketing the trial duration.
 
+    **NOTE:** During testing, we discovered a number of sessions where the Omniplex system was stopped in the middle of
+    a running trial. As a result, the last "start" code recorded by the Omniplex is not matched with a "stop" code.
+    Instead of throwing an exception in this case, we now simply skip that "start" code -- just as we skip any
+    "start-stop" event sequence that doesn't include the "file saved" code, corresponding to the many aborted trials
+    that happen in a typical Maestro recording session.
+
     Args:
         fp: The PL2 file object. It must be open and is NOT closed upon return.
         info: Header and footer information from the PL2 file, for navigating a potentially multi-GB file. If None,
             the method will read in that information first.
     Returns:
         A dictionary mapping the name of each saved data file to a 2-tuple (start, stop) containing the start and stop
-        timestamps of the corresponding Maestro trial in seconds since the start of the Omniplex recording. The
-        dictionary will be empty if the expected event channel data is not found in the PL2 file.
-
+            timestamps of the corresponding Maestro trial in seconds since the start of the Omniplex recording. The
+            dictionary will be empty if the expected event channel data is not found in the PL2 file.
     Raises:
-        A generic exception if a problem is detected while analyzing the Omniplex strobed character and event channels.
-        The exception message is the error description.
+        Exception: If a problem is detected while analyzing the Omniplex strobed character and event channels.
+            The exception message is the error description.
     """
     result: Dict[str, Tuple[float, float]] = dict()
     if info is None:
@@ -1710,17 +1716,20 @@ def _get_trial_timing_from_pl2_file(fp: IO, info: Optional[Dict[str, Any]] = Non
     null_code_mask = strobed_data["strobed"] == 0x00
     start_code_indices = np.where(start_code_mask)[0]
 
-    # helper function used to find, eg, the stop code character after a start code character
-    def find_next(mask: np.ndarray, after: int, code_desc: str):
+    # helper function used to find, eg, the stop code character after a start code character. Returns -1 if not found!
+    def find_next(mask: np.ndarray, after: int) -> int:
         for _i in range(after + 1, len(mask)):
             if mask[_i]:
                 return _i
-        raise Exception(f"Missing {code_desc} in Omniplex strobed character data")
+        return -1
 
-    for start_code_index in start_code_indices:
-        first_null_index = find_next(null_code_mask, start_code_index, 'null terminator')
-        second_null_index = find_next(null_code_mask, first_null_index+1, 'null terminator')
-        stop_code_index = find_next(stop_code_mask, second_null_index, 'trial stop character')
+    for idx, start_code_index in enumerate(start_code_indices):
+        first_null_index = find_next(null_code_mask, start_code_index)
+        second_null_index = -1 if first_null_index == -1 else find_next(null_code_mask, first_null_index+1)
+        stop_code_index = -1 if second_null_index == -1 else find_next(stop_code_mask, second_null_index)
+        if stop_code_index == -1:
+            continue   # see NOTE in function header
+
         file_name = "".join([chr(code) for code in strobed_data['strobed'][first_null_index + 1:second_null_index]])
         file_was_saved = (any(strobed_data["strobed"][second_null_index + 1:stop_code_index] == 0x06))
         if file_was_saved:

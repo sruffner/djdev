@@ -107,6 +107,10 @@ experimenter, subject ID, rig ID, name of the brain region in which any neural u
 each recorded unit, and the title of the research study to which the experiment belongs. You can use the `metadata_table()`
 method to list the contents of these tables.
 
+The Python excerpt below shows how you might use `PortalAccessor` to upload a session archive and commit the session
+data to the portal. Better yet, the package includes an interactive script to do just that: `session_uploader.py`. To 
+use it, open a Terminal and run `python3.9 -m session_uploader`.
+
 ```python
 from sglportalapi.clientside import PortalAccessor
 from sglportalapi.data_containers import MetadataTable
@@ -159,7 +163,7 @@ else:
             done, review_required = True, True
         elif jobs[0]['state'] == 'DONE':
             done = True
-        elif jobs[0]['state'] == 'FAILED':
+        elif jobs[0]['state'] == 'FAIL':
             print(f"Commit job failed: {jobs[0]['messages'][0]}")
             failed, done = True, True
         else:

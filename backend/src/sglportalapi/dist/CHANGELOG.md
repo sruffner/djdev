@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.5.0 (01/12/2023)
+
+- Minor bug fix to `sglportalapi.clientside.PortalAccessor.commit_status`: When function failed, it returned True when 
+it should have returned False.
+- Minor documenation fix in README and `commit_status` method: 'FAILED' state should read 'FAIL'.
+- Added script `session_uploader.py`, an interactive script that lets you commit an experiment session to the portal
+database using the `sglportalapi`.
+
 ## v0.4.0 (10/24/2022)
 
 - Added methods `commit_start()`, `commit_status()`, and `commit_remove()` in `sglportalapi.PortalAccessor` to support 

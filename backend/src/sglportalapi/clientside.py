@@ -552,11 +552,12 @@ class PortalAccessor:
             with zip_path.open('rb') as f:
                 if show_progress:
                     sys.stdout.write("\nStarting upload...")
+                session = requests.Session()
                 for num, url in enumerate(urls):
                     part = num + 1
                     t0 = time.time()
                     file_data = f.read(chunk_size)
-                    res = requests.put(url, data=file_data)
+                    res = session.put(url, data=file_data)
                     t_elapsed = time.time() - t0
                     if res.status_code != 200:
                         raise Exception(f"Archive upload failed on chunk {part} [{res.status_code}]")
@@ -626,9 +627,9 @@ class PortalAccessor:
             - `messages [List[str]]`: The job's progress history, with messages in reverse chronological order.
             - `started [float]`: The timestamp (seconds since the "epoch") when the commit job was initiated.
             - `updated [float]`: The timestamp when the commit job's progress was last updated.
-            - `state [str]`: The job's current state, one of 'UPLOADING', 'PREPROCESS', 'REVIEW', 'CANCEL', 'FAILED',
-               or 'DONE'. If a commit job is in the 'REVIEW' state, you must use the portal's web site to review and
-               validate one or more trial protocols before committing the session data to the portal database.
+            - `state [str]`: The job's current state, one of 'UPLOADING', 'PREPROCESS', 'REVIEW', 'CANCEL', 'COMMIT',
+              'FAIL', or 'DONE'. If a commit job is in the 'REVIEW' state, you must use the portal's web site to review
+              and validate one or more trial protocols before committing the session data to the portal database.
             - `api_triggered [bool]`: Indicates whether the commit job was initiated via this API rather than the
               'commit' page on the portal web site.
 
@@ -652,7 +653,7 @@ class PortalAccessor:
             if response.status_code == 200:
                 return True, content['jobs']
             else:
-                return True, content['error']
+                return False, content['error']
         except APISerializeError as e:
             return False, f"Failed to decode server response: {str(e)}"
         except RequestException as e:
