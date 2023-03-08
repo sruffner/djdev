@@ -194,7 +194,7 @@ def trials_for_neuron(neuron_key: Dict[str, AttributeValue], proto_hash: Optiona
         return None
 
 
-def retrieve_session_trial_rep(session_key: Dict[str, Any], trial_index: int, unit_ids: List[int],
+def retrieve_session_trial_rep(session_key: Dict[str, Any], trial_index: int, unit_ids: Optional[List[int]] = None,
                                what: RequestedData = RequestedData.ALL) -> Union[str, TrialRep]:
     """
     Retrieve metadata and recorded response data for a single specified trial rep in the Lisberger lab database.
@@ -209,6 +209,8 @@ def retrieve_session_trial_rep(session_key: Dict[str, Any], trial_index: int, un
     Returns:
         The trial rep, or an error description if the operation failed for any reason.
     """
+    unit_ids = unit_ids if (isinstance(unit_ids, list) and (RequestedData.NEURONAL in what)) else []
+
     try:
         trial_pk = session_key.copy()
         trial_pk['trial_idx'] = trial_index

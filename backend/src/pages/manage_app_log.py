@@ -12,7 +12,7 @@ in a read-only text area. The older log files in the repository may be permanent
 """
 from typing import Optional
 
-from dash import html, callback, Output, Input, State, no_update, dcc
+from dash import html, callback, Output, Input, State, no_update
 import dash_bootstrap_components as dbc
 
 import flask_login

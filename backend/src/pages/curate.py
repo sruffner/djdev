@@ -14,7 +14,6 @@ foreign key) in another table, the portal app may not allow deletion and/or upda
 @author: sruffner
 @created: 28jan2022
 """
-import json
 from typing import List, Dict, Optional
 
 from dash import callback, callback_context, no_update, Input, Output, State, html, dcc, dash_table as dt
@@ -143,8 +142,8 @@ _SUBJ_ALERT: str = "subj-alert"
 """ ID of Bootstrap Alert that appears when an operation on the experiment subjects table fails."""
 _TABLE_RETRIEVE_ERROR: str = "Failed to retrieve table content from database."
 """ Generic user-facing error message when an attempt to retrieve the rows of a database table fails."""
-_SELECTED_SUBJ_ROW_STORE: str = "subj-selected-store"
-""" ID of Dash Store component that holds a JSON representation of the currently selected row in the subjects table."""
+_SELECTED_SUBJ_ID_STORE: str = "subj-selected-id-store"
+""" ID of Dash Store component that holds the ID of the subject currently selected the subjects table."""
 
 
 def _subject_tabpane() -> html.Div:
@@ -213,7 +212,7 @@ def _subject_tabpane() -> html.Div:
         dbc.Row([
             dbc.Col(subj_table, width=6), dbc.Col(edit_form, width=6)
         ]),
-        dcc.Store(id=_SELECTED_SUBJ_ROW_STORE),
+        dcc.Store(id=_SELECTED_SUBJ_ID_STORE, data=''),
         _implant_history_panel()
     ])
 
@@ -341,12 +340,12 @@ def _implant_history_panel() -> dbc.Collapse:
 
 
 @callback(
-    Output(_SELECTED_SUBJ_ROW_STORE, "value"), [Input(_SUBJ_TABLE_ID, "selected_rows")], [State(_SUBJ_TABLE_ID, "data")]
+    Output(_SELECTED_SUBJ_ID_STORE, "data"), [Input(_SUBJ_TABLE_ID, "selected_rows")], [State(_SUBJ_TABLE_ID, "data")]
 )
 def save_selected_subject_row(selected_rows, rows):
     idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
     selected_row = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
-    return json.dumps(selected_row)
+    return '' if (selected_row is None) else selected_row['subj_id']
 
 
 @callback(
@@ -412,12 +411,12 @@ def _subject_table_callback(*args):
 
 @callback(
     [Output(_IMPLANT_COLLAPSE, "is_open"), Output(_IMPLANT_LABEL, "children")],
-    [Input(_SELECTED_SUBJ_ROW_STORE, "value")]
+    [Input(_SELECTED_SUBJ_ID_STORE, "data")]
 )
-def show_hide_implant_history(json_str):
-    subj_row = json_str and json.loads(json_str)
-    label = f"Implant history for _**{subj_row['subj_id']}**_" if subj_row else ""
-    return subj_row is not None, label
+def show_hide_implant_history(subj_id):
+    ok = isinstance(subj_id, str) and (len(subj_id) > 0)
+    label = f"Implant history for _**{subj_id}**_" if ok else ""
+    return ok, label
 
 
 @callback(
@@ -428,26 +427,25 @@ def show_hide_implant_history(json_str):
      Output(_IMPLANT_DATE_INPUT, 'value'), Output(_IMPLANT_AP_INPUT, 'value'), Output(_IMPLANT_ML_INPUT, 'value'),
      Output(_IMPLANT_DV_INPUT, 'value'), Output(_IMPLANT_AP_ANGLE_INPUT, 'value'),
      Output(_IMPLANT_ML_ANGLE_INPUT, 'value')],
-    [Input(_SELECTED_SUBJ_ROW_STORE, 'value'), Input(_CLEAR_SEL_IMPLANT_BTN, 'n_clicks'),
+    [Input(_SELECTED_SUBJ_ID_STORE, 'data'), Input(_CLEAR_SEL_IMPLANT_BTN, 'n_clicks'),
      Input(_ADD_MOD_IMPLANT_BTN, 'n_clicks'), Input(_DEL_IMPLANT_BTN, 'n_clicks'),
      Input(_IMPLANT_TABLE_ID, 'selected_rows')],
     [State(_IMPLANT_TABLE_ID, 'selected_rows'), State(_IMPLANT_TABLE_ID, 'data'), State(_IMPLANT_DATE_INPUT, 'value'),
      State(_IMPLANT_AP_INPUT, 'value'), State(_IMPLANT_ML_INPUT, 'value'), State(_IMPLANT_DV_INPUT, 'value'),
      State(_IMPLANT_AP_ANGLE_INPUT, 'value'), State(_IMPLANT_ML_ANGLE_INPUT, 'value'),
-     State(_SELECTED_SUBJ_ROW_STORE, 'value')]
+     State(_SELECTED_SUBJ_ID_STORE, 'data')]
 )
 def _implant_table_callback(*args):
     ctx = callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if (ctx.triggered is not None) else ""
     out = [no_update] * 14
 
-    if trigger_id == _SELECTED_SUBJ_ROW_STORE:
-        subj_row = args[0] and json.loads(args[0])
+    if trigger_id == _SELECTED_SUBJ_ID_STORE:
+        subj_id = args[0]
         rows = []
         error_msg = ""
-        if subj_row:
-            subj_pk = dict(subj_id=subj_row['subj_id'])
-            rows = fetch_rows(DBTable.IMPLANT, subj_pk)
+        if isinstance(subj_id, str) and (len(subj_id) > 0):
+            rows = fetch_rows(DBTable.IMPLANT, dict(subj_id=subj_id))
             if rows is None:
                 error_msg = _TABLE_RETRIEVE_ERROR
                 rows = []
@@ -483,8 +481,7 @@ def _implant_table_callback(*args):
                        ml_angle=args[12])
         is_add = (row is None)
         if is_add:
-            subj_row = args[-1] and json.loads(args[-1])
-            implant['subj_id'] = subj_row['subj_id']
+            implant['subj_id'] = args[-1]
         else:
             implant['subj_id'] = row['subj_id']
         error_msg = insert_into_table(tid, implant) if is_add else update_table_row(tid, implant)

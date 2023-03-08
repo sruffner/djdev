@@ -431,7 +431,7 @@ def delete_from_table(table_id: DBTable, row_pk: Dict[str, AttributeValue], log:
     err_msg = None
     if not (table_id in _table_map):
         err_msg = f"Unrecognized database table ID: {str(table_id)}"
-    elif not table_id.allow_delete():
+    elif not (table_id.allow_delete()):
         err_msg = f"User-initiated deletions from this table are not permitted: {str(table_id)}"
     if err_msg is not None:
         get_application_logger().error(err_msg)

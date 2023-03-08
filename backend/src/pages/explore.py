@@ -2,26 +2,25 @@
 explore.py: The starting page in the Lisberger lab's database portal app devoted to searching database content
 (/explore endpoint).
 
-    This is the only "public" page in the portal (does not require login), and it serves as the landing page when one
+This is the only "public" page in the portal (does not require login), and it serves as the landing page when one
 navigates to the portal website.  It provides two ways to search for datasets -- by experiment session or by neural
 unit. Either way, the user selects a session or neural unit, and a detail pane appears with two tabs:
 
-    Session Info -- Summary information about the experiment session selected.
+- Session Info: Summary information about the experiment session selected.
 
-    Trial Data -- Here is where you can view any trial data recorded during the experiment. You can choose to view the
-    target and eye trajectories for a single trial rep, or the mean eye trajectory ("behavioral response") across
-    all successful reps of a given trial protocol. If neural units were recorded during the experiment, you can
-    choose which unit to display alongside the behavioral response. Mean neuronal response is characterized as
-    mean firing rate +/-1 SEM. Alternatively, you can display discharge statistics (auto-correlogram, inter-spike
-    interval histogram) for the selected unit. Mean firing rate and discharge statistics are only available for
-    trial protocols that are conducive to aggregating response data. Such protocols will have at most one random
-    variable defined, and that random variable must control the duration of a single segment in the trial (not
-    necessarily the first one).
+- Trial Data: Here is where you can view any trial data recorded during the experiment. You can choose to view the
+  target and eye trajectories for a single trial rep, or the mean eye trajectory ("behavioral response") across
+  all successful reps of a given trial protocol. If neural units were recorded during the experiment, you can
+  choose which unit to display alongside the behavioral response. Mean neuronal response is characterized as
+  mean firing rate +/-1 SEM. Alternatively, you can display discharge statistics (auto-correlogram, inter-spike
+  interval histogram) for the selected unit. Mean firing rate and discharge statistics are only available for
+  trial protocols that are conducive to aggregating response data. Such protocols will have at most one random
+  variable defined, and that random variable must control the duration of a single segment in the trial (not
+  necessarily the first one).
 
 @author: sruffner
 @created: 15jun2021
 """
-import json
 from datetime import date
 from typing import List, Optional, Dict, Any, Tuple, Union
 
@@ -51,8 +50,11 @@ _COLLAPSE_ID: str = "explore_detail_collapse_id"
 """ ID of Dash Bootstrap Collapse element wrapping the panel displaying details for a selected experiment
 session. The element is hidden when no session is selected. """
 
-_SELECTED_ROW_ID: str = "explore_selected_row_id"
-""" ID of Dash Store component that holds the dictionary defining the currently selected row in search results table."""
+_SELECTED_PK_ID: str = "explore_selected_pk_id"
+""" 
+ID of Dash Store component that holds the dictionary defining the primary key of the sesssion or neural unit
+(depending on the search mode) currently selected row in search results table.
+"""
 
 _SEARCH_MODE_RADIO_ID: str = 'search-mode-radio'
 """ ID of the Bootstrap RadioItems widget that selects the search mode. """
@@ -123,7 +125,7 @@ def serve_layout() -> html.Div:
         ]),
     ], class_name='mx-5 my-5')
 
-    stored_selection = dcc.Store(id=_SELECTED_ROW_ID)
+    stored_selection = dcc.Store(id=_SELECTED_PK_ID, data=None)
     return html.Div([card, stored_selection])
 
 
@@ -1075,34 +1077,40 @@ def _discharge_statistics_panel(unit_key: Dict[str, Any], proto_hash: str) -> ht
     ])
 
 
-# When a row is selected (or deselected) in the search results table, we store the dictionary defining that row in a
-# Dash Store component on the page. This is because many callbacks need the identity of the currently selected session,
-# and we don't want to pass the state of 'data' and 'selected_rows' attributes of the DataTable for all of those
-# callbacks. The 'data' attribute could be rather large!
+# When a row is selected (or deselected) in the search results table, we store the PK of the session or neural unit
+# (depending on search mode) corresponding to that row in a Dash Store component on the page. This is because many
+# callbacks need the PK of the selected session or unit, and we don't want to pass the state of 'data' and
+# 'selected_rows' attributes of the DataTable for all of those callbacks. The 'data' attribute could be rather large!
 @callback(
-    Output(_SELECTED_ROW_ID, "value"), [Input(_SEARCH_TABLE_ID, "selected_rows")], [State(_SEARCH_TABLE_ID, "data")]
+    Output(_SELECTED_PK_ID, "data"), [Input(_SEARCH_TABLE_ID, "selected_rows")], [State(_SEARCH_TABLE_ID, "data")]
 )
 def on_search_row_selected(selected_rows, rows):
     idx = selected_rows[0] if (selected_rows is not None) and (len(selected_rows) > 0) else -1
     selected_row = rows[idx] if ((rows is not None) and (-1 < idx < len(rows))) else None
-    return json.dumps(selected_row)
+    if selected_row is None:
+        return None
+    else:
+        pk = {k: selected_row[k] for k in ['experimenter', 'subj_id', 'session_date', 'session_sfx']}
+        if 'unit_id' in selected_row:
+            pk['unit_id'] = selected_row['unit_id']
+        return pk
 
 
 @callback(
     [Output(_COLLAPSE_ID, "is_open"), Output(_SESSION_TAB_ID, "children"), Output(_DATA_TAB_ID, "children")],
-    [Input(_SELECTED_ROW_ID, "value")]
+    [Input(_SELECTED_PK_ID, "data")]
 )
-def show_hide_detail_pane(json_str):
-    selected_row = json_str and json.loads(json_str)
-    summary_tab = _session_info_tabpane(selected_row) if selected_row else html.Div("Not available.")
-    data_tab = _trial_data_tabpane(selected_row) if selected_row else html.Div("Not available.")
-    return selected_row is not None, summary_tab, data_tab
+def show_hide_detail_pane(pk):
+    if isinstance(pk, dict):
+        return True, _session_info_tabpane(pk), _trial_data_tabpane(pk)
+    else:
+        return False, html.Div("Not available."), html.Div("Not available.")
 
 
 @callback(
     [Output(_UNIT_STATS_MODAL_ID, "is_open"), Output(_UNIT_STATS_BODY_ID, "children")],
     [Input(_UNIT_STATS_OPEN_ID, "n_clicks"), Input(_UNIT_STATS_CLOSE_ID, "n_clicks")],
-    [State(_UNIT_SELECT_ID, "value"), State(_SELECTED_ROW_ID, "value")]
+    [State(_UNIT_SELECT_ID, "value"), State(_SELECTED_PK_ID, "data")]
 )
 def on_show_hide_unit_stats(*args):
     ctx = callback_context
@@ -1110,11 +1118,11 @@ def on_show_hide_unit_stats(*args):
     if trigger_id == _UNIT_STATS_CLOSE_ID:
         return False, no_update
     elif trigger_id == _UNIT_STATS_OPEN_ID:
-        selected_row = args[-1] and json.loads(args[-1])
+        pk = args[-1]
         unit_id = int(args[-2]) if isinstance(args[-2], str) else None
-        if selected_row and unit_id:
-            selected_row['unit_id'] = unit_id
-            summary_div = _unit_summary(selected_row)
+        if isinstance(pk, dict) and unit_id:
+            pk['unit_id'] = unit_id
+            summary_div = _unit_summary(pk)
             if summary_div:
                 return True, summary_div
     return False, no_update
@@ -1141,14 +1149,14 @@ def on_show_hide_protocol_definition(*args):
     [Output(_PROTO_SELECT_ID, "options"), Output(_PROTO_SELECT_ID, "value"),
      Output(_DISP_SELECT_ID, "options"), Output(_DISP_SELECT_ID, "value"), Output(_UNIT_STATS_OPEN_ID, "disabled")],
     [Input(_UNIT_SELECT_ID, "value"), Input(_PROTO_SELECT_ID, "value")],
-    [State(_UNIT_SELECT_ID, "value"), State(_PROTO_SELECT_ID, "value"), State(_SELECTED_ROW_ID, "value")],
+    [State(_UNIT_SELECT_ID, "value"), State(_PROTO_SELECT_ID, "value"), State(_SELECTED_PK_ID, "data")],
     prevent_initial_call=True
 )
 def on_update_selected_unit_or_proto(*args):
-    selected_row = args[-1] and json.loads(args[-1])
+    pk = args[-1]
     ctx = callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ""
-    if (selected_row is None) or (trigger_id == ""):
+    if (not isinstance(pk, dict)) or (trigger_id == ""):
         raise dash_exc.PreventUpdate
 
     proto_opts, proto_sel, disp_opts, disp_sel, stats_disabled = no_update, no_update, no_update, no_update, no_update
@@ -1156,34 +1164,34 @@ def on_update_selected_unit_or_proto(*args):
         unit_id = 0 if (args[0] is None) else int(args[0])
         stats_disabled = (unit_id == 0)
         proto_opts, proto_sel = \
-            _proto_select_options_and_initial_value(selected_row, unit_id, args[3])
+            _proto_select_options_and_initial_value(pk, unit_id, args[3])
         disp_opts, disp_sel = \
-            _disp_select_options_and_initial_value(selected_row, proto_sel, unit_id)
+            _disp_select_options_and_initial_value(pk, proto_sel, unit_id)
     elif trigger_id == _PROTO_SELECT_ID:
         unit_id = 0 if (args[2] is None) else int(args[2])
         stats_disabled = (unit_id == 0)
         disp_opts, disp_sel = \
-            _disp_select_options_and_initial_value(selected_row, args[1], unit_id)
+            _disp_select_options_and_initial_value(pk, args[1], unit_id)
     return proto_opts, proto_sel, disp_opts, disp_sel, stats_disabled
 
 
 @callback(
     Output(_DISP_VIEW_ID, "children"),
     [Input(_DISP_SELECT_ID, "value")],
-    [State(_UNIT_SELECT_ID, "value"), State(_PROTO_SELECT_ID, "value"), State(_SELECTED_ROW_ID, "value")],
+    [State(_UNIT_SELECT_ID, "value"), State(_PROTO_SELECT_ID, "value"), State(_SELECTED_PK_ID, "data")],
     prevent_initial_call=True
 )
-def on_update_trial_data_view(disp_sel, unit_sel, proto_sel, json_str):
-    selected_row = json_str and json.loads(json_str)
-    if (selected_row is None) or not callback_context.triggered:
+def on_update_trial_data_view(disp_sel, unit_sel, proto_sel, pk):
+    if not (isinstance(pk, dict) and callback_context.triggered):
         raise dash_exc.PreventUpdate
-    return _generate_trial_data_view(selected_row, 0 if (unit_sel is None) else int(unit_sel), proto_sel, disp_sel)
+    return _generate_trial_data_view(pk, 0 if (unit_sel is None) else int(unit_sel), proto_sel, disp_sel)
 
 
 @callback(
     Output(_DS_GRAPH_ID, "figure"), [Input(_DS_RANGE_ID, "value")],
-    [State(_SELECTED_ROW_ID, "value"), State(_UNIT_SELECT_ID, "value"), State(_PROTO_SELECT_ID, "value")])
-def on_update_discharge_stats_figure(range_value, json_str, unit_sel, proto_hash_value):
-    selected_row = json_str and json.loads(json_str)
+    [State(_SELECTED_PK_ID, "data"), State(_UNIT_SELECT_ID, "value"), State(_PROTO_SELECT_ID, "value")])
+def on_update_discharge_stats_figure(range_value, pk, unit_sel, proto_hash_value):
+    if not isinstance(pk, dict):
+        raise dash_exc.PreventUpdate
     unit_id = int(unit_sel) if isinstance(unit_sel, str) else 0
-    return discharge_statistics_figure(selected_row, proto_hash_value, unit_id, range_value)
+    return discharge_statistics_figure(pk, proto_hash_value, unit_id, range_value)
