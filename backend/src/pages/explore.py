@@ -480,6 +480,8 @@ def _session_info_tabpane(session: Dict[str, Any]) -> html.Div:
             f"Error while fetching info for experiment session summary: {str(e)}", exc_info=True)
         return html.Div(dbc.Alert("Failed to retrieve information on selected session from the database", is_open=True))
 
+    ipsi_dir = _get_ipsiversive_direction(session)
+
     info_table_rows = [
         ["Recorded on", f"{session['session_date']} [subsession ID:  {session['session_sfx']}]"],
         ["Committed on", f"{session['committed']}"],
@@ -510,7 +512,8 @@ def _session_info_tabpane(session: Dict[str, Any]) -> html.Div:
             ["Electrode Source", f"{ephys['ephys_src']}"],
             ["Probe Type", f"{ephys['probe_type']}"],
             ["Probe Location", f"X={ephys['probe_x']} mm, Y={ephys['probe_y']} mm, Z={ephys['probe_depth']} mm"],
-            ["Sampling Rate", f"{ephys['sampling_rate']} Hz"]
+            ["Sampling Rate", f"{ephys['sampling_rate']} Hz"],
+            ["Ipsiversive Direction", "Unknown" if (ipsi_dir is None) else f"{ipsi_dir}\u00b0"]
         ]
     else:
         ephys_table_rows = [
@@ -519,7 +522,8 @@ def _session_info_tabpane(session: Dict[str, Any]) -> html.Div:
             ["Electrode Source", "N/A"],
             ["Probe Type", "N/A"],
             ["Probe Location", "N/A"],
-            ["Sampling Rate", "N/A"]
+            ["Sampling Rate", "N/A"],
+            ["Ipsiversive Direction", "N/A"]
         ]
     ephys_table_body = html.Tbody([
         html.Tr([html.Td(row[0], className='text-right p-2'), html.Td(row[1], className='text-left text-info p-2')])
@@ -538,6 +542,42 @@ def _session_info_tabpane(session: Dict[str, Any]) -> html.Div:
         _subject_popover(session['subj_id']),
         _study_popover(study)
     ])
+
+
+def _get_ipsiversive_direction(session: Dict[str, Any]) -> Optional[int]:
+    """
+    Helper method determines the ipsiversive direction for the specified experiment session.
+
+    This depends solely on the location of the recording cylinder implant WRT the midline of the subject's skull. If the
+    implant is on the right side of the midline, the ipsiversive direction is 0 deg; else it is 180 deg. Since it is
+    possible that the implant location could change for a subject, the method checks the subject's implant history to
+    find the implant surgery that proceeds the session date, then checks the medialateral coordinate for that implant;
+    ML >= 0 indicates the right side of midline, while a negative value indicates the left side.
+
+    Args:
+        session: A dictionary corresponding to one row in the search results table. At a minimum, it must include the
+            primary key-value pairs that uniquely identify an experiment session in the database.
+    Returns:
+        The ipsiversive direction: 0 or 180. If unable to determine the direction for whatever reason, returns None.
+    """
+    try:
+        implants = fetch_rows(ti.DBTable.IMPLANT, dict(subj_id=session['subj_id']))
+        if implants is None:
+            raise Exception(f"DB error while retreiving implant history for {session['subj_id']}")
+        elif len(implants) == 0:
+            raise Exception(f"No implants found for {session['subj_id']}")
+        elif len(implants) > 1:
+            # more than one implant surgery. Find the one that immediately precedes the session date
+            implants.sort(key=lambda x: x['implant_date'], reverse=True)
+            for implant in implants:
+                if implant['implant_date'] < session['session_date']:
+                    return 180 if implant['st_ml'] < 0 else 0
+        elif implants[0]['implant_date'] < session['session_date']:  # only implant must preceded session date!
+            return 180 if implants[0]['st_ml'] < 0 else 0
+        raise Exception(f"No implant surgery for {session['subj_id']} prior to session on {session['session_date']}")
+    except Exception as e:
+        get_application_logger().error(f"{str(e)}", exc_info=True)
+    return None
 
 
 def _experimenter_popover(experimenter: Dict[str, ti.AttributeValue]) -> dbc.Popover:
