@@ -22,18 +22,16 @@ unit. Either way, the user selects a session or neural unit, and a detail pane a
 @created: 15jun2021
 """
 from datetime import date
-from typing import List, Optional, Dict, Any, Tuple, Union
+from typing import List, Optional, Dict, Any, Tuple, Union, Set
 
 from dash import callback, callback_context, html, dcc, dash_table as dt, exceptions as dash_exc, no_update, Input, \
     Output, State
 import dash_bootstrap_components as dbc
-import numpy as np
-import plotly.express as px
 
 import database.table_info as ti
 from config.app_logging import get_application_logger
 from database.data_plots import average_response_figure, single_trial_response_figure, trial_target_trajectory_figure, \
-    discharge_statistics_figure
+    discharge_statistics_figure, mean_firing_rate_figure, neural_unit_summary
 from database.table_ops import fetch_restrict_proj, fetch_rows, fetch_attribute_values, num_table_rows, fetch_one_row, \
     fetch_any_proj
 from database.trial_data_ops import trial_protocols_for_session, trial_protocols_for_neuron, trials_for_session, \
@@ -46,6 +44,8 @@ _SESSION_TAB_ID: str = "explore_session_tab"
 """ ID of 'Session Info' tab panel in which the selected session's summary information is displayed. """
 _DATA_TAB_ID: str = "explore_data_tab"
 """ ID of 'Trial Data' tab panel displaying trial data recorded during the selected session. """
+_UNIT_TAB_ID: str = "explore_unit_tab"
+""" ID of 'Unit Responses' tab panel on which unit mean firing rate is display across multiple trial protocols."""
 _COLLAPSE_ID: str = "explore_detail_collapse_id"
 """ ID of Dash Bootstrap Collapse element wrapping the panel displaying details for a selected experiment
 session. The element is hidden when no session is selected. """
@@ -71,7 +71,8 @@ def serve_layout() -> html.Div:
     detail_panel = dbc.Tabs(
         [
             dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_SESSION_TAB_ID), class_name='mt-2'), label="Session Info"),
-            dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_DATA_TAB_ID), class_name='mt-2'), label="Trial Data")
+            dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_DATA_TAB_ID), class_name='mt-2'), label="Trial Data"),
+            dbc.Tab(dbc.Card(dbc.CardBody(children=[], id=_UNIT_TAB_ID), class_name='mt-2'), label="Unit Responses")
         ]
     )
     """ Rendering of a tabbed panel in which details about an experiment session are displayed. """
@@ -950,59 +951,6 @@ def _disp_select_options_and_initial_value(session: Dict[str, Any], proto_hash: 
     return options, sel_value
 
 
-def _unit_summary(unit_pk: Dict[str, Any]) -> html.Div:
-    """
-    Helper method retrieves summary information on a specific neuron recorded during an experiment session and renders
-    that information in an HTML Div container. A tabular listing of neural unit information appears on the right, and a
-    graph of the unit's 10-ms template waveform is on the left.
-
-    Args:
-        unit_pk: The primary key of the neural unit.
-    Returns:
-        An HTML Div that renders a table of information about the neural unit, alongside its template waveform.
-    """
-    # retrieve the sampling rate for the neural recording, the full unit record, and the neuron type assigned to unit.
-    try:
-        unit = fetch_one_row(ti.DBTable.SESSION_NEURON, unit_pk)
-        sampling_rate = fetch_attribute_values(ti.DBTable.SESSION_EPHYS, 'sampling_rate', unit_pk)[0]
-        neuron_type = fetch_attribute_values(ti.DBTable.NEURON_TYPE, 'nt_name', dict(nt_id=unit['unit_type']))[0]
-    except Exception as e:
-        get_application_logger().error(f"Error while fetching info for unit summary: {str(e)}", exc_info=True)
-        return html.Div(dbc.Alert("Failed to retrieve information on selected neuron from the database", is_open=True))
-
-    unit_template: np.ndarray = unit['unit_template']
-    peak_to_peak = max(unit_template) - min(unit_template)
-
-    table_rows = [
-        ["Unit #", f"{unit['unit_id']}"],
-        ["Neuron Type", f"{neuron_type}"],
-        ["Date Recorded", f"{unit['session_date']}"],
-        ["Omniplex Ch", f"{unit['unit_channel']}"],
-        ["Firing Rate", f"{unit['unit_rate']:.1f} Hz"],
-        ["Total #Spikes", f"{unit['unit_spikes']}"],
-        ["Signal-to-Noise:", f"{unit['unit_snr']:.2f}"],
-        ["Peak-to-Peak", f"{peak_to_peak:.1f} \u00B5V"]
-    ]
-    table_body = html.Tbody([
-        html.Tr([html.Td(row[0], className='text-right'), html.Td(row[1], className='text-left text-info')])
-        for row in table_rows
-    ], className='small')
-    info_table = dbc.Table([table_body], striped=True, bordered=True)
-
-    # simple graph of template waveform.
-    to_msecs = 1000.0 / sampling_rate
-    graph = dcc.Graph(figure=px.line(x=[i * to_msecs for i in range(len(unit_template))], y=unit_template,
-                                     labels={'x': 'time (ms)', 'y': '\u00B5V'},
-                                     title='Average spike waveform (1-ms pre, 9-ms post)'))
-
-    return html.Div([
-        dbc.Row([
-            dbc.Col(info_table, width=3),
-            dbc.Col(graph)
-        ], align='center')
-    ])
-
-
 def _generate_trial_data_view(
         session: Dict[str, Any], unit_id: int, proto_hash: str, disp_sel: str) -> Union[html.Div, dcc.Graph]:
     """
@@ -1117,6 +1065,163 @@ def _discharge_statistics_panel(unit_key: Dict[str, Any], proto_hash: str) -> ht
     ])
 
 
+_UR_UNITA_SELECT_ID: str = 'ur_unita_select'
+""" ID of Bootstrap Select component that selects a neural unit to display in the 'Unit Responses' tab pane. """
+_UR_UNITB_SELECT_ID: str = 'ur_unitb_select'
+""" ID of Bootstrap Select component that selects a 2nd neural unit to display in the 'Unit Responses' tab pane. """
+_UR_UNITC_SELECT_ID: str = 'ur_unitc_select'
+""" ID of Bootstrap Select component that selects a 3rd neural unit to display in the 'Unit Responses' tab pane. """
+_UR_UNIT_STATS_OPEN_ID: str = 'ur_unit_stats_open'
+""" ID of button on 'Unit Responses' panel that raises the unit stats modal window. """
+_UR_TRIALSET_SELECT_ID: str = 'ur_trialset_select'
+""" ID of Bootstrap Select component that selects the trial set/subset in the 'Unit Responses' tab pane. """
+_UR_HELP_BADGE_ID: str = 'ur_help_badge'
+""" ID of Bootstrap Badge to which a Popover is attached displaying help on the 'Unit Responses' tab pane. """
+_UR_HELP_POPOVER_ID: str = 'ur_help_popover'
+""" ID of Bootstrap Popover encapsulating instructions on how to use widgets on the 'Unit Responses' tab pane. """
+_UR_FIG_VIEW_ID: str = "ur_fig_view"
+""" 
+ID of HTML Div in the 'Unit Responses' panel in which mean firing rate unit response data is plotted for the
+trial protocols in the selected trial set. 
+"""
+_UR_FIG_VIEW_LOADING_ID: str = "ur_fig_view_loading"
+""" 
+ID of the Dash Loading component encapsulating the response graph(s) in the "Unit Responses' tab pane. It displays
+a placeholder loading indicator when it takes a significant amount of time to prepare those graphs.
+"""
+
+
+def _unit_response_tabpane(session: Dict[str, Any]) -> html.Div:
+    """
+    Helper method generates the HTML Div element that renders the content of the "Unit Responses" tab in the detail
+    panel.
+
+    TODO: UNDER DEVELOPMENT
+
+    Args:
+        session: A dictionary corresponding to one row in the search results table. At a minimum, it must include the
+            primary key-value pairs that uniquely identify an experiment session in the database. If it includes the
+            ID of a neural unit recorded during the session (when search results table lists neurons instead of
+            sessions), then that unit is displayed initially. Otherwise, the first recorded unit is displayed (unless
+            no neurons were recorded during the session).
+    Returns:
+        An HTML Div that renders the contents of the "Trial Data" tab in the detail panel.
+    """
+    # how many units, N, were recorded in the session? The unit IDs are 1 to N.
+    num_units = 0
+    try:
+        pk = {k: session[k] for k in ti.primary_key_of(ti.DBTable.SESSION, False)}
+        num_units = num_table_rows(ti.DBTable.SESSION_NEURON, restriction=[pk])
+    except Exception as e:
+        get_application_logger().error(f"Error while fetching #units recorded during session: {str(e)}", exc_info=True)
+        pass
+
+    # ID of unit initiallly displayed: When search table row selected includes a unit ID, select that unit. Else, select
+    # unit 1 -- unless the session is behavior only -- in which case this tab pane has not useful content!
+    initial_unit_id = session['unit_id'] if ('unit_id' in session) else 1 if num_units > 0 else 0
+    options = [{'label': f"{i + 1}", 'value': str(i+1)} for i in range(num_units)]
+    select_unit_a = dbc.Select(
+        id=_UR_UNITA_SELECT_ID,
+        options=options,
+        value=None if num_units <= 0 else str(initial_unit_id),  # Bootstrap BUG: Select 'value' cannot be int
+        disabled=(num_units <= 0),
+        class_name='me-2'
+    )
+
+    # two additional unit selectors -- to compare response data for up to 3 neural units at once. The additional
+    # selectors include all available units plus the "None" option, to which they are set initially. If the session only
+    # recorded from a single unit, then these will only contain the "None" option and will be disabled.
+    options = [{'label': f"{i + 1}", 'value': str(i+1)} for i in range(num_units)]
+    options.insert(0, {'label': "--", 'value': "0"})
+    select_unit_b = dbc.Select(id=_UR_UNITB_SELECT_ID, options=options, value="0", disabled=(num_units <= 1),
+                               class_name='me-2')
+    select_unit_c = dbc.Select(id=_UR_UNITC_SELECT_ID, options=options, value="0", disabled=(num_units <= 1))
+
+    unit_grp = dbc.InputGroup([
+        dbc.InputGroupText("Units"),
+        select_unit_a, select_unit_b, select_unit_c
+    ], size='sm')
+
+    # clicking this button opens a modal window (defined in the "Trial Data" tab pane) to display unit stats
+    view_unit_btn = dbc.Button("View stats", id=_UR_UNIT_STATS_OPEN_ID, size='sm')
+
+    # initialize Bootstrap Select widget containing the "path names" of all trial sets and/or subsets that contain one
+    # or more trial protocols for which aggregate response data can be compiled
+    proto_map = trial_protocols_for_session(session, aggregate=True)
+    trial_sets: Set[str] = {v[0:v.rfind("/")] for _, v in proto_map.items()}
+    ts_sorted = [v for v in trial_sets]
+    ts_sorted.sort()
+    trial_set_select_grp = dbc.InputGroup([
+        dbc.InputGroupText("Trial Set/Subset"),
+        dbc.Select(id=_UR_TRIALSET_SELECT_ID,
+                   options=[{'label': v, 'value': v} for v in ts_sorted],
+                   value=None if len(ts_sorted) == 0 else ts_sorted[0],
+                   disabled=(len(ts_sorted) == 0))
+    ], size='sm', class_name='mr-1')
+
+    # a tooltip is presented in a Bootstrap Popover element attached to a pill badge on the navigation row.
+    help_badge = dbc.Badge("?", pill=True, id=_UR_HELP_BADGE_ID, class_name='float-end', color='info',
+                           style={'font-size': 18})
+    markdown = dcc.Markdown(
+        '''Select a trial set/subset and up to 3 different neural units, to view the mean firing rate response 
+        of each unit across all trial protocols in the chosen set. *Mean firing rate can be calculated only for 
+        those trial protocols for which 3 or more **successfully completed** trial reps were recorded. In 
+        addition, the trial protocol can have no random variables, or a single random-duration segment 
+        (highlighted in red in the figures).*'''
+    )
+    help_popover = dbc.Popover(
+        [dbc.PopoverHeader("Instructions"), dbc.PopoverBody(markdown)],
+        id=_UR_HELP_POPOVER_ID, target=_UR_HELP_BADGE_ID, trigger='hover', placement='top-end'
+    )
+
+    nav_row = dbc.Row([
+        dbc.Col(dbc.Row([
+            dbc.Col([help_badge, help_popover], width='auto', class_name='me-4'),
+            dbc.Col(trial_set_select_grp, width='auto', class_name='me-4'),
+            dbc.Col(unit_grp, width='auto', class_name='me-2'),
+            dbc.Col(view_unit_btn, width='auto')
+        ], class_name='g-0'), width=10)
+    ], align='center', justify='between', class_name='mb-2')
+
+    mfr_view = html.Div(id=_UR_FIG_VIEW_ID,
+                        children=_generate_trial_set_view(session, [initial_unit_id], ts_sorted[0]))
+    loading_mfr = dcc.Loading(id=_UR_FIG_VIEW_LOADING_ID, children=mfr_view, type='circle')
+    return html.Div([nav_row, loading_mfr])
+
+
+def _generate_trial_set_view(
+        session: Dict[str, Any], unit_ids: List[int], trial_set: str) -> Union[html.Div, dcc.Graph]:
+    """
+    Helper method prepares a figure displaying the mean firing rate (MFR) for up to 3 different neural units during the
+    presentation of up to 9 distinct trial protocols within the specified trial set.
+
+    The MFR responses for each distinct protocol are shown in a separate subplot within the figure; the protocol name
+    serves as a title for the corresponding subplot. The subplots are arranged in a 1x2, 1x3, 2x3 or 3x3 grid --
+    depending on the number of distinct protocols for which MFR response data can be computed. All subplots share the
+    same Y-axis range.
+
+    Args:
+        session: Dictionary contains the primary key of the relevant experiment session.
+        unit_ids: IDs of the neural units to include in the figure. Up to 3 distinct units may be specified; any
+            additional unit IDs are ignored.
+        trial_set: The path-like name of trial set or subset: "set_name/subset_name" or just "set_name".
+    Returns:
+        A Plotly figure displaying the response data specified by the arguments. If the arguments are invalid or the
+            response data is unavailable, the method returns an HTML Div with an error message.
+    """
+    if not isinstance(trial_set, str):
+        return html.Div(dbc.Alert(f"Please select a trial set.", is_open=True), className='mt-5 mb-5')
+    try:
+        proto_map = trial_protocols_for_session(session, aggregate=True)
+        protocol_ids = [k for k, v in proto_map.items() if v[0:v.rfind("/")] == trial_set]
+        out = mean_firing_rate_figure(session, protocol_ids, unit_ids)
+    except Exception as e:
+        get_application_logger().error(f"Error while preparing trial set MFR view: {str(e)}", exc_info=True)
+        out = html.Div(dbc.Alert(f"No data available or failed to generate figure", is_open=True),
+                       className='mt-5 mb-5')
+    return out
+
+
 # When a row is selected (or deselected) in the search results table, we store the PK of the session or neural unit
 # (depending on search mode) corresponding to that row in a Dash Store component on the page. This is because many
 # callbacks need the PK of the selected session or unit, and we don't want to pass the state of 'data' and
@@ -1137,35 +1242,40 @@ def on_search_row_selected(selected_rows, rows):
 
 
 @callback(
-    [Output(_COLLAPSE_ID, "is_open"), Output(_SESSION_TAB_ID, "children"), Output(_DATA_TAB_ID, "children")],
+    [Output(_COLLAPSE_ID, "is_open"), Output(_SESSION_TAB_ID, "children"), Output(_DATA_TAB_ID, "children"),
+     Output(_UNIT_TAB_ID, "children")],
     [Input(_SELECTED_PK_ID, "data")]
 )
 def show_hide_detail_pane(pk):
     if isinstance(pk, dict):
-        return True, _session_info_tabpane(pk), _trial_data_tabpane(pk)
+        return True, _session_info_tabpane(pk), _trial_data_tabpane(pk), _unit_response_tabpane(pk)
     else:
-        return False, html.Div("Not available."), html.Div("Not available.")
+        return False, html.Div("Not available."), html.Div("Not available."), html.Div("Not available.")
 
 
 @callback(
     [Output(_UNIT_STATS_MODAL_ID, "is_open"), Output(_UNIT_STATS_BODY_ID, "children")],
-    [Input(_UNIT_STATS_OPEN_ID, "n_clicks"), Input(_UNIT_STATS_CLOSE_ID, "n_clicks")],
-    [State(_UNIT_SELECT_ID, "value"), State(_SELECTED_PK_ID, "data")]
+    [Input(_UNIT_STATS_OPEN_ID, "n_clicks"), Input(_UR_UNIT_STATS_OPEN_ID, "n_clicks"),
+     Input(_UNIT_STATS_CLOSE_ID, "n_clicks")],
+    [State(_UNIT_SELECT_ID, "value"), State(_UR_UNITA_SELECT_ID, "value"), State(_UR_UNITB_SELECT_ID, "value"),
+     State(_UR_UNITC_SELECT_ID, "value"), State(_SELECTED_PK_ID, "data")]
 )
 def on_show_hide_unit_stats(*args):
     ctx = callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ""
-    if trigger_id == _UNIT_STATS_CLOSE_ID:
-        return False, no_update
-    elif trigger_id == _UNIT_STATS_OPEN_ID:
-        pk = args[-1]
-        unit_id = int(args[-2]) if isinstance(args[-2], str) else None
-        if isinstance(pk, dict) and unit_id:
-            pk['unit_id'] = unit_id
-            summary_div = _unit_summary(pk)
-            if summary_div:
-                return True, summary_div
-    return False, no_update
+    session_pk = args[-1]
+    summary_div = None
+    if (trigger_id == _UNIT_STATS_OPEN_ID) and isinstance(args[0], int):
+        unit_id = int(args[3]) if isinstance(args[3], str) else None
+        if isinstance(session_pk, dict) and unit_id:
+            summary_div = neural_unit_summary(session_pk, [unit_id])
+    elif (trigger_id == _UR_UNIT_STATS_OPEN_ID) and isinstance(args[1], int):
+        unit_a = int(args[4]) if isinstance(args[4], str) else None
+        if isinstance(session_pk, dict) and unit_a:
+            unit_b = int(args[5]) if isinstance(args[5], str) else 0
+            unit_c = int(args[6]) if isinstance(args[6], str) else 0
+            summary_div = neural_unit_summary(session_pk, [unit_a, unit_b, unit_c])
+    return not (summary_div is None), no_update if (summary_div is None) else summary_div
 
 
 @callback(
@@ -1235,3 +1345,25 @@ def on_update_discharge_stats_figure(range_value, pk, unit_sel, proto_hash_value
         raise dash_exc.PreventUpdate
     unit_id = int(unit_sel) if isinstance(unit_sel, str) else 0
     return discharge_statistics_figure(pk, proto_hash_value, unit_id, range_value)
+
+
+@callback(
+    Output(_UR_FIG_VIEW_ID, "children"),
+    [Input(_UR_UNITA_SELECT_ID, "value"), Input(_UR_UNITB_SELECT_ID, "value"), Input(_UR_UNITC_SELECT_ID, "value"),
+     Input(_UR_TRIALSET_SELECT_ID, "value")],
+    [State(_UR_UNITA_SELECT_ID, "value"), State(_UR_UNITB_SELECT_ID, "value"), State(_UR_UNITC_SELECT_ID, "value"),
+     State(_UR_TRIALSET_SELECT_ID, "value"), State(_SELECTED_PK_ID, "data")],
+    prevent_initial_call=True
+)
+def on_update_trial_set_view(*args):
+    pk = args[-1]
+    ctx = callback_context
+    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else ""
+    if (not isinstance(pk, dict)) or (trigger_id == ""):
+        raise dash_exc.PreventUpdate
+
+    unit_a = int(args[0]) if trigger_id == _UR_UNITA_SELECT_ID else int(args[4])
+    unit_b = int(args[1]) if trigger_id == _UR_UNITB_SELECT_ID else int(args[5])
+    unit_c = int(args[2]) if trigger_id == _UR_UNITC_SELECT_ID else int(args[6])
+    trial_set = args[3] if trigger_id == _UR_TRIALSET_SELECT_ID else args[7]
+    return _generate_trial_set_view(pk, [unit_a, unit_b, unit_c], trial_set)

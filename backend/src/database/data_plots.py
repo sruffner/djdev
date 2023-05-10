@@ -17,7 +17,10 @@ from plotly.subplots import make_subplots
 from dash import html, dcc
 import dash_bootstrap_components as dbc
 
+from database.table_info import DBTable
+from database.table_ops import fetch_one_row, fetch_attribute_values
 from sglportalapi import stats
+from sglportalapi.data_containers import RequestedData
 from sglportalapi.maestro import Protocol, SegParamType
 from database.trial_data_ops import retrieve_trial_reps_for_neuron, retrieve_session_trial_rep, \
     retrieve_session_trial_reps
@@ -595,3 +598,205 @@ def trial_target_trajectory_figure(proto: Protocol, rand_seg_dur: int = 0) -> go
         showlegend=False
     )
     return proto_plot
+
+
+def mean_firing_rate_figure(session: Dict[str, Any], proto_hashes: List[str], unit_ids: List[int]) -> \
+        Union[html.Div, dcc.Graph]:
+    """
+    Generate a multi-plot figure displaying the mean firing rate (MFR) response of up to 3 distinct neural units across
+    all recorded reps of the specified trial protocols that were completed successfully during the specified experiment
+    session.
+
+    Each subplot in the figure shows the MFR of the unit(s) during one of the specified trial protocols. The figure is
+    limited to 9 different subplots at most, arrayed in 3 rows and 3 columnns.
+
+    The timeline in each subplot is that portion of the relevant trial protocol that is shared across all reps -- if a
+    protocol includes a random-duration segment, then each rep will have a different duration overall. The method
+    computes MFR across across all fixed-duration segments, and across the last T milliseconds of the random-duration
+    segment, where T is the minimum observed duration of that segment across all reps. Of course, this means there is a
+    discontinuity in the firing rate at the end of the segment preceding the random-duration segment. (If present, the
+    random-duration segment is highlighted by a translucent red band.) The Y-axis is the same across ALL subplots in the
+    figure -- so the viewer can qualitatively assess differences in the unit responses to different trial protocols.
+
+    Each subplot is labelled with the name of the relevant trial protocol and the number of reps that were included in
+    the MFR caomputation. Note that, for a given protocol, MFR can be computed only if: (1) there are at least 3
+    **SUCCESSFULLY COMPLETED** reps of the given protocol during the experiment session; (2) the protocol definition is
+    conducive to averaging -- that is, it has at MOST one random variable, which varies the duration of a single segment
+    (not necessarily the first one). If MFR cannot be computed for one of the trial protocols, an empty figure serves to
+    indicate this fact.
+
+    Args:
+        session: Dictionary with the primary key-value pairs that uniquely identify an experiment session.
+        proto_hashes: List of MD5 hashes idenitifying the trial protocols of interest. MFR is calculated only for the
+            first 9 protocols in this list.
+        unit_ids: List of neural unit IDs for which MFR is computed. Up to 3 different neural units will be displayed.
+            Duplicate or invalid IDs are ignored.
+    Returns:
+        A Dash Graph component displaying MFR of the specified neural unit during as many as 9 distinct trial protocols,
+            as described above. If an error occurs while retrieving or processing response data, the method instead
+            returns an HTML Div with an error message.
+    """
+    num_proto = len(proto_hashes) if (len(proto_hashes) < 9) else 9
+    num_cols = 3 if num_proto > 2 else num_proto
+    num_rows = int(num_proto / num_cols + 0.5)
+    fig = make_subplots(rows=num_rows, cols=num_cols, shared_yaxes='all', x_title='time (milliseconds)',
+                        y_title='mean firing rate (Hz)')
+
+    # validate neural unit ID list
+    unit_ids_corr: List[int] = list()
+    if isinstance(unit_ids, list):
+        for uid in unit_ids:
+            if isinstance(uid, int) and (uid > 0) and not (uid in unit_ids_corr):
+                unit_ids_corr.append(uid)
+            if len(unit_ids_corr) == 3:
+                break
+    if len(unit_ids_corr) == 0:
+        return html.Div(dbc.Alert(f"Please specify a valid neural unit ID.", is_open=True))
+
+    # compute mean firing rate trace for each trial protocol specified and display in a separate subplot in figure
+    for n_proto in range(num_proto):
+        # retrieve trial data for all relevant trials recorded during session
+        trial_reps = retrieve_session_trial_reps(session, proto_hash=proto_hashes[n_proto], unit_ids=unit_ids_corr,
+                                                 what=RequestedData.NEURONAL)
+        if isinstance(trial_reps, str):
+            return html.Div(dbc.Alert(f"Failed to retrieve trial data [{trial_reps}].", is_open=True))
+
+        protocol = trial_reps[0].protocol
+        if len(protocol.random_variables) == 0:
+            min_dur, vary_dur_seg = 0, -1
+        else:
+            vary_dur_seg = protocol.random_variables[0].seg_idx
+            min_dur = int(min([rep.rv_values[0] for rep in trial_reps]) + 0.5)
+
+        firing_rate: List[np.ndarray] = list()
+        for uid in unit_ids_corr:
+            firing_rate_list = [rep.instantaneous_firing_rate(uid, smooth=True) for rep in trial_reps]
+            if len(protocol.random_variables) == 0:
+                firing_rate.append(np.nanmean(firing_rate_list, axis=0))
+            else:
+                # RV is the duration of a segment -- not necessarily the first one. For the random-duration segment, we
+                # average over last T ms of that segment, where T is the minimum observed duration across trial reps.
+                # This implies a "discontinuity" in the mean firing rate response.
+                prelude = sum([protocol.trial.segments[i].dur for i in range(vary_dur_seg)])
+                firing_rate_pre = [firing_rate_list[i][0:prelude] for i in range(len(trial_reps))]
+                firing_rate_post = \
+                    [firing_rate_list[i][prelude+rep.rv_values[0]-min_dur:] for i, rep in enumerate(trial_reps)]
+                firing_rate.append(np.concatenate(
+                    (np.nanmean(firing_rate_pre, axis=0), np.nanmean(firing_rate_post, axis=0)),
+                    axis=0
+                ))
+
+        t_vec = [i for i in range(len(firing_rate[0]))]
+
+        # note: since a firing rate trace is added for each unit in each subplot, we get a proliferation of legend
+        # entries -- so we hide the legeend items for all but the first subplot.
+        row_idx, col_idx = int(n_proto/num_cols) + 1, int(n_proto % num_cols) + 1
+        for i, uid in enumerate(unit_ids_corr):
+            c = 'black' if i == 0 else ('red' if i == 1 else 'blue')
+            fig.add_trace(
+                go.Scatter(x=t_vec, y=firing_rate[i], mode='lines', connectgaps=False, line=dict(color=c, width=2),
+                           name=f"Unit #{uid}", showlegend=(n_proto == 0)),
+                row=row_idx, col=col_idx, secondary_y=False
+            )
+
+        # show trial protocol name and indicate the number of trial reps aggregated to calc MFR
+        fig.add_annotation(x=0.5, y=1, xref='x domain', yref='y domain', text=f"<b>{protocol.trial.name}</b>",
+                           showarrow=False, xanchor='center', yanchor='bottom', row=row_idx, col=col_idx,
+                           font=dict(size=16))
+        fig.add_annotation(
+            x=0, y=1, xref='x domain', yref='y domain', text=f"<b>N={len(trial_reps)} reps</b>",
+            showarrow=False, xanchor='left', yanchor='top', row=row_idx, col=col_idx, font=dict(size=12)
+        )
+
+        # highlight random-duration segment in trial protocol (if any)
+        if min_dur > 0:
+            t_start = sum([protocol.trial.segments[i].dur for i in range(vary_dur_seg)])
+            fig.add_vrect(x0=t_start, x1=t_start + min_dur, fillcolor="red", opacity=0.2, row=row_idx, col=col_idx)
+            fig.add_vline(x=t_start, line=dict(dash='dash', color='darkred', width=3), opacity=0.4, row=row_idx,
+                          col=col_idx)
+
+    # we make left and bottom margins large enough so that master X- and Y-titles are visible, and the top margin to
+    # make room for a horizontal legend showing the unit IDs. We also disable the legend item click as we don't want
+    # user to be able to show/hide a trace in this figure.
+    fig.update_layout(
+        margin=dict(l=60, r=30, t=60, b=60),
+        height=800,
+        legend=dict(itemclick=False, itemdoubleclick=False, borderwidth=1,
+                    orientation='h', x=0, y=1.05, xanchor='left', yanchor='bottom')
+    )
+
+    return dcc.Graph(figure=fig)
+
+
+def neural_unit_summary(session: Dict[str, Any], unit_ids: List[int]) -> html.Div:
+    """
+    Retrieve summary information on up to 3 neural units recorded during an experiment session and render that
+    information in an HTML Div container. A tabular listing of neural unit metadata appears along the top, and a graph
+    of each unit's 10-ms template waveform lies below it (1-3 subplots in a single row).
+
+    Args:
+        session: Primary key identifying the experiment session.
+        unit_ids: List of up to 3 valid neural unit IDs. Duplicate or invalid unit IDs are ignored.
+    Returns:
+        An HTML Div with summary information about the identified neural unit(s), as described. If an error occurs,
+        the Div will contain a Bootstrap Alert with the error desription.
+    """
+    units: List[Dict] = list()
+    uids: List[int] = list()
+    unit_pk = session.copy()
+    sampling_rate = 40000
+    try:
+        for uid in unit_ids:
+            if (uid in uids) or (uid <= 0):
+                continue
+            unit_pk['unit_id'] = uid
+            unit = fetch_one_row(DBTable.SESSION_NEURON, unit_pk)
+            sampling_rate = fetch_attribute_values(DBTable.SESSION_EPHYS, 'sampling_rate', unit_pk)[0]
+            unit['neuron_type'] = \
+                fetch_attribute_values(DBTable.NEURON_TYPE, 'nt_name', dict(nt_id=unit['unit_type']))[0]
+            units.append(unit)
+            uids.append(uid)
+            if len(units) == 3:
+                break
+    except Exception:
+        units = list()
+
+    if len(units) == 0:
+        return html.Div(dbc.Alert("Failed to retrieve neuron info from the database", is_open=True))
+
+    table_hdr = ["Unit #", "Type", "Recorded", "Channel", "Firing Rate", "#Spikes", "SNR", "Peak-to-Peak"]
+    table_rows = list()
+    for unit in units:
+        unit_template: np.ndarray = unit['unit_template']
+        peak_to_peak = max(unit_template) - min(unit_template)
+        row = [f"{unit['unit_id']}", f"{unit['neuron_type']}", f"{unit['session_date']}", f"{unit['unit_channel']}",
+               f"{unit['unit_rate']:.1f} Hz", f"{unit['unit_spikes']}", f"{unit['unit_snr']:.2f}",
+               f"{peak_to_peak:.1f} \u00B5V"]
+        table_rows.append(row)
+
+    tbody_kids = list()
+    tbody_kids.append(html.Tr([html.Th(entry, className='text-center') for entry in table_hdr]))
+    for row in table_rows:
+        tbody_kids.append(html.Tr([html.Td(entry, className='text-center text-info') for entry in row]))
+    table_body = html.Tbody(tbody_kids, className='small')
+    info_table = dbc.Table([table_body], striped=True, bordered=True)
+
+    fig = make_subplots(rows=1, cols=len(units), shared_xaxes='all', x_title='time (milliseconds)',
+                        y_title='\u00B5V',)
+    to_msecs = 1000.0 / sampling_rate
+    for i, unit in enumerate(units):
+        t_vec = [k * to_msecs for k in range(len(unit['unit_template']))]
+        c = 'black' if i == 0 else ('red' if i == 1 else 'blue')
+        fig.add_trace(
+            go.Scatter(x=t_vec, y=unit['unit_template'], mode='lines', connectgaps=False, line=dict(color=c, width=2)),
+            row=1, col=i+1
+        )
+        fig.add_annotation(x=0.5, y=1, xref='x domain', yref='y domain', text=f"<b>Unit #{unit['unit_id']}</b>",
+                           showarrow=False, xanchor='center', yanchor='bottom', row=1, col=i+1,
+                           font=dict(size=14))
+    fig.update_layout(showlegend=False, title_text='Average spike waveform (1-ms pre, 9-ms post)', title_x=0.5)
+
+    return html.Div([
+        dbc.Row([dbc.Col(info_table, width=12)], align='center'),
+        dbc.Row([dbc.Col(dcc.Graph(figure=fig), width=12)], align='center')
+    ])
