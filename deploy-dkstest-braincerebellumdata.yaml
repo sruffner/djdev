@@ -1,16 +1,9 @@
+# This YAML defines the deployment of the Lisberger lab portal application to the Duke Azure cluster 'dkstest' in the
+# 'braincerebellumdata' namespace. Depoloyment to this test cluster is intended for testing and evaluating the portal
+# application whenever the implementation changes in any way (bug fixes, new features, etc).
 #
-# DEPRECATED: In Aug 2023, we moved the test/dev version of the portal to the 'braincerebellumdata' namespace on the
-# Duke Azure cluster 'dkstest'. When we're ready to spin up a production version, it will be deployed to the same
-# namespace but on a different Azure cluster, 'dks'. The 'braincerebellumdata-test' namespace will be deleted.
-#
-# ----------------------
-# This YAML defines the deployment of the Lisberger lab portal application to the Duke Azure beta-test cluster in the
-# braincerebellumdata-test namespace. This namespace is used solely to test and evaluate the application whenever the
-# implementation changes in any way (bug fixes, new features, etc).
-#
-# Duke is in the process of transitioning from Redhat OpenShift to Microsoft Azure. The first step is to verify that
-# customer apps can be deployed successfully on the beta-test Azure cluster, and to make the necessary changes in the
-# deployment specs required because of differences in the Azure and OpenShift Kubernetes implementations.
+# Duke is in the process of replacing its RedHat OpenShift cluster with Microsoft Azure. Two distinct clusters will be
+# maintained: 'dkstest' for testing/debugging apps and 'dks' for the production versions.
 #
 # The application now consists of 3 interdependent deployments:
 #   1) data-store: A single-pod deployment with the application's two persistence mechanisms: the MariaDB server and its
@@ -26,28 +19,31 @@
 #
 # => NOTES.
 #  1) The application uses two PVCs: pvc-db is for the exclusive use of the MariaDB container, while pvc-backend
-#     provides persistent cluster storage for the portal server's "local workspace". The portal's backup repository
-#     is hosted on an AWS S3 bucket external to the Azure cluster. The associated persistent volumes are dynamically
-#     provisioned by Azure. Note that, initially, we used `private-azfile-standard-lrs` as the storage class for both
-#     PVCs, but this did not work with the MariaDB container, which would fail to start b/c the MariaDB daemon --
-#     acting as USER 1001 as defined in the Docker file -- was denied access to the storage volume. Once we switched
-#     the storage class for pvc-db to `default`, the MariaDB container spun up successfully.
-#  2) The Ingress resource named `sgl-portal-dkstest-in` provides TLS edge termination for `portal-server`, a ClusterIP
+#     provides persistent cluster storage for the portal server's "local workspace". The associated persistent volumes
+#     are dynamically provisioned by Azure. Note that, initially, we used `private-azfile-standard-lrs` as the storage
+#     class for both PVCs, but this did not work with the MariaDB container, which would fail to start b/c the MariaDB
+#     daemon -- acting as USER 1001 as defined in the Docker file -- was denied access to the storage volume. Once we
+#     switched the storage class for pvc-db to `default`, the MariaDB container spun up successfully.
+#  2) The portal's backup repository is hosted on an AWS S3 bucket external to the Azure cluster. For the test/dev
+#     version of the portal app deployed to the 'dkstest' cluster, the S3 bucket name is 'dh-braincerebellumdata-test'.
+#  3) The Ingress resource named `sgl-portal-dkstest-in` provides TLS edge termination for `portal-server`, a ClusterIP
 #     service that routes to the GUnicorn-served Dash/Flask backend listening on the node's 8050 port. With this
-#     configuration, you access the portal at https://braincerebellumdata-test.dkstest.dhe.duke.edu/ -- BUT you must be
+#     configuration, you access the portal at https://braincerebellumdata.dkstest.dhe.duke.edu/ -- BUT you must be
 #     on the Duke VPN. We'll want to configure this differently for production. Note that the OpenShift deployment
 #     used a Route resource to do this. Note the annotation `nginx.ingress.kubernetes.io/proxy-body-size: 10g` in the
 #     Ingress spec. This allows for large file uploads to the portal backend through the NGINX-mediated ingress.
-#  3) Take note of the image names for the backend, mariadb, and redis containers. These images are built in Gitlab
+#  4) Take note of the image names for the backend, mariadb, and redis containers. These images are built in Gitlab
 #     whenever we push changes to the 'devel' branch. The image tags end in 'devel-<sha>', where <sha> is a shortened
 #     version of the commit SHA for that image. This is important. Previously, there was just the 'devel' tag, which
 #     was overwritten each time a commit to the devel branch was pushed. If a pod failed or was kicked out on the
 #     cluster, Azure will pull images from Gitlab when recreating the pod. This meant loss of control of what is running
 #     on the cluster. THIS MEANS THAT EVERY TIME WE WANT TO DEPLOY A NEW VERSION, WE MUST UPDATE THE <sha> TAG
 #     EVERYHWERE IN THIS FILE.
-#  4) Secrets. Several environment variables are defined in an opaque Kubernetes Secret, sgl-secret, which must be
-#     deployed prior to deploying the application. The YAML that defines the secret is excluded from the Git repo to
-#     protect those secrets.
+#  5) Secrets. Several environment variables are defined in an opaque Kubernetes Secret, sgl-secret. Another secret,
+#     sgl-portal-pull-secret, contains the access token required to pull container images from the Gitlab repository for
+#     the portal app. Both of these secrets must be deployed to the namespace prior to deploying any of the pods. The
+#     YAMLs that define these secrets (deploy-sgl-secret.yaml and gitlab-sgl-portal-pull-secret.yaml) are excluded from
+#     the Git repo.
 #
 # => Procedure to update the already deployed application IF no changes in database schema or the portal repository.
 #
@@ -57,37 +53,64 @@
 # Basically, we have to update the spec of each of the 3 deployments -- `data-store`, `web-server`, and `web-worker` --
 # to use the updated images.
 #  1) Connect to the Duke VPN.
-#  2) Open the Lens Desktop app (already setup to to access the braincerebellumdata-test namespace on Duke's Azure
-#     cluster, and select "Browse clusters in catalog".
-#  3) Connect to cluster "dhd-dhts-dks-dev01-cl". At this point, you should see -- under "Overview", the pods,
-#     deployments, and replica sets comprising the currently running portal application.
-#  4) Go to "Deployments" and edit each of the deployments -- data-store, web-server, and web-worker -- updating the
-#     container image (basically, you're updating the SHA) in the deployment spec for the redis, mariadb, and backend
-#     images.
-# Azure will automatically begin a rolling update of each deployment once you save the changes.
+#  2) Head to portal.azure.com and log in with Duke credentials. You should see the production (dhp-dhts-dks-cl01-aks)
+#     and test/dev clusters (dhd-dhts-dks-dev01-cl). If you click on the production cluster, under "overview", there is
+#     a tab called "getting started". There instructions for setting up the Azure CLI on your local machine and logging
+#     in to either cluster so you can make changes to the app using 'kubectl' from the command line.
+#  3) Login to the test/dev cluster "dhd-dhts-dks-dev01-cl". Use kubectl to make 'braincerebellumdata' the current
+#     namespace and verify everything is running normally.
+#  4) Make sure this YAML is up-to-date withe the container image names as described above, and ensure the current
+#     directoy is the folder containing this YAML.
+#  5) Then: kubectl apply -f deploy-dkstest-braincerebellumdata. If successful, Azure/Kubernetes will automatically
+#     begin a rolling update of each deployment comprising the portal app.
 #
 # This approach could cause issues if users are actively accessing the portal, or if any background tasks are running
 # in any of the web-worker replica pods. So it is probably NOT a good idea to do things this way in production. Better
 # to just bring the application down for a short while, after making sure no background tasks are running.
+#
+# => Using the 'deploy' selector label to selectively deploy resources
+#
+# The metadata:labels section of each resource includes a label key 'deploy' that lets you selectively deploy the
+# resources using: kubectl apply -f <this file> -l 'deploy in (...)'. This is useful, for example, if you're deploying
+# from scratch and want to do it in an orderly manner:
+#     1) First, deploy the secrets sgl-secret and sgl-portal-pull-secret, which are defined in separate YAML files.
+#     2) Deploy the PVCs and services: kubectl apply -f <this file> -l 'deploy in (pvc, service)'
+#     3) Deploy the database and Redis: kubectl apply -f <this file> -l 'deploy in (data-pods)'
+#     4) At this point, assuming step 3 succeeds, the portal database 'sgl' will not exist. If you have backed up the
+#        entire contents of that database to a file sgl_bup.sql using mysqldump, you could 'kubectl cp' the file into
+#        the /bitnami/mariadb directory and restore it by opening a terminal in that container with 'kubectl exec',
+#        navigating to /bitnami/mariadb, and running 'mysql -uroot -p<pwd> < sgl_bup.sql.
+#     5) Deploy the Redis worker pods: kubectl apply -f <this file> -l 'deploy in (worker-pods)'
+#     6) At this point, the PVC for the web server and Redis workers is allocated and ready. On that volume is stored
+#        some key files in the directory /portal_ws/logs: database_ops.log, appmessages.log, and api_requests.log. If
+#        you have saved these files from a previously running version of the portal and need to restore them as well,
+#        'kubectl exec' into the sgl-worker container of one of the web-worker pods and make sure the logs/ folder
+#        exists under /portal_ws. Then do:
+#           kubectl cp <local path to database_ops.log> <namespace>/<worker pod name>:/portal_ws/logs/database_ops.log
+#     7) Deploy the web server pods: kubectl apply -f <this file> -l 'deploy in (web-pods)'
+#     8) Finally, 'kubectl apply -f <this file> -l 'deploy in (ingress)' configures the ingress, exposing the portal
+#        app to the outside world.
+#
 
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: sgl-portal-dkstest-in
-  namespace: braincerebellumdata-test
+  namespace: braincerebellumdata
   labels:
     app.kubernetes.io/instance: sgl-portal-dkstest
     app.kubernetes.io/name: sgl-portal
+    deploy: ingress
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: 10g
 spec:
   ingressClassName: dhe-nginx
   tls:
     - hosts:
-        - braincerebellumdata-test.dkstest.dhe.duke.edu
+        - braincerebellumdata.dkstest.dhe.duke.edu
   rules:
-    - host: braincerebellumdata-test.dkstest.dhe.duke.edu
+    - host: braincerebellumdata.dkstest.dhe.duke.edu
       http:
         paths:
           - path: /
@@ -102,6 +125,8 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: pvc-backend
+  labels:
+    deploy: pvc
 spec:
   accessModes:
   - ReadWriteMany
@@ -114,6 +139,8 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: pvc-db
+  labels:
+    deploy: pvc
 spec:
   accessModes:
   - ReadWriteOnce
@@ -129,6 +156,7 @@ metadata:
   labels:
     app: sgl-portal
     tier: web
+    deploy: service
 spec:
   type: ClusterIP
   selector:
@@ -146,6 +174,7 @@ metadata:
   labels:
     app: sgl-portal
     tier: data
+    deploy: service
 spec:
   type: ClusterIP
   selector:
@@ -168,6 +197,7 @@ metadata:
   labels:
     app: sgl-portal
     tier: data
+    deploy: data-pods
 spec:
   replicas: 1
   selector:
@@ -249,6 +279,7 @@ metadata:
   labels:
     app: sgl-portal
     tier: worker
+    deploy: worker-pods
 spec:
   replicas: 2
   selector:
@@ -269,7 +300,7 @@ spec:
         command: ['sh', '-c', 'echo Waiting for Redis; until nc -z $(REDIS_HOST) $(REDIS_PORT); do printf "."; sleep 1; done; echo Ready!']
         env:
           - name: REDIS_HOST
-            value: data-store.braincerebellumdata-test.svc.cluster.local
+            value: data-store.braincerebellumdata.svc.cluster.local
           - name: REDIS_PORT
             value: "6379"
       containers:
@@ -283,11 +314,11 @@ spec:
             mountPath: /portal_ws
         env:
           - name: REDIS_HOST
-            value: data-store.braincerebellumdata-test.svc.cluster.local
+            value: data-store.braincerebellumdata.svc.cluster.local
           - name: REDIS_PORT
             value: "6379"
           - name: MARIADB_HOSTNAME
-            value: data-store.braincerebellumdata-test.svc.cluster.local
+            value: data-store.braincerebellumdata.svc.cluster.local
           - name: WORKSPACE_DIR
             value: /portal_ws
           - name: APP_CONTAINER
@@ -343,6 +374,7 @@ metadata:
   labels:
     app: sgl-portal
     tier: web
+    deploy: web-pods
 spec:
   replicas: 2
   selector:
@@ -363,13 +395,13 @@ spec:
         command: ['sh', '-c', 'echo Waiting for Redis; until nc -z $(DATA_HOST) 6379; do printf "."; sleep 1; done; echo Ready!']
         env:
           - name: DATA_HOST
-            value: data-store.braincerebellumdata-test.svc.cluster.local
+            value: data-store.braincerebellumdata.svc.cluster.local
       - name: wait-for-mariadb
         image: busybox
         command: ['sh', '-c', 'echo Waiting for MariaDB; until nc -z $(DATA_HOST) 3306; do printf "."; sleep 1; done; echo Ready!']
         env:
           - name: DATA_HOST
-            value: data-store.braincerebellumdata-test.svc.cluster.local
+            value: data-store.braincerebellumdata.svc.cluster.local
       containers:
       - name: sgl-server
         image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-686e3711
@@ -381,11 +413,11 @@ spec:
             mountPath: /portal_ws
         env:
           - name: REDIS_HOST
-            value: data-store.braincerebellumdata-test.svc.cluster.local
+            value: data-store.braincerebellumdata.svc.cluster.local
           - name: REDIS_PORT
             value: "6379"
           - name: MARIADB_HOSTNAME
-            value: data-store.braincerebellumdata-test.svc.cluster.local
+            value: data-store.braincerebellumdata.svc.cluster.local
           - name: WORKSPACE_DIR
             value: /portal_ws
           - name: APP_CONTAINER

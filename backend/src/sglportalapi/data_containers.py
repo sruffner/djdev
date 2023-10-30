@@ -470,7 +470,7 @@ class NeuronInfo:
 
     @property
     def channel(self) -> str:
-        """ Name of source channel on which this neurol unit was recorded. """
+        """ Name of source channel on which this neural unit was recorded. """
         return self._info['unit_channel']
 
     @property

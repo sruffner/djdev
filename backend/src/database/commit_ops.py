@@ -393,7 +393,7 @@ class OmniplexUnit:
     Intended for read-only use outside of this module.
     """
     def __init__(self, src: str, ch: str, spikes: Optional[np.ndarray], num_spikes: int, rate: float, snr: float,
-                 template: np.ndaray, neuron_type: int = -1):
+                 template: np.ndarray, neuron_type: int = -1):
         """
         An Omniplex neural unitrecord, storing calculated metrics and the spike train recorded from this unit.
 
@@ -1711,9 +1711,9 @@ def _get_trial_timing_from_pl2_file(fp: IO, info: Optional[Dict[str, Any]] = Non
 
     # get filename and XS2 start and stop timestamps for each data file successfully saved (character code 0x06). This
     # code uses Numpy array operations to (hopefully) speed up the process
-    start_code_mask = strobed_data["strobed"] == 0x02
-    stop_code_mask = strobed_data["strobed"] == 0x03
-    null_code_mask = strobed_data["strobed"] == 0x00
+    start_code_mask = np.equal(strobed_data["strobed"], 0x02)
+    stop_code_mask = np.equal(strobed_data["strobed"], 0x03)
+    null_code_mask = np.equal(strobed_data["strobed"], 0x00)
     start_code_indices = np.where(start_code_mask)[0]
 
     # helper function used to find, eg, the stop code character after a start code character. Returns -1 if not found!
@@ -1731,7 +1731,7 @@ def _get_trial_timing_from_pl2_file(fp: IO, info: Optional[Dict[str, Any]] = Non
             continue   # see NOTE in function header
 
         file_name = "".join([chr(code) for code in strobed_data['strobed'][first_null_index + 1:second_null_index]])
-        file_was_saved = (any(strobed_data["strobed"][second_null_index + 1:stop_code_index] == 0x06))
+        file_was_saved = (any(np.equal(strobed_data["strobed"][second_null_index + 1:stop_code_index], 0x06)))
         if file_was_saved:
             start_code_ts = int(strobed_data['timestamps'][start_code_index])
             stop_code_ts = int(strobed_data['timestamps'][stop_code_index])
@@ -1852,7 +1852,7 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
     t0 = time.time()
     while block_idx < num_blocks:
         # read in next block of samples and bandpass-filter it if signal is wide-band
-        curr_block = PL2.load_analog_channel_block(fp, idx, block_idx, info)
+        curr_block = PL2.load_analog_channel_block_faster(fp, idx, block_idx, info)
         if is_wide_band:
             curr_block, filter_ic = scipy.signal.lfilter(b, a, curr_block, axis=-1, zi=filter_ic)
 
