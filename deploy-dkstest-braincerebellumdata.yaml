@@ -1,5 +1,5 @@
 # This YAML defines the deployment of the Lisberger lab portal application to the Duke Azure cluster 'dkstest' in the
-# 'braincerebellumdata' namespace. Depoloyment to this test cluster is intended for testing and evaluating the portal
+# 'braincerebellumdata' namespace. Deployment to this test cluster is intended for testing and evaluating the portal
 # application whenever the implementation changes in any way (bug fixes, new features, etc).
 #
 # Duke is in the process of replacing its RedHat OpenShift cluster with Microsoft Azure. Two distinct clusters will be

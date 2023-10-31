@@ -10,8 +10,8 @@ help describe and organize the experimental data (behavioral and neuronal respon
 Any anonymous user to the portal website can freely explore lab datasets on the home page. Filter datasets
 by session, neural unit, research study, or recording date; view response plots for individual trials of the
 selected session or -- under certain circumstances --, aggregate responses across repeated presentations of a
-particular trial protocol. Registered users with 'download'-level access can selectively download datasets from
-any experiment session for derivate studies. Those with 'commit'-level access can also upload experimental sessions
+particular trial protocol. Registered users with 'download'-level access can selectively retrieve datasets from
+the portal for derivate studies. Those with 'commit'-level access can also upload experimental sessions
 to the database, while 'admin'-level users can add/modify metadata tables, perform user management, and examine the
 contents of the portal's backup repository (hosted in an AWS S3 bucket provided by Duke IT Services).
 
@@ -23,12 +23,10 @@ and Omniplex PL2 file(s) in the session archive are preprocessed, and the behavi
 neuronal responses are stored in the database for each trial presented in the session, 
 along with information to reproduce trial target trajectories.
 
-Downloading the trial-aligned data from the portal may prove too cumbersome, so the portal
-implements a number of RESTful-like API endpoints to facilitate programmatic query and
-data retrieval from the underlying database. The `sglportalapi` package defines the
-clientside Python code and data constructs needed to conveniently access the API from 
-either a Python interactive console or your own custom analysis script. With it you can
-perform tasks such as:
+The portal implements a number of RESTful-like API endpoints to facilitate programmatic query and data retrieval from 
+the underlying database. The `sglportalapi` package defines the clientside Python code and data constructs needed to 
+conveniently access the API from either a Python interactive console or your own custom analysis script. With it you 
+can perform tasks such as:
 - Search the set of all experiment sessions archived in the portal.
 - Retrieve summary information about some or all neural units recorded during a particular 
 experiment session.
@@ -37,8 +35,8 @@ experiment.
 - Retrieve trial-aligned behavioral and neuronal response data for a single trial, a 
 contiguous block of trials, or all reps of a particular trial protocol during the experiment.
 
-_**To use `sglportalapi`, you must be a registered user on the Lisberger lab portal.**_
-
+_**To use `sglportalapi`, you must be a registered user on the Lisberger lab portal with 'download'-level access or
+better.**_ 
 ## Installation (for MacOS/Linux)
 - Ensure that Python 3.9+ is installed on your system. We currently build the package against
 version 3.9.12.
@@ -106,6 +104,33 @@ This requires knowledge of information in the so-called "metadata" tables of the
 experimenter, subject ID, rig ID, name of the brain region in which any neural units were recorded, the neuron type for
 each recorded unit, and the title of the research study to which the experiment belongs. You can use the `metadata_table()`
 method to list the contents of these tables.
+
+You must also supply the _experiment session archive_ (ZIP file) containing all of the information required by the 
+portal:
+1. All Maestro trial data files recorded during the experiment.
+2. A Python pickle file containing information about any neural units recorded during the experiment; this may be 
+omitted for behavior-only experiment sessions. The pickle file contains a **_single dictionary_** with the following 
+keys. Each key holds a list of length `N`, where `N` is the number of identified neural units.
+   - ‘channel’ (required) : The `K`-th element is the name of the Omniplex source channel on which unit K’s spikes were
+   recorded - “WBn” or “SPKCn”.
+   - ‘spiketimes’ (required): The `K`-th element is a 1D Numpy array holding the spike times for unit `K` in seconds 
+   elapsed since the start of the electrophysiological (Omniplex) recording.
+   - ‘filename’: If the archive contains multiple Omniplex PL2 files, this field is required and the `K`-th element 
+   specifies the name of the PL2 source file from which spikes for unit `K` were extracted. If the archive contains a 
+   single PL2 file or none at all, this can be omitted. 
+   - ‘snr’: If no PL2 file is present in archive, this field is required. The `K`-th element is the estimated 
+   signal-to-noise ratio for unit `K`. If the PL2 file is present, the portal automaticaly computes the unit SNR from
+   the supplied spike times and the Omniplex recording on the specified channel. 
+   - ‘template’: If no PL2 file is present in the archive, this field is required. The `K`-th element is a 1D Numpy 
+   array holding unit `K`’s template waveform. The waveform should be 10ms long (1-ms pre, 9-ms post spike timestamp) 
+   and the waveform samples should be microvolts. Again, this is automatically computed by the portal if the PL2 file
+   is present.
+3. The Omniplex PL2 file(s) in which neural unit activity was recorded, if available. If not, you **_must_** instead 
+supply a CSV file containing the start times for every Maestro trial file in the archive. Each line in this CSV has the
+form “trial_file_name.XXXX, timestamp_in_ms”. In this scenario, a trial’s “stop time” is simply the start time in the 
+CSV plus the trial duration. Obviously, for behavior-only experiments, neither the PL2 file nor the CSV file are 
+required.
+    
 
 The Python excerpt below shows how you might use `PortalAccessor` to upload a session archive and commit the session
 data to the portal. Better yet, the package includes an interactive script to do just that: `session_uploader.py`. To 

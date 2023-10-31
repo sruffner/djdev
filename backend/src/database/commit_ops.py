@@ -33,6 +33,37 @@ four components of the job ID form the primary key that uniquely identifies an e
 database. These parameters are included in the session metadata that must accompany the client request to start a
 session commit job.
 
+Required contents of an experiment session archive: Two configurations are currently supported, depending on whether the
+original Omniplex PL2 file is available.
+1) Original Omniplex recording included in archive.
+    - All Maestro trial files recorded during the experiment.
+    - One or more (typically just one) Omniplex PL2 files containing the multi-electrode recording from which neural
+unit data is obtained. Not applicable for behavioral-only experiments (no neural units).
+    - A pickle file containing spike times for each neural unit recorded. The pickle file contains contains a dictionary
+with 2-3 fields: 'channel', 'spiketimes', and (optionally) 'filename'. The last field is required ONLY if there is more
+than one Omniplex PL2 file in the archive. Each field is a list of length N, where N is the number of neural units. The
+'channel' key holds the Omniplex channel ID for the analog channel on which the unit was recorded, the 'filename' key
+holds the name of the Omniplex PL2 file within the ZIP archive, and the 'spiketimes' key holds the spike times (in
+seconds since the Omniplex recording started) for each unit, as a Numpy array.
+
+2) Omniplex recording NOT included in archive. In this scenario, the Omniplex start/stop times for each Maestro trial
+cannot be deduced, nor can the SNR or spike template waveform be calculated for each unit. Therefore, additional info
+must be supplied:
+    - All Maestro trial files recorded during the experiment.
+    - A single CSV file containing the elapsed start time in the electrophysiological recording timeline (same timeline
+in which all unit spike times are recorded) for each Maestro trial. Format: Each text line should read "trial_file, T"
+where "trial_file" is the Maestro trial file name as it appears in the session archive and T is the start time for that
+trial in milliseconds. Any text line not conforming to this format is ignored.
+    - A pickle file containing spike times, estimated SNR, and the spike template waveform for each neural unit. The
+file must contain a dictionary with the fields 'channel', 'spiketimes', 'snr', and 'template'. Each field is a list of
+length N, where N is the number of neural units. The first two fields are the same as described above. The 'snr' field
+is a list of the unit signal-to-noise ratios, and the 'template' field contains the unit spike waveforms -- each of
+which is a Numpy array. To be consistent with how the template waveform is calculated from Omniplex data, it should
+contain 0.01 * R samples, where R is the ephys recording sampling rate (40KHz for Omniplex) as reported in the session
+metadata supplied when the session commit is initiated, and all samples should be in microvolts. The dictionary COULD
+also contain the 'filename' field holding the name of the original Omniplex PL2 source file even though that file is
+not part of the session archive.
+
 The workflow for committing an experiment session has the following stages:
     0) Initialization. A committer (a registered user with "commit"-level access on the portal) can initiate a session
        commit in two ways: interactively through the portal website, or by using the `sglportalapi` package from a
@@ -111,6 +142,7 @@ protected by a mechanism that verifies the specified user is logged in with the 
 """
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
+import csv
 import json
 import pickle
 import re
@@ -119,6 +151,7 @@ import struct
 import sys
 import time
 import zipfile
+from io import TextIOWrapper
 
 import numpy as np
 import scipy.signal
@@ -354,13 +387,16 @@ class _TrialInfo:
     A data container to accumulate information about each trial presented during an experiment session during the
     pre-processing phase of the session commit workflow: (1) identity of the trial protocol to which each trial rep
     belongs, and (2) timing information used to determine the order in which trials were presented during the experiment
-    and to align spike times of neural units recorded on the Omniplex system with respect to the timeline of the Maestro
-    trials in which behavioral response data is recorded.
+    and to align spike times of neural units recorded on a separate multi-electrode recording apparatus (typically the
+    Plexon/Omniplex system) with respect to the timeline of the Maestro trials in which behavioral response data is
+    recorded.
 
-    Behavior-only experiments have no Omniplex data. For these sessions, we rely only on the internal timestamps to
+    Behavior-only experiments have no neural unit data. For these sessions, we rely only on the internal timestamps to
     determine the trial order. If those timestamps are unavailable, then we rely on the file indices. When the Omniplex
-    data is available, it is the start/stop times as recorded on the Omniplex that determine both the trial presentation
-    order and the conversion of neural unit spike times to the individual Maestro trial timelines.
+    PL2 file(s) is incldued in the session archive, it is the start/stop times as recorded on the Omniplex that
+    determine both the trial presentation order and the conversion of neural unit spike times to the individual Maestro
+    trial timelines. Finally, if neural unit data is included without the Omniplex file, the archive must contain a
+    CSV file containing the elapsed time on the neural recording system (Omniplex) at which each trial started.
     """
     file_index: int
     """ The trial data file's 4-digit numeric string extension converted to an integer."""
@@ -370,11 +406,15 @@ class _TrialInfo:
     """ The internal timestamp found in the data file header, in ms since Maestro started. Will be None for data files
     prior to version 21. """
     omniplex_start: Optional[float] = None
-    """ The Omniplex timestamp for the XS2 pulse delivered at the start of the trial, in seconds since the Omniplex 
-    recording began. Will be None for behavior-only experiment sessions."""
+    """ For experiment session archives that include the original Omniplex PL2 recording file, this is the Omniplex
+    timestamp for the XS2 pulse delivered at the start of the trial, in seconds since the Omniplex recording began. For
+    archive lacking the PL2 file (but including neural unit data), this timestamp is instead extracted from a CSV file
+    included in the archive. Will be None for behavior-only experiment sessions. """
     omniplex_stop: Optional[float] = None
     """ The Omniplex timestamp for the XS2 pulse delivered at the end of the trial, in seconds since the Omniplex
-    recording began. Will be None for behavior-only experiment sessions. """
+    recording began. Will be None for behavior-only experiment sessions, or if the Omniplex PL2 file is not included in
+    the session archive. In the latter case, the trial start time is supplied by a separate CSV file, and the trial
+    stop time is simply that the start time + the trial duration."""
     proto_index: Optional[int] = None
     """ The zero-based index into the list of all trial protocol candidates presented during the session. """
     proto_hash: Optional[str] = None
@@ -385,10 +425,13 @@ class _TrialInfo:
 class OmniplexUnit:
     """
     Data object containing information that will be stored in the Session.Neuron part table in the lab database for each
-    identified neural unit in an Omniplex recording session. The Omniplex source filename, channel ID, and spike
-    timestamps for each unit are extracted from the spike-sort results file that must be included in the session data
-    archive when committing an experiment session to the database. Other metrics are computed from the original Omniplex
-    analog data stream from which the unit spike times were "sorted".
+    identified neural unit in an Omniplex recording session.
+
+    The Omniplex source filename (if available), channel ID, and spike timestamps for each unit are extracted from the
+    a pickle file that must be included in the session data archive when committing an experiment session to the
+    database. The unit SNR and spike template waveform are typically computed from the original Omniplex analog data
+    stream from which the unit spike times were "sorted". If the Omniplex PL2 source file(s) are NOT in the archive,
+    those metrics must also be included in the pickle file.
 
     Intended for read-only use outside of this module.
     """
@@ -398,10 +441,10 @@ class OmniplexUnit:
         An Omniplex neural unitrecord, storing calculated metrics and the spike train recorded from this unit.
 
         Args:
-            src: The filename of the original Omniplex source file.
+            src: The filename of the original Omniplex source file. If None, this will be set to "unknown".
             ch: Omniplex channel on which unit was recorded. This should be either a wide-band analog channel "WB<num>"
                 or a narrow-band analog channel "SPKC<num>", where <num> is a 1-, 2- or 3-digit positive integer.
-            spikes: The spike train, with times in seconds since Omniplex recording started. May be None when using
+            spikes: The spike train, with times in seconds since neural recording started. May be None when using
                 this structure to store unit metrics without the spike train, which can be VERY large.
             num_spikes: The total number of spikes recorded. If `spikes` is not None, then this argument is
                 ignored and `len(spikes)` is the number of recorded spikes.
@@ -412,7 +455,7 @@ class OmniplexUnit:
         """
         self._definition: Dict[str, Any] = dict()
         """ The Omniplex-recorded neural unit as a dictionary of parameter values keyed by parameter names. """
-        self._definition['source_file'] = src
+        self._definition['source_file'] = "unkknown" if not isinstance(src, str) else src
         self._definition['channel'] = ch
         self._definition['spike_times'] = spikes
         self._definition['num_spikes'] = num_spikes if (spikes is None) else len(spikes)
@@ -423,7 +466,11 @@ class OmniplexUnit:
 
     @property
     def source_file(self) -> str:
-        """ The name of the original Omniplex PL2 file containing the analog data for the neural unit. """
+        """
+        The name of the original Omniplex PL2 file containing the analog data for the neural unit. Do NOT rely on
+        this field. In an alternate acceepted format for a session archive, the PL2 file(s) are not present in the
+        archive.
+        """
         return self._definition['source_file']
 
     @property
@@ -1268,11 +1315,17 @@ def preprocess_commit_job(job_id: str) -> bool:
         if _background_job_update(job_id, f"Preprocessing session archive...", log=True):
             raise Exception("Operation cancelled")
 
+        # if archive contains unit data without a PL2 file, then the pickle file with unit spike trains must also
+        # include the unit's SNR and template, and a CSV file must be included that specifies the elapsed time -- in
+        # the Omniplex timeline! -- at which each trial started.
+        is_alt_archive = False
+
         with zipfile.ZipFile(zip_path, 'r') as archive:
             data_file_name_pattern = re.compile("[.]\\d\\d\\d\\d$")
             archive_list = archive.infolist()
             pl2s_archived: List[zipfile.ZipInfo] = list()
-            units_zip_info: Optional[zipfile.ZipInfo] = None
+            units_zip_info: Optional[zipfile.ZipInfo] = None   # the pickle file, if present
+            csv_ts_info: Optional[zipfile.ZipInfo] = None   # contains trial timestamps when PL2 not present
             session_date: Optional[date] = None
             for info in archive_list:
                 if (len(info.filename) > 3) and (info.filename[-3:].lower() == 'pl2'):
@@ -1293,8 +1346,17 @@ def preprocess_commit_job(job_id: str) -> bool:
                         units_zip_info = info
                     else:
                         raise Exception("Found more than one neural units file in session data archive!")
+                elif (len(info.filename) > 4) and (info.filename[-4:].lower() == '.csv'):
+                    if csv_ts_info is None:
+                        csv_ts_info = info
+                    else:
+                        raise Exception("Found more than one trial timestamps CSV file in session data archive!")
+
             if (units_zip_info is not None) and (len(pl2s_archived) == 0):
-                raise Exception("Missing Omniplex file(s) for spike-sorted unit data!")
+                if csv_ts_info is not None:
+                    is_alt_archive = True
+                else:
+                    raise Exception("Missing Omniplex file(s) for spike-sorted unit data!")
 
             if _background_job_update(job_id, f"Found {len(trial_info)} trial files. Processing archive for trial "
                                               f"protocols.", log=True):
@@ -1307,37 +1369,57 @@ def preprocess_commit_job(job_id: str) -> bool:
             for filename, proto_index in file_to_proto.items():
                 trial_info[filename].proto_index = proto_index
 
+            # load and validate the neural unit data from pickle file, if there is one.
             unit_data: Optional[Dict[str, List[Any]]] = None
             if units_zip_info is not None:
                 if _background_job_update(job_id, f"Loading neural units file {units_zip_info.filename}...", log=True):
                     raise Exception("Operation cancelled")
                 unit_data = pickle.loads(archive.read(units_zip_info))
-                pl2_filenames = [x.filename for x in pl2s_archived]
+                pl2_filenames = [x.filename for x in pl2s_archived]  # will be empty if archive lacks PL2 file
                 if not _validate_neural_unit_data(unit_data, pl2_filenames):
                     raise Exception(f"Invalid format for neural units file: {units_zip_info.filename}")
-                # if 'filename' field missing, assume all units recorded in same Omniplex file
+                # if 'filename' field missing, assume all units recorded in same Omniplex file. If no PL2 file found
+                # in archive (alternate scheme), then set 'filename' field to 'unavailable'
                 if 'filename' not in unit_data:
-                    unit_data['filename'] = [pl2_filenames[0]] * len(unit_data['channel'])
+                    fname = 'unavailable' if len(pl2_filenames) == 0 else pl2_filenames[0]
+                    unit_data['filename'] = [fname] * len(unit_data['channel'])
 
+            # we support an alternative to supplying the Omniplex PL2 file containing the electrode recordings: a CSV
+            # file supplies the start timestamp in ms for each Maestro trial in the same timeline as the spike times
+            # found in the pickle file. In addition, the pickle file itself must have fields defining the SNR and
+            # templates waveform for each neural unit (this is verified above).
             if units_zip_info is not None:
-                for pl2_zip_info in pl2s_archived:
-                    save_path = _chunked_extract_from_archive(job_id, archive, pl2_zip_info, zip_path.parent)
-                    if save_path is None:
+                if is_alt_archive:
+                    if _background_job_update(job_id, "No PL2 found; processing CSV and pickle file for unit metrics.", log=True):
                         raise Exception("Operation cancelled")
-                    if _process_omniplex_file(job_id, save_path, unit_data, trial_info, units):
-                        raise Exception("Operation cancelled")
-                    # discard Omniplex file (which is huge) once we're done processing it. If session requires manual
-                    # review, we don't want to leave this in the local staging folder!
-                    save_path.unlink(missing_ok=True)
+                    for i, ch_id in enumerate(unit_data['channel']):
+                        spiketimes = unit_data['spiketimes'][i]
+                        n_spikes = len(spiketimes)
+                        firing_rate = 0 if n_spikes < 2 else n_spikes / (spiketimes[-1] - spiketimes[0])
+                        units.append(OmniplexUnit(
+                            src=unit_data['filename'][i], ch=ch_id, spikes=unit_data['spiketimes'][i],
+                            num_spikes=n_spikes, rate=firing_rate, snr=unit_data['snr'][i],
+                            template=unit_data['template'][i]))
+                    _get_trial_timing_from_csv_file(archive, csv_ts_info, trial_info)
+                else:
+                    for pl2_zip_info in pl2s_archived:
+                        save_path = _chunked_extract_from_archive(job_id, archive, pl2_zip_info, zip_path.parent)
+                        if save_path is None:
+                            raise Exception("Operation cancelled")
+                        if _process_omniplex_file(job_id, save_path, unit_data, trial_info, units):
+                            raise Exception("Operation cancelled")
+                        # discard Omniplex file (which is huge) once we're done processing it. If session requires manual
+                        # review, we don't want to leave this in the local staging folder!
+                        save_path.unlink(missing_ok=True)
 
-                # if there is unit data, we require metrics for each unit specified in the neural units data file,
-                # and there must be Omniplex timestamps for all trials
-                if len(units) < len(unit_data['channel']):
-                    raise Exception(
-                        f"Missing analog data for at least one unit defined in {units_zip_info.filename}")
-                for key in trial_info.keys():
-                    if trial_info[key].omniplex_start is None:
-                        raise Exception(f"Missing Omniplex start/stop timestamps for {key}")
+                    # if there is unit data, we require metrics for each unit specified in the neural units data file,
+                    # and there must be Omniplex timestamps for all trials
+                    if len(units) < len(unit_data['channel']):
+                        raise Exception(
+                            f"Missing analog data for at least one unit defined in {units_zip_info.filename}")
+                    for key in trial_info.keys():
+                        if trial_info[key].omniplex_start is None:
+                            raise Exception(f"Missing Omniplex start/stop timestamps for {key}")
 
             # add results from preprocessing to the commit information file in the local staging folder
             if _background_job_update(job_id, "Saving results from preprocessing...", log=True):
@@ -1506,8 +1588,8 @@ def _background_job_update(job_id: str, msg: str, next_state: Optional[CommitSta
 
 def _validate_neural_unit_data(unit_data: Dict[str, List[Any]], pl2_filenames: List[str]) -> bool:
     """
-    Helper method validates the object loaded from a single dedicated file in the session ZIP archive that lists all
-    identified neurons and their spike times.
+    Helper method validates the object loaded from a single dedicated pickle file in the session ZIP archive that lists
+    all identified neurons and their spike times, and possibly some other information
 
     When researchers prepare the ZIP archive containing all data files for an experiment session including neural
     unit recordings, they must provide a single Python pickle file with the results of their spike-sorting analysis of
@@ -1518,26 +1600,39 @@ def _validate_neural_unit_data(unit_data: Dict[str, List[Any]], pl2_filenames: L
     PL2 file within the ZIP archive, and the 'spiketimes' key holds the spike times (in seconds since the Omniplex
     recording started) for each unit, as a Numpy array.
 
+    In order to commit an archive when the original PL2 source file is no longer available, an alternative archive
+    format is supported in which the elapsed start times of each trial are listed in a CSV file in the archive, and the
+    dictionary within the neural units pickle file must contain additional fields 'snr' (signal-to-noise ratio for each
+    unit) and 'template' (spike template waveform for each unit, as a Numpy array).
+
     Args:
         unit_data: The dictionary loaded from the neural units file.
-        pl2_filenames: List of all Omniplex PL2 files found in the session archive.
+        pl2_filenames: List of all Omniplex PL2 files found in the session archive. If the archive lacks any PL2 files,
+            then the dictionary must contain the additional fields as described above.
 
     Returns:
         True if unit_data is validly formatted as described above, false otherwise.
     """
-    ok = isinstance(unit_data, dict) and ('channel' in unit_data) and ('spiketimes' in unit_data)
+    required_keys = ['channel', 'spiketimes']
+    if len(pl2_filenames) == 0:
+        required_keys.extend(['snr', 'template'])
+
+    ok = (isinstance(unit_data, dict) and
+          all((k in unit_data) and isinstance(unit_data[k], list) for k in required_keys))
+    num_units = len(unit_data['channel']) if ok else 0
     if ok:
-        ok = isinstance(unit_data['channel'], list) and isinstance(unit_data['spiketimes'], list) and \
-             len(unit_data['channel']) == len(unit_data['spiketimes']) and \
+        ok = all(len(unit_data[k]) == num_units for k in required_keys) and \
              all(isinstance(x, str) for x in unit_data['channel']) and \
-             all(isinstance(x, np.ndarray) for x in unit_data['spiketimes'])
-    if ok:
+             all(isinstance(x, np.ndarray) for x in unit_data['spiketimes']) and \
+             (('snr' not in unit_data) or all(isinstance(x, float) for x in unit_data['snr'])) and \
+             (('template' not in unit_data) or all(isinstance(x, np.ndarray) for x in unit_data['template']))
+    if ok and (len(pl2_filenames) > 0):
         if 'filename' in unit_data:
-            ok = isinstance(unit_data['filename'], list) and (
-                        len(unit_data['filename']) == len(unit_data['channel'])) \
+            ok = isinstance(unit_data['filename'], list) and (len(unit_data['filename']) == num_units) \
                  and all(x in pl2_filenames for x in unit_data['filename'])
         else:
             ok = (len(pl2_filenames) == 1)
+
     return ok
 
 
@@ -1653,6 +1748,43 @@ def _process_omniplex_file(job_id: str, omniplex_file: Path, unit_data: Dict[str
                 return True   # job cancelled
             units.extend(units_found)
 
+def _get_trial_timing_from_csv_file(
+        archive: zipfile.ZipFile, csv_info: zipfile.ZipInfo, trial_info: Dict[str, _TrialInfo]) -> None:
+    """
+    In the event that the original Omniplex PL2 recording is no longer available, an alternative archive content format
+    is supported: (1) Neural unit SNR and template waveforms are included via additional fields in the neural unit data
+    pickle file. (2) Start times for all trials relative to that recording timeline (so we can determine which spikes
+    occurred during each trial!) are supplied in a CSV file.
+
+    This method parses the CSV file. Each text line in the file is parsed as "filename,ts", where "filename" is the
+    Maestro trial data filename and "ts" is the start time for that trial in milliseconds.
+
+    Args:
+        archive: The source ZIP archive.
+        csv_info: The CSV file within the archive.
+        trial_info: [in/out] A dictionary with partial information about each Maestro trial presented, keyed by trial
+            data filename. The method adds the start timestamp for each trial, as culled from the CSV file specified.
+
+    Raises:
+        Exception: If an error occurs while parsing CSV file or if a timestamp is missing for any trial data file.
+    """
+    with archive.open(csv_info, 'r') as csv_file:
+        rdr = csv.reader(TextIOWrapper(csv_file, 'utf-8'))
+        for line in rdr:
+            if len(line) < 2:
+                continue
+            fname = line[0]
+            try:
+                ts_msec = float(line[1])
+            except ValueError:
+                continue
+            if fname in trial_info:
+                trial_info[fname].omniplex_start = ts_msec / 1000.0
+
+    # now verify we got a timestamp for every trial!
+    for k in trial_info:
+        if trial_info[k].omniplex_start is None:
+            raise Exception(f"No timestamp found for {k} in CSV file {csv_info.filename}")
 
 def _get_trial_timing_from_pl2_file(fp: IO, info: Optional[Dict[str, Any]] = None) -> Dict[str, Tuple[float, float]]:
     """
@@ -2477,18 +2609,24 @@ class _SessionCommitMgr(SessionCommitter):
         return self.cancelled
 
     def insert_trials_for_session(self, session_key: Dict[str, Any]) -> None:
-        # generate list of trial file names in presentation order. We CANNOT rely on file creation time! If Omniplex
-        # system used and all trials were timestamped within the same PL2 file, then order by Omniplex start time.
-        # Else, if the file header includes the internal Maestro timestamp (we assume all trials will if the first
-        # one does!), use that. Otherwise, order by ascending numeric file suffix (.0001,...).
+        # generate list of trial file names in presentation order. We CANNOT rely on file creation time!
         sort_strategy = None
         sorted_filenames = None
         if isinstance(self.units, list) and (len(self.units) > 0):
-            pl2_file_set = {unit.source_file for unit in self.units}
-            if len(pl2_file_set) == 1:
-                sort_strategy = 'omniplex'
+            # if there is unit data, a CSV file in session archive may supply trial start times during Ephys recording
+            # in lieu of PL2 file(s). If a single PL2 file present, we order trials by Omniplex start time. If more
+            # than one PL2 file, we can't since there will be different timelines!
+            uses_csv_file = (self.trial_info[next(iter(self.trial_info))].omniplex_stop is None)
+            if uses_csv_file:
+                sort_strategy = 'csv'
                 sorted_filenames = sorted(self.trial_info, key=lambda k: self.trial_info[k].omniplex_start)
+            else:
+                pl2_file_set = {unit.source_file for unit in self.units}
+                if len(pl2_file_set) == 1:
+                    sort_strategy = 'omniplex'
+                    sorted_filenames = sorted(self.trial_info, key=lambda k: self.trial_info[k].omniplex_start)
         if not sort_strategy:
+            # otherwise, use internal timestamp if found in Maestro file header. Else order by numeric file suffix.
             if self.trial_info[next(iter(self.trial_info))].header_timestamp:
                 sort_strategy = 'timestamp'
                 sorted_filenames = sorted(self.trial_info, key=lambda k: self.trial_info[k].header_timestamp)
@@ -2518,7 +2656,7 @@ class _SessionCommitMgr(SessionCommitter):
                 # compute scale factor to convert Omniplex spike times to Maestro timeline. However, if Maestro
                 # trial length according to Omniplex is more than 2ms off, fail.
                 maestro_omniplex_time_scaling = 1.0
-                if t_info.omniplex_start is not None:
+                if (t_info.omniplex_start is not None) and (t_info.omniplex_stop is not None):
                     trial_length = (data_file.trial.record_start + data_file.header.num_scans_saved - 1) / 1000.0
                     omniplex_length = t_info.omniplex_stop - t_info.omniplex_start
                     if abs(trial_length - omniplex_length) > 0.002:
@@ -2545,8 +2683,8 @@ class _SessionCommitMgr(SessionCommitter):
                 if sort_strategy == 'index':
                     trial_entry['trial_ts'] = -1
                 else:
-                    t_sec = t_info.omniplex_start if (
-                                sort_strategy == 'omniplex') else t_info.header_timestamp / 1000.0
+                    t_sec = t_info.omniplex_start if (sort_strategy == 'csv' or sort_strategy == 'omniplex') else \
+                        t_info.header_timestamp / 1000.0
                     if num_inserted == 0:
                         trial_entry['trial_ts'] = 0
                         trial1_start_sec = t_sec
@@ -2589,12 +2727,19 @@ class _SessionCommitMgr(SessionCommitter):
                 # the first spike time is after trial end!
                 for i, unit in enumerate(self.units):
                     spikes = unit.spike_times
-                    if (spikes[-1] < t_info.omniplex_start) or (spikes[0] > t_info.omniplex_stop):
+
+                    # need to handle special case when there's no PL2 file in archive, and trial start times are
+                    # supplied via a CSV file
+                    t_start, t_stop = t_info.omniplex_start, t_info.omniplex_stop
+                    if t_stop is None:
+                        t_stop = t_info.omniplex_start + t_info.duration
+
+                    if (spikes[-1] < t_start) or (spikes[0] > t_stop):
                         continue
 
                     spikes_in_trial = \
-                        spikes[(spikes >= t_info.omniplex_start) & (spikes <= t_info.omniplex_stop)]
-                    spikes_in_trial = (spikes_in_trial - t_info.omniplex_start) * maestro_omniplex_time_scaling
+                        spikes[(spikes >= t_start) & (spikes <= t_stop)]
+                    spikes_in_trial = (spikes_in_trial - t_start) * maestro_omniplex_time_scaling
                     response_entry = dict(
                         session_key,
                         trial_idx=(num_inserted + 1),

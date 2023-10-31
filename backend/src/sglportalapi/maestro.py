@@ -4390,12 +4390,12 @@ class Protocol:
                         trial = DataFile.load_trial(archive.read(info), info.filename)
                         found = False
                         for i, proto in enumerate(proto_candidates):
-                            if proto._trial.is_similar_to(trial):
+                            if proto.trial.is_similar_to(trial):
                                 found = True
-                                for rv in proto._trial.segment_table_differences(trial):
+                                for rv in proto.trial.segment_table_differences(trial):
                                     proto.add_random_variable(rv)
                                 filename_to_protocol[info.filename] = i
-                                proto._num_reps += 1
+                                proto.num_reps += 1
                                 break
                         if not found:
                             proto_candidates.append(Protocol(trial))
