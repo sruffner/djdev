@@ -440,6 +440,13 @@ class OmniplexUnit:
         """
         An Omniplex neural unitrecord, storing calculated metrics and the spike train recorded from this unit.
 
+        NOTE: The session commit procedure now allows for an archive lacking the Omniplex PL2 file. Instead, the SNR
+        and template waveform for a unit are included in additional fields in the Python pickle file holding information
+        on all identificed neural units. When the PL2 file is available, SNR and a 10-ms template waveform are computed
+        using the original Omniplex analog data. When the SNR and waveform are supplied by the experimenter in the
+        pickle file, the waveform duration may be different. In this scenario, the duration is found by multiplying the
+        waveform length in samples by the sampling rate, which is part of the session metadata.
+
         Args:
             src: The filename of the original Omniplex source file. If None, this will be set to "unknown".
             ch: Omniplex channel on which unit was recorded. This should be either a wide-band analog channel "WB<num>"
@@ -449,8 +456,8 @@ class OmniplexUnit:
             num_spikes: The total number of spikes recorded. If `spikes` is not None, then this argument is
                 ignored and `len(spikes)` is the number of recorded spikes.
             rate: Estimated mean firing rate in Hz.
-            snr: Estimated signal-to-noise ratio.
-            template: The spike template waveform.
+            snr: Estimated signal-to-noise ratio. See NOTE.
+            template: The spike template waveform. See NOTE.
             neuron_type: The neuron type ID (-1 if not known).
         """
         self._definition: Dict[str, Any] = dict()
@@ -508,8 +515,11 @@ class OmniplexUnit:
     @property
     def template(self) -> np.ndarray:
         """
-        Average spike template waveform (computed by averaging 10-ms clips of filtered analog channel stream starting
-        1ms before each timestamp in the spike times array). Units = micro-volts.
+        Average spike template waveform. When the original Omniplex PL2 recording is available in the session archive,
+        this is computed by averaging 10-ms clips of filtered analog channel stream starting 1ms before each timestamp
+        in the spike times array). When no PL2 file is available and the template waveform is supplied directly by the
+        committer (in the session archive's neural unit data file), the waveform duration and the method of computation
+        will vary. Units = micro-volts.
         """
         return self._definition['template']
 
@@ -1603,7 +1613,8 @@ def _validate_neural_unit_data(unit_data: Dict[str, List[Any]], pl2_filenames: L
     In order to commit an archive when the original PL2 source file is no longer available, an alternative archive
     format is supported in which the elapsed start times of each trial are listed in a CSV file in the archive, and the
     dictionary within the neural units pickle file must contain additional fields 'snr' (signal-to-noise ratio for each
-    unit) and 'template' (spike template waveform for each unit, as a Numpy array).
+    unit) and 'template' (spike template waveform for each unit, as a Numpy array). Note that, in this scenario, the
+    template length and the method for computing SNR may be different than what is done when the PL2 file is available.
 
     Args:
         unit_data: The dictionary loaded from the neural units file.
@@ -2693,13 +2704,13 @@ class _SessionCommitMgr(SessionCommitter):
 
                 # for this trial, get the values of the protocol's random variables
                 protocol = next((x for x in self.protocols if x.md5_digest == t_info.proto_hash), None)
-                if not protocol:
+                if protocol is None:
                     raise Exception(
                         f"Internal inconsistency: No trial protocol defined for trial in {trial_filename}")
                 rv_values: List[Any] = list()
                 for param in protocol.random_variables:
                     rv_value = data_file.trial.retrieve_segment_table_parameter_value(param)
-                    if not rv_value:
+                    if rv_value is None:
                         raise Exception(
                             f"Internal inconsistency: Invalid RV ({param}) for trial in {trial_filename}")
                     rv_values.append(rv_value)

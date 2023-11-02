@@ -490,7 +490,10 @@ class NeuronInfo:
 
     @property
     def spike_template_waveform(self) -> np.ndarray:
-        """ The neural unit's spike template waveform (10ms duration at recorded sampling rate). """
+        """
+        The neural unit's spike template waveform. The number of samples in the waveform may vary. The probe sampling
+        rate is an experiment session parameter -- see :method: `SessionInfo.ephys_sampling_rate()`.
+        """
         return np.array(self._info['unit_template'])
 
     @property

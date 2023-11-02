@@ -78,7 +78,8 @@ metadata: the recording date, the experimenter, the subject, and other informati
 interactively through the portal, the web interface displays the various fields that must be "filled in" before 
 proceeding with the commit. In addition, you must prepare an_experiment session data archive_ (ZIP file) containing all
 of the data files required by the portal:
-1. All Maestro trial data files recorded during the experiment.
+1. All Maestro trial data files recorded during the experiment. Note that the portal only handles Maestro data files 
+with version >= 21 (since Maestro 4.0.0, Nov 2018).
 2. A Python pickle file containing information about any neural units recorded during the experiment; this may be 
 omitted for behavior-only experiment sessions. The pickle file contains a **_single dictionary_** with the following 
 keys. Each key holds a list of length `N`, where `N` is the number of identified neural units.
@@ -104,6 +105,9 @@ spikes on multiple neural units). In this scenario, a trial’s “stop time” 
 CSV plus the trial duration. Without this trial timing information, it is not possible to extract the spike train for 
 each neural unit during each trial. Obviously, for behavior-only experiments, neither the PL2 file nor the CSV file are 
 required.
+
+**_DO NOT ZIP A DIRECTORY CONTAINING THESE FILES_**. The archive must not contain any directories (watch out for nasty
+hidden directories, particularly __MACOSX if you're a Mac user), or the portal will gag on it.
 
 ## License
 This application was created by [Scott Ruffner](mailto:sruffner@srscicomp.com). It is licensed under the terms of the MIT license.

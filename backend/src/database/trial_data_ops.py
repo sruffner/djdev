@@ -54,8 +54,12 @@ def trial_protocols_for_session(session_key: Dict[str, AttributeValue], aggregat
                 return None
             out = dict()
             for p in protocols:
-                out[p['proto_hash']] = f"{p['proto_set']}/{p['proto_name']}" \
-                    if len(p['proto_subset']) == 0 else f"{p['proto_set']}/{p['proto_subset']}/{p['proto_name']}"
+                if len(p['proto_set']) == 0:
+                    out[p['proto_hash']] = p['proto_name']
+                elif len(p['proto_subset']) == 0:
+                    out[p['proto_hash']] = f"{p['proto_set']}/{p['proto_name']}"
+                else:
+                    out[p['proto_hash']] = f"{p['proto_set']}/{p['proto_subset']}/{p['proto_name']}"
         sorted_tuples = sorted(out.items(), key=lambda item: item[1])
         return {k: v for k, v in sorted_tuples}
     except Exception as e:
@@ -104,8 +108,12 @@ def trial_protocols_for_neuron(neuron_key: Dict[str, AttributeValue], aggregate:
                 return None
             out = dict()
             for p in protocols:
-                out[p['proto_hash']] = f"{p['proto_set']}/{p['proto_name']}" \
-                    if len(p['proto_subset']) == 0 else f"{p['proto_set']}/{p['proto_subset']}/{p['proto_name']}"
+                if len(p['proto_set']) == 0:
+                    out[p['proto_hash']] = p['proto_name']
+                elif len(p['proto_subset']) == 0:
+                    out[p['proto_hash']] = f"{p['proto_set']}/{p['proto_name']}"
+                else:
+                    out[p['proto_hash']] = f"{p['proto_set']}/{p['proto_subset']}/{p['proto_name']}"
         sorted_tuples = sorted(out.items(), key=lambda item: item[1])
         return {k: v for k, v in sorted_tuples}
     except Exception as e:

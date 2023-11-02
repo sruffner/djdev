@@ -794,7 +794,7 @@ def neural_unit_summary(session: Dict[str, Any], unit_ids: List[int]) -> html.Di
         fig.add_annotation(x=0.5, y=1, xref='x domain', yref='y domain', text=f"<b>Unit #{unit['unit_id']}</b>",
                            showarrow=False, xanchor='center', yanchor='bottom', row=1, col=i+1,
                            font=dict(size=14))
-    fig.update_layout(showlegend=False, title_text='Average spike waveform (1-ms pre, 9-ms post)', title_x=0.5)
+    fig.update_layout(showlegend=False, title_text='Average spike waveform', title_x=0.5)
 
     return html.Div([
         dbc.Row([dbc.Col(info_table, width=12)], align='center'),

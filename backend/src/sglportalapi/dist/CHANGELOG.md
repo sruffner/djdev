@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.6.0 (11/02/2023)
+- Bug fix in `PL2._get_channel_offset()`. Added `PL2.load_analog_channel_block_faster()`, which is roughly 100x faster 
+than `load_analog_channel_block()`.
+- Fixed a bug in `maestro.Perturbation.from_trial_codes()`.
+
 ## v0.5.0 (01/12/2023)
 
 - Minor bug fix to `sglportalapi.clientside.PortalAccessor.commit_status`: When function failed, it returned True when 

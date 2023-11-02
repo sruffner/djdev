@@ -107,7 +107,8 @@ method to list the contents of these tables.
 
 You must also supply the _experiment session archive_ (ZIP file) containing all of the information required by the 
 portal:
-1. All Maestro trial data files recorded during the experiment.
+1. All Maestro trial data files recorded during the experiment. Note that the portal only handles Maestro data files 
+with version >= 19 (since Maestro 3.0.0, Sep 2012).
 2. A Python pickle file containing information about any neural units recorded during the experiment; this may be 
 omitted for behavior-only experiment sessions. The pickle file contains a **_single dictionary_** with the following 
 keys. Each key holds a list of length `N`, where `N` is the number of identified neural units.
@@ -130,6 +131,9 @@ supply a CSV file containing the start times for every Maestro trial file in the
 form “trial_file_name.XXXX, timestamp_in_ms”. In this scenario, a trial’s “stop time” is simply the start time in the 
 CSV plus the trial duration. Obviously, for behavior-only experiments, neither the PL2 file nor the CSV file are 
 required.
+
+**_DO NOT ZIP A DIRECTORY CONTAINING THESE FILES_**. The archive must not contain any directories (watch out for nasty
+hidden directories, particularly __MACOSX if you're a Mac user), or the portal will gag on it.
     
 
 The Python excerpt below shows how you might use `PortalAccessor` to upload a session archive and commit the session

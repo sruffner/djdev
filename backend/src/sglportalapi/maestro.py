@@ -15,7 +15,12 @@ given experiment session, it is imperative to identify "similar" trials that are
 trial protocol, so that we can "average" behavioral and neuronal responses across those repetitions.
 
 Limitations:
- - Only supports Trial-mode data files with file version >= 21. Cannot process Continuous-mode data files!
+ - Only supports Trial-mode data files with file version >= 21 (since Maestro 4.0.0, released in Nov 2018). Cannot
+ process Continuous-mode data files! Note that trial set and subset names and the trial start timestamp (in ms elapsed
+ since Maestro started) were not added to the data file header until V=21. The set and subset names are important in
+ listing trial protocols in the portal UI -- and are particularly helpful when users reuse trial names for different
+ protocols that reside in different trial sets/subsets. The timestamp can help determine trial presentation order when
+ Omniplex timestamps cannot be used.
  - Does not process JMWork/XWork action edit codes, but does parse out sorted spike train channel data.
  - The Trial class does not extract all available information in the trial codes. Notable omissions include info on
    special operations, a failsafe segment, staircase sequencer-related parameters (rarely if ever used), and any
@@ -246,8 +251,9 @@ class DataFile(NamedTuple):
         if (num_total_bytes % RECORD_SIZE) != 0:
             raise DataFileError(f"Maestro data file size in bytes ({num_total_bytes}) is not a multiple of 1024!")
         header = DataFileHeader(content)
-        if (header.version < 21) or header.is_continuous_mode():
-            raise DataFileError("No support for version<21 Maestro data files or files recorded in Continuous mode!")
+        if (header.version < MIN_SUPPORTED_VERSION) or header.is_continuous_mode():
+            raise DataFileError(f"No support for version<{MIN_SUPPORTED_VERSION} Maestro data files or files recorded "
+                                f"in Continuous mode!")
         try:
             offset = RECORD_SIZE
             while offset < num_total_bytes:
@@ -2628,11 +2634,11 @@ class Perturbation:
             if not (PERT_TYPE_SINE <= pert_type <= PERT_TYPE_GAUSS):
                 return None
             dur = codes[start+2].time
-            extras = [codes[start+3].code, codes[start+3].time]
+            extras = [codes[start+3].code, codes[start+3].time, 0]
             if pert_type == PERT_TYPE_TRAIN:
-                extras.append(codes[start+4].code)
+                extras[2] = codes[start+4].code
             elif pert_type in [PERT_TYPE_NOISE, PERT_TYPE_GAUSS]:
-                extras.append((codes[start+4].time << 8) | (codes[start+4].code & 0x0FF))
+                extras[2] = (codes[start+4].time << 8) | (codes[start+4].code & 0x0FF)
             return Perturbation(tgt, cmpt, seg_idx, amp, pert_type, dur, extras)
         except Exception:
             return None
@@ -3093,7 +3099,7 @@ class Trial:
     @property
     def subset_name(self) -> Optional[str]:
         """
-        Name of the subset to which trial belongs (empty string if there is no subset), or None if not  available (added
+        Name of the subset to which trial belongs (empty string if there is no subset), or None if not available (added
         to the data file in version 21).
         """
         return self._definition['subset_name']
@@ -4389,13 +4395,14 @@ class Protocol:
                     try:
                         trial = DataFile.load_trial(archive.read(info), info.filename)
                         found = False
+                        proto: Protocol
                         for i, proto in enumerate(proto_candidates):
                             if proto.trial.is_similar_to(trial):
                                 found = True
                                 for rv in proto.trial.segment_table_differences(trial):
                                     proto.add_random_variable(rv)
                                 filename_to_protocol[info.filename] = i
-                                proto.num_reps += 1
+                                proto._num_reps += 1
                                 break
                         if not found:
                             proto_candidates.append(Protocol(trial))
