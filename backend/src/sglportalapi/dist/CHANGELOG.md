@@ -1,9 +1,11 @@
 # Changelog
 
-## v0.6.0 (11/02/2023)
+## v0.6.0 (11/06/2023)
 - Bug fix in `PL2._get_channel_offset()`. Added `PL2.load_analog_channel_block_faster()`, which is roughly 100x faster 
 than `load_analog_channel_block()`.
 - Fixed a bug in `maestro.Perturbation.from_trial_codes()`.
+- Incremented API_VERSION to 4. **If you have already installed the `sglportalapi` packaged, you will need to upgrade
+to this release.**
 
 ## v0.5.0 (01/12/2023)
 
@@ -27,7 +29,7 @@ at least 3 reps of every distinct trial protocol presented over the course of th
 - Minor changes to `data_containers.SessionInfo`. The opaque integer IDs identifying the research study and brain area
 associated with the experiment session are included in `SessionInfo` but not exposed as properties (as they are intended
 only for use on the server side).
-- Incremented API_VERSION to 3. **If you have already installed the sglportalapi package, you will need to 
+- Incremented API_VERSION to 3. **If you have already installed the `sglportalapi` package, you will need to 
 upgrade to this release.**
 
 ## v0.3.0 (08/04/2022)

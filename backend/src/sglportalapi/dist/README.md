@@ -41,10 +41,11 @@ better.**_
 - Ensure that Python 3.9+ is installed on your system. We currently build the package against
 version 3.9.12.
 - Login to the Lisberger lab portal and navigate to the "API Client" page from the "Welcome" menu. 
-You'll find this README, along with auto-generated documentation on the key modules within the
+You'll find this README and a CHANGELOG, along with auto-generated documentation on the key modules within the
 `sglportalapi` package.
 - Click on the "Download API Client" button to download the wheel file 
-`sglportalapi-x.y.z-py3-none-any.whl`, where `x.y.x` is the release version number.
+`sglportalapi-x.y.z-py3-none-any.whl`, where `x.y.x` is the release version number. Be sure to check the CHANGELOG for 
+the package release history. As the API and portal evolves, it will be necessary to update your copy of the package!
 - In a terminal console, navigate to the directory holding the wheel file you downloaded, and install 
 the package: `pip install sglportalapi-x.y.z-py3-none-any.whl`.
 

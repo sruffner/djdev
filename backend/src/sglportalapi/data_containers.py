@@ -28,8 +28,11 @@ import numpy as np
 
 from sglportalapi.maestro import Protocol
 
-API_VERSION: int = 3
-""" The current version number for the portal database access API. """
+API_VERSION: int = 4
+""" 
+The current version number for the portal database access API. This must be incremented whenever there is a 
+change in the portal API or the data containers defined in this module that is not backwards-compatible.
+"""
 
 
 class MetadataTable:

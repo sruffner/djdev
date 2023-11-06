@@ -637,8 +637,14 @@ def mean_firing_rate_figure(session: Dict[str, Any], proto_hashes: List[str], un
             returns an HTML Div with an error message.
     """
     num_proto = len(proto_hashes) if (len(proto_hashes) < 9) else 9
-    num_cols = 3 if num_proto > 2 else num_proto
-    num_rows = int(num_proto / num_cols + 0.5)
+    if num_proto < 4:
+        num_cols = num_proto
+        num_rows = 1
+    else:
+        num_cols = 3
+        num_rows = int(num_proto / num_cols)
+        if num_cols * num_rows < num_proto:
+            num_rows = num_rows + 1
     fig = make_subplots(rows=num_rows, cols=num_cols, shared_yaxes='all', x_title='time (milliseconds)',
                         y_title='mean firing rate (Hz)')
 

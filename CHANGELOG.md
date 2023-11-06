@@ -1,5 +1,10 @@
 # Lisberger Lab Data Portal - Changelog
 
+## v0.5.2 (11/6/2023)
+- Updated `API_VERSION` for `sglportalapi` package to 4 so that users must download the new release (0.6.0). This 
+ensures they are using the latest version of the `PL2.py` module from that package.
+- Fixed a bug in database.data_plots.mean_firing_rate_figure().
+
 ## v0.5.1 (11/2/2023)
 - Tested commit process on a couple sample archives from N. Hall and addressed programming errors in 
 `maestro.Perturbation.from_trial_codes()` and `commit_ops._SessionCommitMgr.insert_trials_for_session()`.
@@ -9,9 +14,10 @@ has been rebuilt.
 ## v0.5.0 (10/31/2023)
 
 - Began documenting changes. See Gitlab commit history for more information on how the project has evolved to this
-point. Also added a `README`.
+point. Also added a `README` for the portal app, distinct from the README for the `sglportalapi` Python package.
 - Incorporated a change in from the `XSort` project -- `PL2.load_analog_channel_block_faster()` is ~100x faster than the
-`load_analog_channel_block()` method. Session archive preprocessing updated to use the faster routine.
+`load_analog_channel_block()` method. Session archive preprocessing updated to use the faster routine. Also fixed a 
+bug in `PL2._get_channel_offset()`.
 - Updated commit process to add support for alternate session archive content _in lieu of_ Omniplex PL2 file(s) when 
 neural data is recorded: (1) Additional fields in the neural unit pickle file specifying SNR and template waveform for 
 each identified unit. (2) A CSV file that contains the starting time in milliseconds for each Maestro trial saved
