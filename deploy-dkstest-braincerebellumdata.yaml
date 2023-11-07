@@ -53,16 +53,17 @@
 # Basically, we have to update the spec of each of the 3 deployments -- `data-store`, `web-server`, and `web-worker` --
 # to use the updated images.
 #  1) Connect to the Duke VPN.
-#  2) Head to portal.azure.com and log in with Duke credentials. You should see the production (dhp-dhts-dks-cl01-aks)
-#     and test/dev clusters (dhd-dhts-dks-dev01-cl). If you click on the production cluster, under "overview", there is
-#     a tab called "getting started". There instructions for setting up the Azure CLI on your local machine and logging
-#     in to either cluster so you can make changes to the app using 'kubectl' from the command line.
+#  2) Head to portal.azure.com and log in with Duke credentials (email @duke.edu) You should see the production
+#     (dhp-dhts-dks-cl01-aks) and test/dev clusters (dhd-dhts-dks-dev01-cl). If you click on the production cluster,
+#     under "overview", there is a tab called "getting started". There instructions for setting up the Azure CLI on your
+#     local machine and logging in to either cluster so you can make changes to the app using 'kubectl' from the command
+#     line.
 #  3) Login to the test/dev cluster "dhd-dhts-dks-dev01-cl". Use kubectl to make 'braincerebellumdata' the current
 #     namespace and verify everything is running normally.
-#  4) Make sure this YAML is up-to-date withe the container image names as described above, and ensure the current
+#  4) Make sure this YAML is up-to-date with the container image names as described above, and ensure the current
 #     directoy is the folder containing this YAML.
-#  5) Then: kubectl apply -f deploy-dkstest-braincerebellumdata. If successful, Azure/Kubernetes will automatically
-#     begin a rolling update of each deployment comprising the portal app.
+#  5) Then: 'kubectl apply -f deploy-dkstest-braincerebellumdata.yaml'. If successful, Azure/Kubernetes will
+#     automatically begin a rolling update of each deployment comprising the portal app.
 #
 # This approach could cause issues if users are actively accessing the portal, or if any background tasks are running
 # in any of the web-worker replica pods. So it is probably NOT a good idea to do things this way in production. Better
@@ -223,7 +224,7 @@ spec:
             mountPath: /bitnami/mariadb
       containers:
       - name: sgl-db
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel-f85e5968
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/mariadb:devel-ae3fe0ed
         imagePullPolicy: Always
         volumeMounts:
           - name: db-data
@@ -253,7 +254,7 @@ spec:
           initialDelaySeconds: 20
           periodSeconds: 5
       - name: sgl-redis
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel-f85e5968
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/redis:devel-ae3fe0ed
         imagePullPolicy: Always
         ports:
           - containerPort: 6379
@@ -305,7 +306,7 @@ spec:
             value: "6379"
       containers:
       - name: sgl-worker
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-f85e5968
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-ae3fe0ed
         imagePullPolicy: Always
         command: ["rq"]
         args: ["worker", "--with-scheduler", "--url", "redis://$(REDIS_HOST):$(REDIS_PORT)"]
@@ -404,7 +405,7 @@ spec:
             value: data-store.braincerebellumdata.svc.cluster.local
       containers:
       - name: sgl-server
-        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-f85e5968
+        image: gitlab.dhe.duke.edu:4567/sar52/sgl-portal/backend:devel-ae3fe0ed
         imagePullPolicy: Always
         ports:
           - containerPort: 8050

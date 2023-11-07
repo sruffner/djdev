@@ -212,6 +212,14 @@ dedicated staging area in the S3-based portal repository, or when being actively
 folder in the portal's local workspace.
 """
 
+MAX_PROGRESS_UPDATE_DELAY: int = 60
+"""
+Maximum time interval, in seconds, between progress updates from a background task during the preprocessing or final 
+commit stage of a commit job. It is possible that the RQ worker process that is handling either of these stages could 
+be killed unexpectedly -- in which case it will not update the commit job status in Redis to indicate the job failed. 
+By design, progress updates are delivered frequently during these stages, so we can assume the background task failed 
+if no progess update has been posted for at least the interval specified by this constant.
+"""
 
 class CommitStateEnum(DocEnum):
     """ Enum of commit job state codes. The 'doc' for each code serves as a short human-facing status string. """
@@ -1169,6 +1177,14 @@ def cancel_or_remove_commit_job(job_id: str) -> Tuple[bool, str, Optional[Commit
     successfully -- the "Done" state, meaning that the session data has been committed to the archive, this method
     merely removes the completed job from the set of pending commit jobs cached in Redis.
 
+    It can sometimes happen that a background process working on the preprocessing or final commit phase is killed
+    (these processes run as RQ workers in pods separate from the backend server pods in Kubernetes) or crashes -- in
+    which case the commit job status object in Redis is never moved to the "failed" state. Even if the user requests the
+    job be cancelled, it will remain STUCK in the "cancelled" state waiting on the dead background process to detect the
+    cancellation and move the job to the "failed" state. To address this possibility, this method will check the last
+    time the job's status was updated (typically, a progress message update). If the last update is too old, we assume
+    a background task failed unexpectedly and remove the job.
+
     Args:
         job_id: The commit job identifier, assigned when the session commit was initiated on server.
     Returns:
@@ -1183,9 +1199,15 @@ def cancel_or_remove_commit_job(job_id: str) -> Tuple[bool, str, Optional[Commit
 
         conn = get_config().redis_conn
 
-        # remove job now if background process is not working on it. Else, if not already cancelled, move job to that
-        # state and append a progress message in Redis
-        if job_status.state.can_delete_job_in_this_state():
+        # remove job now if background process is not working on it OR if there has been no progress update for an
+        # extended period of time -- indicating that the background process probably crashed.
+        if job_status.state.can_delete_job_in_this_state() or \
+                (time.time() - job_status.updated >= MAX_PROGRESS_UPDATE_DELAY):
+            # post error msg to application log if job was removed bc there've been no progress updates
+            if not job_status.state.can_delete_job_in_this_state():
+                _logger.error(f"Removed in-progress commit job because progress has not been updated for at least "
+                              f"{MAX_PROGRESS_UPDATE_DELAY} seconds. Background task may have crashed or been killed.")
+
             # when an API-triggered commit is cancelled in the upload phase, be sure to abort the S3 multipart upload
             archive_on_repo = staged_archive_key_in_repo(job_id)
             if job_status.state == CommitStateEnum.UPLOADING and job_status.api_triggered:

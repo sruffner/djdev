@@ -1,9 +1,16 @@
 # Lisberger Lab Data Portal - Changelog
 
-## v0.5.2 (11/6/2023)
+## v0.5.2 (11/7/2023)
 - Updated `API_VERSION` for `sglportalapi` package to 4 so that users must download the new release (0.6.0). This 
 ensures they are using the latest version of the `PL2.py` module from that package.
 - Fixed a bug in database.data_plots.mean_firing_rate_figure().
+- A commit job will be automatically removed in the preprocessing or final commit phases if the portal server
+detects that the job's progress has not been updated for more than 60 seconds. In these two phases a background
+process running in an RQ worker performs the necessary work and regularly updates the commit job object on the
+Redis server. On occasion, the RQ worker may be killed (eg, if the web-worker pod in which it runs is evicted from
+its node by the Kubernetes cluster manager) -- so this change provides a mechanism for recovering from that
+situation. Prior to this change, the commit job would be left stuck in the preprocessing or final commit phase; it
+could be "cancelled" but not removed.
 
 ## v0.5.1 (11/2/2023)
 - Tested commit process on a couple sample archives from N. Hall and addressed programming errors in 
