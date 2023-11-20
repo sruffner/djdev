@@ -9,6 +9,7 @@ include:
 
 build_backend:
   stage: build
+  cache: []    # disable pipeline cache -- been bitten by a stale cache in the past
   variables:
     THE_IMAGE: ${CI_REGISTRY_IMAGE}/backend:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
   before_script:

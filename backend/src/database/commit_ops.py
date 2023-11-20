@@ -721,12 +721,14 @@ def _check_pending_session_metadata(
         study_id = study
         res = fetch_attribute_values(DBTable.STUDY, "study_title", dict(study_id=study_id))
         study_ok = (len(res) == 1)
-        study_title = res[0]
+        if study_ok:
+            study_title = res[0]
     elif isinstance(study, str):
         study_title = study
         rows = fetch_rows(DBTable.STUDY, dict(study_title=study_title))
         study_ok = (len(rows) == 1)
-        study_id = rows[0]['study_id']
+        if study_ok:
+            study_id = rows[0]['study_id']
     if not study_ok:
         return "Invalid ID or title for study", None, []
 
@@ -736,12 +738,14 @@ def _check_pending_session_metadata(
         ba_id = brain_area
         res = fetch_attribute_values(DBTable.BRAIN_AREA, "ba_name", dict(ba_id=ba_id))
         ba_ok = (len(res) == 1)
-        ba_name = res[0]
+        if ba_ok:
+            ba_name = res[0]
     elif isinstance(brain_area, str):
         ba_name = brain_area
         rows = fetch_rows(DBTable.BRAIN_AREA, dict(ba_name=ba_name))
         ba_ok = (len(rows) == 1)
-        ba_id = rows[0]['ba_id']
+        if ba_ok:
+            ba_id = rows[0]['ba_id']
     if not ba_ok:
         return "Invalid ID or title for brain area", None, []
 
