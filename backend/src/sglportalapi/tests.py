@@ -41,5 +41,6 @@ def test_extract_protocols(zip_file_path: str):
                 print(f"  ==> PASSED serialize/deserialize cycle, digest={digest_after}")
             else:
                 print(f"  ==> FAILED serialize/deserialize cycle: {digest_before} != {digest_after}")
+                print(f"  ====> First diff = {Protocol.find_first_diff(p, p2)}")
 
     print("Done.", flush=True)

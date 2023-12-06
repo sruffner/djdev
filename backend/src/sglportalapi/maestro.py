@@ -40,6 +40,7 @@ Author: sruffner
 
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
+from io import StringIO
 from typing import NamedTuple, List, Optional, Dict, Any, Tuple, Union, Set
 from datetime import date
 import struct
@@ -183,8 +184,10 @@ class DataFile(NamedTuple):
         if (num_total_bytes % RECORD_SIZE) != 0:
             raise DataFileError(f"Data file size in bytes ({num_total_bytes}) is not a multiple of {RECORD_SIZE}")
         header = DataFileHeader(content)
-        if (header.version < MIN_SUPPORTED_VERSION) or header.is_continuous_mode():
-            raise DataFileError(f"No support for Continuous mode or for data file version<{MIN_SUPPORTED_VERSION}")
+        if header.version < MIN_SUPPORTED_VERSION:
+            raise DataFileError(f"No support for version<{MIN_SUPPORTED_VERSION} Maestro data files!")
+        if header.is_continuous_mode():
+            raise DataFileError(f"No support for Maestro files recorded in Continuous mode!")
         try:
             offset = RECORD_SIZE
             while offset < num_total_bytes:
@@ -251,9 +254,11 @@ class DataFile(NamedTuple):
         if (num_total_bytes % RECORD_SIZE) != 0:
             raise DataFileError(f"Maestro data file size in bytes ({num_total_bytes}) is not a multiple of 1024!")
         header = DataFileHeader(content)
-        if (header.version < MIN_SUPPORTED_VERSION) or header.is_continuous_mode():
-            raise DataFileError(f"No support for version<{MIN_SUPPORTED_VERSION} Maestro data files or files recorded "
-                                f"in Continuous mode!")
+        if header.version < MIN_SUPPORTED_VERSION:
+            raise DataFileError(f"No support for version<{MIN_SUPPORTED_VERSION} Maestro data files!")
+        if header.is_continuous_mode():
+            raise DataFileError(f"No support for Maestro files recorded in Continuous mode!")
+
         try:
             offset = RECORD_SIZE
             while offset < num_total_bytes:
@@ -2672,6 +2677,19 @@ class Segment:
         self._definition['tgt_pat_acc'] = tgt_pat_acc
         self._validity_check(num_targets)
 
+    def __str__(self) -> str:
+        str_buf = StringIO()
+        hdr_parms = ['dur', 'fix1', 'fix2', 'grace', 'fixacc_h', 'fixacc_v', 'xy_update_intv', 'pulse_ch']
+        hdr = [self._definition[p] for p in hdr_parms]
+        str_buf.write(f"  Header: {','.join([str(p) for p in hdr])}\n")
+        str_buf.write(f"  Flags: {str(self._definition['tgt_flags'])}\n")
+        str_buf.write(f"  Tgt Pos: {str(self._definition['tgt_pos'])}\n")
+        str_buf.write(f"  Tgt Vel: {str(self._definition['tgt_vel'])}\n")
+        str_buf.write(f"  Tgt Acc: {str(self._definition['tgt_acc'])}\n")
+        str_buf.write(f"  Tgt Pat Vel: {str(self._definition['tgt_pat_vel'])}\n")
+        str_buf.write(f"  Tgt Pat Acc: {str(self._definition['tgt_pat_acc'])}\n")
+        return str_buf.getvalue()
+
     def _validity_check(self, num_targets: int) -> None:
         if num_targets < 1 or num_targets > MAX_TRIALTARGS:
             raise DataFileError(f"Invalid number of trial targets in segment ({num_targets})")
@@ -3225,6 +3243,32 @@ class Trial:
         def num_targets(self) -> int:
             """ The number of targets participating in the trial. """
             return len(self.tgt_on)
+
+    def __str__(self) -> str:
+        """
+        Returns a multi-line string summarizing this trial's definition, including target list, perturbations list,
+        global target transform, and the segment table. This is NOT a compact representation of the trial object, and
+        is really intended only for diagnostic use.
+        """
+        str_buf = StringIO()
+        str_buf.write(f"Path name = {self.path_name}\n")
+        str_buf.write(f"Global xfm = {str(self.global_transform)}\n")
+        str_buf.write(f"Participating targets:\n")
+        for i, t in enumerate(self.targets):
+            str_buf.write(f"  {i}: {str(t)}\n")
+        if self.num_perturbations > 0:
+            str_buf.write(f"Trial perturbations:\n:")
+            for i, p in enumerate(self.perturbations):
+                str_buf.write(f"   {i}: {str(p)}")
+        if self.num_tagged_sections > 0:
+            str_buf.write(f"Tagged sections:\n:")
+            for i, sect in enumerate(self.tagged_sections):
+                str_buf.write(f"   {i}: {str(sect)}")
+        str_buf.write(f"Segment Table:\n")
+        for i, seg in enumerate(self.segments):
+            str_buf.write(f"Seg {i}:\n{str(seg)}")
+        str_buf.write("\n")
+        return str_buf.getvalue()
 
     @staticmethod
     def prepare_trial(codes: List[TrialCode], header: DataFileHeader, targets: List[Target],
@@ -3958,6 +4002,14 @@ class Protocol:
         extracting protocols from the Maestro trials recorded during a single experiment session.
         """
 
+    def __str__(self) -> str:
+       str_buf = StringIO()
+       str_buf.write(f"Protocol: {self.trial.path_name}\n")
+       if len(self.random_variables) > 0:
+           str_buf.write(f"Random Vars: {','.join(str(rv) for rv in self.random_variables)}\n")
+       str_buf.write(f"Trial definition:\n{str(self._trial)}\n")
+       return str_buf.getvalue()
+
     @property
     def trial(self) -> Trial:
         """ The underlying trial definition for this trial protocol. """
@@ -4359,31 +4411,27 @@ class Protocol:
         return t_start
 
     @staticmethod
-    def extract_protocols_from_session_data(archive: zipfile.ZipFile, proto_set: Set[str]) -> \
-            Tuple[List[Protocol], Dict[str, int]]:
+    def extract_protocols_from_session_data(
+            archive: zipfile.ZipFile, proto_set: Set[str]) -> Tuple[List[Protocol], Dict[str, int]]:
         """
         Examine all Maestro data files contained in the ZIP archive specified and return the list of trial protocols
         culled from those files. This is an important task when committing an experiment session's worth of data to the
         lab database.
 
-        A protocol is automatically validated and its definition "frozen" under two scenarios:
-            - A minimum of 3 reps of that protocol were processed.
-            - 2 reps of that protocol were processed, AND it matches an already existing protocol stored in the lab
-            database.
-        Otherwise, the protocol is marked as a "candidate" and must be validated manually by the user during the
-        'review' phase of the session commit workflow.
+        A protocol is automatically validated and its definition "frozen" under two scenarios: (1) A minimum of 3 reps
+        of that protocol were processed. (2) Two reps of that protocol were processed, AND it matches an already
+        existing protocol stored in the lab database. Otherwise, the protocol is marked as a "candidate" and must be
+        validated manually by the user during the 'review' phase of the session commit workflow.
 
-        Args:
-            archive: An open ZIP archive containing the Maestro data files collected during an experiment session. Must
-                be open for reading and is NOT closed on return.
-            proto_set: This set contains the MD5 hash digests of all confirmed trial protocols currently stored in the
-                lab database.
-        Returns:
-            A 2-tuple: a list of all trial protocols culled from the session data, and a dictionary that maps the
+        :param archive: An open ZIP archive containing the Maestro data files collected during an experiment session.
+            Must be open for reading and is NOT closed on return.
+        :param proto_set: This set contains the MD5 hash digests of all confirmed trial protocols currently stored in
+            the lab database.
+        :return: A 2-tuple: a list of all trial protocols culled from the session data, and a dictionary that maps the
                 filename of each trial data file to the list index identifying the trial protocol presented when that
                 file was recorded.
-        Raises:
-            DataFileError: If a problem occurs while reading the ZIP archive and processing the data files therein.
+        :raise
+        :raises DataFileError: If a problem occurs while reading the ZIP archive and processing the data files therein.
         """
         try:
             archive_list = archive.infolist()
@@ -4463,6 +4511,53 @@ class Protocol:
         digester = hashlib.md5()
         digester.update(pickle.dumps(hash_attrs))
         return digester.hexdigest()
+
+    @staticmethod
+    def find_first_diff(p1: Protocol, p2: Protocol) -> str:
+        """
+        A diagnostic method to check for a difference between two trial protocol objects -- but only comparing those
+        protocol parameters that are included in the computation of a protocol's md5 hash digeset.
+
+        Args:
+            p1: A trial protocol.
+            p2: Another trial protocol.
+        Returns:
+            A string describing the first difference found between the two trial protocol objects -- comparing
+            only those parameters that contribute to a protocol's md5 hash digest. Returns 'None' if no difference was
+            found.
+        """
+        hash_attrs_dict = dict()
+        for i in range(2):
+            proto = p1 if i == 0 else p2
+
+            hash_attrs = [proto.trial.path_name, proto.trial.record_seg, hash(proto.trial.global_transform),
+                          [hash(tgt) for tgt in proto.trial.targets],
+                          [hash(pert) for pert in proto.trial.perturbations],
+                          [hash(section) for section in proto.trial.tagged_sections]]
+            rvs: Tuple[SegParam] = proto.random_variables
+            for seg_idx, seg in enumerate(proto.trial.segments):
+                seg_params = list()
+                num_targets = seg.num_targets
+                for param_type in SegParamType:
+                    if param_type.is_target_trajectory_parameter():
+                        for tgt_idx in range(num_targets):
+                            if not (SegParam(param_type, seg_idx, tgt_idx) in rvs):
+                                seg_params.append(seg.value_of(param_type, tgt_idx))
+                    elif not ((param_type in [SegParamType.FIXACC_H, SegParamType.FIXACC_V, SegParamType.GRACE_PER]) or
+                              (SegParam(param_type, seg_idx, -1) in rvs)):
+                        seg_params.append(seg.value_of(param_type, -1))
+                hash_attrs.append(seg_params)
+
+            hash_attrs_dict[i] = hash_attrs
+
+        if len(hash_attrs_dict[0]) != len(hash_attrs_dict[1]):
+            return "Different number of attributes in hash digest"
+        else:
+            for i, attr in enumerate(hash_attrs_dict[0]):
+                if not (attr == hash_attrs_dict[1][i]):
+                    return f"For {i}-th attribute in hash: {attr} != {hash_attrs_dict[1][i]}"
+
+        return "None"
 
     SERIAL_VERSION: int = 1
     """ The version number for serializing the protocol as a byte sequence. """
