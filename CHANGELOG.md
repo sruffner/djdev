@@ -14,7 +14,9 @@ when preparing an experiment session archive.
 - For each API endpoint, wrapped implementation in try-except clause to catch unexpected errors so that, hopefully,
 the server returns a properly formatted response that the `sglportalapi` client can decode. Also, a stack trace for the
 unexpected exception is written to the application message log for debugging purposes.
-- Updated `API_VERSION` for `sglportalapi` package to 5 so that users must download the new release (0.7.0).
+- Updated `API_VERSION` for `sglportalapi` package to 5 so that users must download the new release (0.7.0). The
+`tests.py` module in that package provides some useful tools for checking a session archive prior to attempting 
+commit.
 
 ## v0.5.2 (11/7/2023)
 - Updated `API_VERSION` for `sglportalapi` package to 4 so that users must download the new release (0.6.0). This 

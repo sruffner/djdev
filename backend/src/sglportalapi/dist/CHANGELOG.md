@@ -11,6 +11,7 @@ that file must now have the name `timestamps.csv`.
 - Updated `sglportalapi.PortalAccessor.commit_start()` to perform a sanity check on the archive before attempting to
 start a commit and uploading the archive file to the portal repo. This should catch typical user errors that may occur
 when preparing an experiment session archive. 
+- The `tests.py` module provides some useful tools for checking a session archive prior to attempting a commit.
 - Incremented API_VERSION to 5. **If you have already installed the `sglportalapi` package, you will need to upgrade
 to this release.**
 

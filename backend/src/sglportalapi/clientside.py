@@ -27,6 +27,7 @@ The server-side implementation of the endpoints is found in the companion module
 
 Author: saruffner
 """
+import re
 import sys
 import time
 import zipfile
@@ -39,7 +40,7 @@ from requests import RequestException
 
 from sglportalapi.data_containers import SessionInfo, NeuronInfo, TrialRep, Route, APISerializeError, MetadataTable, \
     RequestedData
-from sglportalapi.maestro import Protocol
+from sglportalapi.maestro import Protocol, DataFileHeader
 
 _REQ_TIMEOUT_SECONDS: float = 20
 """ Any request to a portal API endpoint will timeout after this many seconds. """
@@ -52,11 +53,12 @@ def check_session_archive(zip_path: Union[str, Path]) -> str:
     that fails to satisfy these requirements.
     - Must not contain any directories.
     - Can contain at most ONE pickle file, in which information about recorded neural units is stored.
-    - The archive must contain valid Maestro trial data files with version >= 19. If the file version < 21, the
-    archive must contain the file 'setnames.csv' containing the trial set name (and, optionally, subset name) for every
-    trial data file in the archive. To check these requirements, the method processes all Maestro data files (and the
-    setnames.csv' file if necessary) to extract each distinct trial protocol presented in the session. This takes a
-    few seconds at most.
+    - All Maestro trial data files in the archive must have the same version and the same recording date (stored in the
+    file header). The minimum supported file version is 19.
+    - The Maestro data file version < 21, the archive must contain the file 'setnames.csv' containing the trial set name
+    (and, optionally, subset name) for every trial data file in the archive. To check this requirement, the method
+    actually processes all Maestro data files (and the setnames.csv' file if necessary) to extract each distinct trial
+    protocol presented during the session. This takes a few seconds at most.
     - If the archive has neural unit data, it must contain at least one Omniplex PL2 file OR the file 'timestamps.csv'.
     In lieu of the PL2 data, the latter file provides the elapsed start time (in the same timeline as the unit spike
     trains) for each trial recorded during the session. The file's contents are not checked.
@@ -69,11 +71,27 @@ def check_session_archive(zip_path: Union[str, Path]) -> str:
     try:
         with zipfile.ZipFile(zip_path, 'r') as archive:
             archive_list: List[zipfile.ZipInfo] = archive.infolist()
-
+            data_file_name_pattern = re.compile("[.]\\d\\d\\d\\d$")
             got_pl2, got_pickle, got_ts_csv = False, False, False
+            session_date: Optional[date] = None
+            file_version: Optional[int] = None
             for info in archive_list:
                 if info.is_dir() or (info.filename.find('/') > -1):
                     raise Exception("A session archive must be flat list of files with no directory structure.")
+                elif data_file_name_pattern.search(info.filename) is not None:
+                    header = DataFileHeader(archive.read(info))
+                    if header.version < 19:
+                        raise Exception(f"Maestro file {info.filename} has unsupported file version {header.version}")
+                    elif file_version is None:
+                        file_version = header.version
+                    elif file_version != header.version:
+                        raise Exception(f"All Maestro files in session must have same file version: "
+                                        f"{info.filename} v={header.version}, not {file_version}")
+                    if session_date is None:
+                        session_date = header.date_recorded
+                    elif session_date != header.date_recorded:
+                        raise Exception(f"All Maestro files in session must be recorded on the same date: "
+                                        f"{info.filename} recorded on {header.date_recorded}, not {session_date}")
                 elif info.filename == 'timestamps.csv':
                     got_ts_csv = True
                 elif ((len(info.filename) > 7) and (info.filename[-7:].lower() == '.pickle')) or \
@@ -85,6 +103,8 @@ def check_session_archive(zip_path: Union[str, Path]) -> str:
                     got_pl2 = True
             if got_pickle and not (got_pl2 or got_ts_csv):
                 raise Exception("A session rchive with neural unit data must contain a PL2 file or timestamps.csv")
+            if session_date is None:
+                raise Exception("No Maestro data files found in session archive")
 
             # extracting trial protocols doesn't take too long and verifies a lot!
             _ , _ = Protocol.extract_protocols_from_session_data(archive, set())
