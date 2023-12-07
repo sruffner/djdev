@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.7.0 (TBD)
+- Changes to support committing experiment sessions with pre-version 21 _Maestro_ data files. Trial set and subset
+names were added to the data file header in version 21, but these form the trial "pathname", which plays a role in 
+distinguishing trial protocols (some users have tended to reuse trial names despite changing the trial definition)
+and in how trial data is explored in the portal. Min supported data file version is now 19 (Maestro 3.0.0)
+- Session archives that include pre-V21 Maestro files MUST include a CSV file called `setnames.csv`.
+- For session archives that specify the elapsed start time for each trial (in lieu of a PL2 file) in a CSV file,
+that file must now have the name `timestamps.csv`.
+- Updated `sglportalapi.PortalAccessor.commit_start()` to perform a sanity check on the archive before attempting to
+start a commit and uploading the archive file to the portal repo. This should catch typical user errors that may occur
+when preparing an experiment session archive. 
+- Incremented API_VERSION to 5. **If you have already installed the `sglportalapi` package, you will need to upgrade
+to this release.**
+
 ## v0.6.0 (11/06/2023)
 - Bug fix in `PL2._get_channel_offset()`. Added `PL2.load_analog_channel_block_faster()`, which is roughly 100x faster 
 than `load_analog_channel_block()`.

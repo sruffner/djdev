@@ -128,10 +128,14 @@ keys. Each key holds a list of length `N`, where `N` is the number of identified
    and the waveform samples should be microvolts. Again, this is automatically computed by the portal if the PL2 file
    is present.
 3. The Omniplex PL2 file(s) in which neural unit activity was recorded, if available. If not, you **_must_** instead 
-supply a CSV file containing the start times for every Maestro trial file in the archive. Each line in this CSV has the
-form “trial_file_name.XXXX, timestamp_in_ms”. In this scenario, a trial’s “stop time” is simply the start time in the 
-CSV plus the trial duration. Obviously, for behavior-only experiments, neither the PL2 file nor the CSV file are 
-required.
+supply the file `timestamps.csv` containing the start times for every Maestro trial file in the archive. Each line in 
+this CSV file has the form `trial_file_name.NNNN,timestamp_in_ms`. In this scenario, a trial’s “stop time” is simply the 
+start time in the CSV plus the trial duration. Obviously, for behavior-only experiments, neither the PL2 file nor the
+CSV file are required.
+4. For experiment sessions containing pre-V21 Maestro data files, the archive must also contain the file `setnames.csv`
+containing the trial set and subset corresponding to the trial recorded in each Maestro data file in the archive. Each
+line in this CSV file has the form `trial_file_name.NNNN,set_name,subset_name` or `trial_file_name.NNNN,set_name` if the
+trial was not part of a trial subset. 
 
 **_DO NOT ZIP A DIRECTORY CONTAINING THESE FILES_**. The archive must not contain any directories (watch out for nasty
 hidden directories, particularly __MACOSX if you're a Mac user), or the portal will gag on it.

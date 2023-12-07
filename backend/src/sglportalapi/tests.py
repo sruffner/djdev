@@ -5,6 +5,7 @@ import zipfile
 from pathlib import Path
 from typing import List, Dict
 
+from sglportalapi.clientside import check_session_archive
 from sglportalapi.maestro import DataFile, Target, Protocol
 
 
@@ -32,15 +33,16 @@ def test_extract_protocols(zip_file_path: str):
         protocols, file_to_proto = Protocol.extract_protocols_from_session_data(archive, set())
         print(f"Found {len(protocols)} distinct trial protocols:")
         for i, p in enumerate(protocols):
-            print(f"{i:02}: {p.trial.path_name:>40}: num_reps={p.num_reps}, is_candidate={p.is_candidate}")
-            raw = p.to_bytes()
-            p2 = p.from_bytes(raw)
-            digest_before = Protocol.generate_md5_hash_digest_for_protocol(p)
-            digest_after = Protocol.generate_md5_hash_digest_for_protocol(p2)
-            if digest_before == digest_after:
-                print(f"  ==> PASSED serialize/deserialize cycle, digest={digest_after}")
-            else:
-                print(f"  ==> FAILED serialize/deserialize cycle: {digest_before} != {digest_after}")
-                print(f"  ====> First diff = {Protocol.find_first_diff(p, p2)}")
+            print(f"{i:02}: {p.trial.path_name:>40}: num_reps={p.num_reps}, num_tgts={p.trial.num_targets}, "
+                  f"num_segs={p.trial.num_segments}")
 
     print("Done.", flush=True)
+
+
+if __name__ == '__main__':
+    str_zip = input('Enter full path to session archive >> ')
+    err_msg = check_session_archive(str_zip)
+    if len(err_msg) == 0:
+        print("Archive passed sanity checks.")
+    else:
+        print(err_msg)

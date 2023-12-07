@@ -34,6 +34,7 @@ allow the Python client to check the progress of any pending commit, and cancel/
 
 Author: saruffner
 """
+import traceback
 from datetime import date
 from typing import Tuple, Optional, List, Dict, Any, Union
 
@@ -68,19 +69,24 @@ def api_access() -> Tuple[Response, int]:
             'expires_in' = <token lifetime in seconds>. If user cannot be authenticated, the status code is 400 (bad
             request) and the dictionary includes the field 'error' = <error description string>.
     """
-    username = request.json.get('username', None)
-    password = request.json.get('password', None)
-    if (username is None) or (password is None):
-        status_code, out = 400, dict(error="Invalid or missing request body")
-    else:
-        err_msg = authenticate_portal_user(username, password, api_access=True)
-        if err_msg is None:
-            status_code, out = 200, dict(token=create_access_token(identity=dict(username=username)),
-                                         expires_in=int(get_config().jwt_access_token_lifetime.total_seconds()))
-            log_api_request(route=Route.AUTHENTICATE, username=username)
+    try:
+        username = request.json.get('username', None)
+        password = request.json.get('password', None)
+        if (username is None) or (password is None):
+            status_code, out = 400, dict(error="Invalid or missing request body")
         else:
-            status_code, out = 400, dict(error=f"Access denied - {err_msg}")
-            get_application_logger().info(f"API access denied for username: {err_msg}")
+            err_msg = authenticate_portal_user(username, password, api_access=True)
+            if err_msg is None:
+                status_code, out = 200, dict(token=create_access_token(identity=dict(username=username)),
+                                             expires_in=int(get_config().jwt_access_token_lifetime.total_seconds()))
+                log_api_request(route=Route.AUTHENTICATE, username=username)
+            else:
+                status_code, out = 400, dict(error=f"Access denied - {err_msg}")
+                get_application_logger().info(f"API access denied for username: {err_msg}")
+    except Exception as e:
+        get_application_logger().error(f"Unexpected error: {traceback.format_exc()}")
+        status_code, out = 400, dict(error=f"Unexpected error on server: {str(e)}")
+
     return Response(Route.serialize_api_response(Route.AUTHENTICATE, **out)), status_code
 
 
@@ -105,13 +111,18 @@ def metadata_table() -> Tuple[Response, int]:
             prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
             and the response body is a serialized dictionary including the field 'error' (error description string).
     """
-    table_name = request.json.get('table')
-    status_code, err_msg, metatable = _retrieve_metadata_table_entries(table_name)
-    out = dict(metatable=metatable) if status_code == 200 else dict(error=err_msg)
-    if status_code == 200:
-        log_api_request(route=Route.METADATA_TABLE, username=get_jwt_identity()['username'], table=table_name)
-    else:
-        get_application_logger().info(f"Failed request @ {Route.METADATA_TABLE}: {err_msg}")
+    try:
+        table_name = request.json.get('table')
+        status_code, err_msg, metatable = _retrieve_metadata_table_entries(table_name)
+        out = dict(metatable=metatable) if status_code == 200 else dict(error=err_msg)
+        if status_code == 200:
+            log_api_request(route=Route.METADATA_TABLE, username=get_jwt_identity()['username'], table=table_name)
+        else:
+            get_application_logger().info(f"Failed request @ {Route.METADATA_TABLE}: {err_msg}")
+    except Exception as e:
+        get_application_logger().error(f"Unexpected error: {traceback.format_exc()}")
+        status_code, out = 400, dict(error=f"Unexpected error on server: {str(e)}")
+
     return Response(Route.serialize_api_response(Route.METADATA_TABLE, **out)), status_code
 
 
@@ -173,16 +184,21 @@ def sessions() -> Tuple[Response, int]:
             prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
             and the response body is a serialized dictionary including the field 'error' = <error description string>.
     """
-    experimenter = request.json.get('experimenter')
-    subj_id = request.json.get('subj_id')
-    when = request.json.get('when')
-    status_code, err_msg, session_list = _retrieve_session_info(experimenter, subj_id, when)
-    out = dict(sessions=session_list) if status_code == 200 else dict(error=err_msg)
-    if status_code == 200:
-        log_api_request(route=Route.SESSIONINFO, username=get_jwt_identity()['username'],
-                        experimenter=experimenter, subj_id=subj_id, when=when)
-    else:
-        get_application_logger().info(f"Failed request @ {Route.SESSIONINFO}: {err_msg}")
+    try:
+        experimenter = request.json.get('experimenter')
+        subj_id = request.json.get('subj_id')
+        when = request.json.get('when')
+        status_code, err_msg, session_list = _retrieve_session_info(experimenter, subj_id, when)
+        out = dict(sessions=session_list) if status_code == 200 else dict(error=err_msg)
+        if status_code == 200:
+            log_api_request(route=Route.SESSIONINFO, username=get_jwt_identity()['username'],
+                            experimenter=experimenter, subj_id=subj_id, when=when)
+        else:
+            get_application_logger().info(f"Failed request @ {Route.SESSIONINFO}: {err_msg}")
+    except Exception as e:
+        get_application_logger().error(f"Unexpected error: {traceback.format_exc()}")
+        status_code, out = 400, dict(error=f"Unexpected error on server: {str(e)}")
+
     return Response(Route.serialize_api_response(Route.SESSIONINFO, **out)), status_code
 
 
@@ -273,17 +289,22 @@ def session_neurons() -> Tuple[Response, int]:
             prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
             and the response body is a serialized dictionary including the field 'error' = <error description string>.
     """
-    session_key = request.json.get('session_key')
-    min_spikes = request.json.get('min_spikes')
-    min_snr = request.json.get('min_snr')
+    try:
+        session_key = request.json.get('session_key')
+        min_spikes = request.json.get('min_spikes')
+        min_snr = request.json.get('min_snr')
 
-    status_code, err_msg, neuron_list = _retrieve_session_neurons(session_key, min_spikes, min_snr)
-    out = dict(neurons=neuron_list) if status_code == 200 else dict(error=err_msg)
-    if status_code == 200:
-        log_api_request(route=Route.SESSION_NEURONS, username=get_jwt_identity()['username'],
-                        session_key=session_key, min_spikes=min_spikes, min_snr=min_snr)
-    else:
-        get_application_logger().info(f"Failed request @ {Route.SESSION_NEURONS}: {err_msg}")
+        status_code, err_msg, neuron_list = _retrieve_session_neurons(session_key, min_spikes, min_snr)
+        out = dict(neurons=neuron_list) if status_code == 200 else dict(error=err_msg)
+        if status_code == 200:
+            log_api_request(route=Route.SESSION_NEURONS, username=get_jwt_identity()['username'],
+                            session_key=session_key, min_spikes=min_spikes, min_snr=min_snr)
+        else:
+            get_application_logger().info(f"Failed request @ {Route.SESSION_NEURONS}: {err_msg}")
+    except Exception as e:
+        get_application_logger().error(f"Unexpected error: {traceback.format_exc()}")
+        status_code, out = 400, dict(error=f"Unexpected error on server: {str(e)}")
+
     return Response(Route.serialize_api_response(Route.SESSION_NEURONS, **out)), status_code
 
 
@@ -349,14 +370,19 @@ def session_protocols() -> Tuple[Response, int]:
             prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
             and the response body is a serialized dictionary including the field 'error' = <error description string>.
     """
-    session_key = request.json.get('session_key')
-    status_code, err_msg, proto_list = _retrieve_session_protocols(session_key)
-    out = dict(protocols=proto_list) if status_code == 200 else dict(error=err_msg)
-    if status_code == 200:
-        log_api_request(route=Route.SESSION_PROTOCOLS, username=get_jwt_identity()['username'],
-                        session_key=session_key)
-    else:
-        get_application_logger().info(f"Failed request @ {Route.SESSION_PROTOCOLS}: {err_msg}")
+    try:
+        session_key = request.json.get('session_key')
+        status_code, err_msg, proto_list = _retrieve_session_protocols(session_key)
+        out = dict(protocols=proto_list) if status_code == 200 else dict(error=err_msg)
+        if status_code == 200:
+            log_api_request(route=Route.SESSION_PROTOCOLS, username=get_jwt_identity()['username'],
+                            session_key=session_key)
+        else:
+            get_application_logger().info(f"Failed request @ {Route.SESSION_PROTOCOLS}: {err_msg}")
+    except Exception as e:
+        get_application_logger().error(f"Unexpected error: {traceback.format_exc()}")
+        status_code, out = 400, dict(error=f"Unexpected error on server: {str(e)}")
+
     return Response(Route.serialize_api_response(Route.SESSION_PROTOCOLS, **out)), status_code
 
 
@@ -406,26 +432,31 @@ def session_trial() -> Tuple[Response, int]:
             prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
             and the response body is a serialized dictionary including the field 'error' = <error description string>.
     """
-    session_key = request.json.get('session_key')
-    trial_index = request.json.get('trial_index')
-    unit_ids = request.json.get('unit_ids')
-    what = request.json.get('what')
-    what = RequestedData.ALL if not what else RequestedData(what & RequestedData.ALL)
+    try:
+        session_key = request.json.get('session_key')
+        trial_index = request.json.get('trial_index')
+        unit_ids = request.json.get('unit_ids')
+        what = request.json.get('what')
+        what = RequestedData.ALL if not what else RequestedData(what & RequestedData.ALL)
 
-    status_code, err_msg, trial_rep = 200, '', None
-    if len(unit_ids) > 5:
-        status_code, err_msg = 400, "Too many neural units requested (max is 5)"
-    else:
-        trial_rep = retrieve_session_trial_rep(session_key, trial_index, unit_ids)
-        if isinstance(trial_rep, str):
-            status_code, err_msg = 501, trial_rep
-    out = dict(trial=trial_rep) if status_code == 200 else dict(error=err_msg)
+        status_code, err_msg, trial_rep = 200, '', None
+        if len(unit_ids) > 5:
+            status_code, err_msg = 400, "Too many neural units requested (max is 5)"
+        else:
+            trial_rep = retrieve_session_trial_rep(session_key, trial_index, unit_ids)
+            if isinstance(trial_rep, str):
+                status_code, err_msg = 501, trial_rep
+        out = dict(trial=trial_rep) if status_code == 200 else dict(error=err_msg)
 
-    if status_code == 200:
-        log_api_request(route=Route.SESSION_TRIAL, username=get_jwt_identity()['username'],
-                        session_key=session_key, trial_index=trial_index, unit_ids=unit_ids, what=what)
-    else:
-        get_application_logger().info(f"Failed request @ {Route.SESSION_TRIAL}: {err_msg}")
+        if status_code == 200:
+            log_api_request(route=Route.SESSION_TRIAL, username=get_jwt_identity()['username'],
+                            session_key=session_key, trial_index=trial_index, unit_ids=unit_ids, what=what)
+        else:
+            get_application_logger().info(f"Failed request @ {Route.SESSION_TRIAL}: {err_msg}")
+    except Exception as e:
+        get_application_logger().error(f"Unexpected error: {traceback.format_exc()}")
+        status_code, out = 400, dict(error=f"Unexpected error on server: {str(e)}")
+
     return Response(Route.serialize_api_response(Route.SESSION_TRIAL, **out)), status_code
 
 
@@ -450,28 +481,33 @@ def session_block() -> Tuple[Response, int]:
             prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
             and the response body is a serialized dictionary including the field 'error' = <error description string>.
     """
-    session_key = request.json.get('session_key')
-    start = request.json.get('start')
-    end = request.json.get('end')
-    unit_ids = request.json.get('unit_ids')
-    what = request.json.get('what')
-    what = RequestedData.ALL if not what else RequestedData(what & RequestedData.ALL)
+    try:
+        session_key = request.json.get('session_key')
+        start = request.json.get('start')
+        end = request.json.get('end')
+        unit_ids = request.json.get('unit_ids')
+        what = request.json.get('what')
+        what = RequestedData.ALL if not what else RequestedData(what & RequestedData.ALL)
 
-    status_code, err_msg, trial_list = 200, '', None
-    if len(unit_ids) > 5:
-        status_code, err_msg = 400, "Too many neural units requested (max is 5)"
-    else:
-        trial_list = retrieve_session_trial_reps(
-            session_key, start=start, end=end, completed=False, unit_ids=unit_ids, what=what)
-        if isinstance(trial_list, str):
-            status_code, err_msg = 501, trial_list
-    out = dict(trials=trial_list) if status_code == 200 else dict(error=err_msg)
+        status_code, err_msg, trial_list = 200, '', None
+        if len(unit_ids) > 5:
+            status_code, err_msg = 400, "Too many neural units requested (max is 5)"
+        else:
+            trial_list = retrieve_session_trial_reps(
+                session_key, start=start, end=end, completed=False, unit_ids=unit_ids, what=what)
+            if isinstance(trial_list, str):
+                status_code, err_msg = 501, trial_list
+        out = dict(trials=trial_list) if status_code == 200 else dict(error=err_msg)
 
-    if status_code == 200:
-        log_api_request(route=Route.SESSION_BLOCK, username=get_jwt_identity()['username'],
-                        session_key=session_key, start=start, end=end, unit_ids=unit_ids, what=what)
-    else:
-        get_application_logger().info(f"Failed request @ {Route.SESSION_BLOCK}: {err_msg}")
+        if status_code == 200:
+            log_api_request(route=Route.SESSION_BLOCK, username=get_jwt_identity()['username'],
+                            session_key=session_key, start=start, end=end, unit_ids=unit_ids, what=what)
+        else:
+            get_application_logger().info(f"Failed request @ {Route.SESSION_BLOCK}: {err_msg}")
+    except Exception as e:
+        get_application_logger().error(f"Unexpected error: {traceback.format_exc()}")
+        status_code, out = 400, dict(error=f"Unexpected error on server: {str(e)}")
+
     return Response(Route.serialize_api_response(Route.SESSION_BLOCK, **out)), status_code
 
 
@@ -496,29 +532,34 @@ def session_protocol_reps() -> Tuple[Response, int]:
             prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
             and the response body is a serialized dictionary including the field 'error' = <error description string>.
     """
-    session_key = request.json.get('session_key')
-    proto_hash = request.json.get('proto_hash')
-    completed = request.json.get('completed')
-    unit_ids = request.json.get('unit_ids')
-    what = request.json.get('what')
-    what = RequestedData.ALL if not what else RequestedData(what & RequestedData.ALL)
+    try:
+        session_key = request.json.get('session_key')
+        proto_hash = request.json.get('proto_hash')
+        completed = request.json.get('completed')
+        unit_ids = request.json.get('unit_ids')
+        what = request.json.get('what')
+        what = RequestedData.ALL if not what else RequestedData(what & RequestedData.ALL)
 
-    status_code, err_msg, trial_list = 200, '', None
-    if len(unit_ids) > 5:
-        status_code, err_msg = 400, "Too many neural units requested (max is 5)"
-    else:
-        trial_list = retrieve_session_trial_reps(session_key, proto_hash=proto_hash, completed=completed,
-                                                 unit_ids=unit_ids, what=what)
-        if isinstance(trial_list, str):
-            status_code, err_msg = 501, trial_list
-    out = dict(trials=trial_list) if status_code == 200 else dict(error=err_msg)
+        status_code, err_msg, trial_list = 200, '', None
+        if len(unit_ids) > 5:
+            status_code, err_msg = 400, "Too many neural units requested (max is 5)"
+        else:
+            trial_list = retrieve_session_trial_reps(session_key, proto_hash=proto_hash, completed=completed,
+                                                     unit_ids=unit_ids, what=what)
+            if isinstance(trial_list, str):
+                status_code, err_msg = 501, trial_list
+        out = dict(trials=trial_list) if status_code == 200 else dict(error=err_msg)
 
-    if status_code == 200:
-        log_api_request(route=Route.SESSION_PROTOCOL_REPS, username=get_jwt_identity()['username'],
-                        session_key=session_key, proto_hash=proto_hash, completed=completed, unit_ids=unit_ids,
-                        what=what)
-    else:
-        get_application_logger().info(f"Failed request @ {Route.SESSION_PROTOCOL_REPS}: {err_msg}")
+        if status_code == 200:
+            log_api_request(route=Route.SESSION_PROTOCOL_REPS, username=get_jwt_identity()['username'],
+                            session_key=session_key, proto_hash=proto_hash, completed=completed, unit_ids=unit_ids,
+                            what=what)
+        else:
+            get_application_logger().info(f"Failed request @ {Route.SESSION_PROTOCOL_REPS}: {err_msg}")
+    except Exception as e:
+        get_application_logger().error(f"Unexpected error: {traceback.format_exc()}")
+        status_code, out = 400, dict(error=f"Unexpected error on server: {str(e)}")
+
     return Response(Route.serialize_api_response(Route.SESSION_PROTOCOL_REPS, **out)), status_code
 
 
@@ -550,24 +591,29 @@ def neurons() -> Tuple[Response, int]:
             prepared as described above. Otherwise, the status code is 400 (bad request) or 501 (internal server error)
             and the response body is a serialized dictionary including the field 'error' = <error description string>.
     """
-    min_spikes = request.json.get('min_spikes')
-    min_snr = request.json.get('min_snr')
-    min_rate = request.json.get('min_rate')
-    neuron_type = request.json.get('neuron_type')
-    subj_id = request.json.get('subj_id')
-    study_title = request.json.get('study_title')
-    proto_hash = request.json.get('proto_hash')
-    min_complete = request.json.get('min_complete')
+    try:
+        min_spikes = request.json.get('min_spikes')
+        min_snr = request.json.get('min_snr')
+        min_rate = request.json.get('min_rate')
+        neuron_type = request.json.get('neuron_type')
+        subj_id = request.json.get('subj_id')
+        study_title = request.json.get('study_title')
+        proto_hash = request.json.get('proto_hash')
+        min_complete = request.json.get('min_complete')
 
-    status_code, err_msg, neuron_list = _retrieve_neurons(min_spikes, min_snr, min_rate, neuron_type, subj_id,
-                                                          study_title, proto_hash, min_complete)
-    out = dict(neurons=neuron_list) if status_code == 200 else dict(error=err_msg)
-    if status_code == 200:
-        log_api_request(route=Route.NEURONS, username=get_jwt_identity()['username'], min_spikes=min_spikes,
-                        min_snr=min_snr, min_rate=min_rate, neuron_type=neuron_type, subj_id=subj_id,
-                        study_title=study_title, proto_hash=proto_hash, min_complete=min_complete)
-    else:
-        get_application_logger().info(f"Failed request @ {Route.NEURONS}: {err_msg}")
+        status_code, err_msg, neuron_list = _retrieve_neurons(min_spikes, min_snr, min_rate, neuron_type, subj_id,
+                                                              study_title, proto_hash, min_complete)
+        out = dict(neurons=neuron_list) if status_code == 200 else dict(error=err_msg)
+        if status_code == 200:
+            log_api_request(route=Route.NEURONS, username=get_jwt_identity()['username'], min_spikes=min_spikes,
+                            min_snr=min_snr, min_rate=min_rate, neuron_type=neuron_type, subj_id=subj_id,
+                            study_title=study_title, proto_hash=proto_hash, min_complete=min_complete)
+        else:
+            get_application_logger().info(f"Failed request @ {Route.NEURONS}: {err_msg}")
+    except Exception as e:
+        get_application_logger().error(f"Unexpected error: {traceback.format_exc()}")
+        status_code, out = 400, dict(error=f"Unexpected error on server: {str(e)}")
+
     return Response(Route.serialize_api_response(Route.NEURONS, **out)), status_code
 
 
@@ -691,43 +737,48 @@ def commit() -> Tuple[Response, int]:
             error) and the response body is a serialized dictionary including the field 'error' = <error description
             string>.
     """
-    # fail if authenticated user lacks commit-level access
-    committer = get_jwt_identity()['username']
-    if not _can_commit_to_database(committer):
-        out = dict(error="You do not have commit access to database")
-        get_application_logger().info(f"Failed request @ {Route.COMMIT}: Access denied")
-        return Response(Route.serialize_api_response(Route.COMMIT, **out)), 400
+    try:
+        # fail if authenticated user lacks commit-level access
+        committer = get_jwt_identity()['username']
+        if not _can_commit_to_database(committer):
+            out = dict(error="You do not have commit access to database")
+            get_application_logger().info(f"Failed request @ {Route.COMMIT}: Access denied")
+            return Response(Route.serialize_api_response(Route.COMMIT, **out)), 400
 
-    action = request.json.get('action')
-    req_args = dict(action=action)
-    if action == 'start':
-        req_args.update([(k, request.json.get(k)) for k in ['session', 'unit_types', 'size']])
-        status_code, err_msg, out = _commit_start(committer=committer, session=req_args['session'],
-                                                  unit_types=req_args['unit_types'], size=req_args['size'])
-    elif action == 'upload_abort':
-        req_args['job_id'] = request.json.get('job_id')
-        status_code, err_msg, out = _commit_upload_abort(committer=committer, job_id=req_args['job_id'])
-    elif action == 'upload_done':
-        req_args.update([(k, request.json.get(k)) for k in ['job_id', 'parts']])
-        status_code, err_msg, out = \
-            _commit_upload_done(committer=committer, job_id=req_args['job_id'], parts=req_args['parts'])
-    elif action == 'status':
-        req_args['job_id'] = request.json.get('job_id')
-        status_code, err_msg, out = _commit_status(committer=committer, job_id=req_args['job_id'])
-    elif action == 'remove':
-        req_args['job_id'] = request.json.get('job_id')
-        status_code, err_msg, out = _commit_cancel_or_remove(committer=committer, job_id=req_args['job_id'])
-    else:
-        status_code, err_msg, out = 400, f"Unrecognized session commit job request: action={action}", {}
+        action = request.json.get('action')
+        req_args = dict(action=action)
+        if action == 'start':
+            req_args.update([(k, request.json.get(k)) for k in ['session', 'unit_types', 'size']])
+            status_code, err_msg, out = _commit_start(committer=committer, session=req_args['session'],
+                                                      unit_types=req_args['unit_types'], size=req_args['size'])
+        elif action == 'upload_abort':
+            req_args['job_id'] = request.json.get('job_id')
+            status_code, err_msg, out = _commit_upload_abort(committer=committer, job_id=req_args['job_id'])
+        elif action == 'upload_done':
+            req_args.update([(k, request.json.get(k)) for k in ['job_id', 'parts']])
+            status_code, err_msg, out = \
+                _commit_upload_done(committer=committer, job_id=req_args['job_id'], parts=req_args['parts'])
+        elif action == 'status':
+            req_args['job_id'] = request.json.get('job_id')
+            status_code, err_msg, out = _commit_status(committer=committer, job_id=req_args['job_id'])
+        elif action == 'remove':
+            req_args['job_id'] = request.json.get('job_id')
+            status_code, err_msg, out = _commit_cancel_or_remove(committer=committer, job_id=req_args['job_id'])
+        else:
+            status_code, err_msg, out = 400, f"Unrecognized session commit job request: action={action}", {}
 
-    # NOTE: No longer logging action='status' requests, as these could be sent VERY frequently if a user script on the
-    # clientside is set up to monitor the progress of a commit job.
-    if status_code == 200:
-        if action != 'status':
-            log_api_request(route=Route.COMMIT, username=committer, **req_args)
-    else:
-        out = dict(error=err_msg)
-        get_application_logger().info(f"Failed request @ {Route.COMMIT} (action={action}): {err_msg}")
+        # NOTE: No longer logging action='status' requests, as these could be sent VERY frequently if a user script on the
+        # clientside is set up to monitor the progress of a commit job.
+        if status_code == 200:
+            if action != 'status':
+                log_api_request(route=Route.COMMIT, username=committer, **req_args)
+        else:
+            out = dict(error=err_msg)
+            get_application_logger().info(f"Failed request @ {Route.COMMIT} (action={action}): {err_msg}")
+    except Exception as e:
+        get_application_logger().error(f"Unexpected error: {traceback.format_exc()}")
+        status_code, out = 400, dict(error=f"Unexpected error on server: {str(e)}")
+
     return Response(Route.serialize_api_response(Route.COMMIT, **out)), status_code
 
 

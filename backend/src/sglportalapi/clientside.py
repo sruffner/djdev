@@ -29,6 +29,7 @@ Author: saruffner
 """
 import sys
 import time
+import zipfile
 from datetime import date
 from pathlib import Path
 from typing import Optional, Union, List, Tuple
@@ -42,6 +43,54 @@ from sglportalapi.maestro import Protocol
 
 _REQ_TIMEOUT_SECONDS: float = 20
 """ Any request to a portal API endpoint will timeout after this many seconds. """
+
+
+def check_session_archive(zip_path: Union[str, Path]) -> str:
+    """
+    Helper method examines the contents of a session archive to verify it meets the following minimum requirements.
+    While no means an exhaustive check, it can save time by avoiding the time-consuming upload of a multi-GB archive
+    that fails to satisfy these requirements.
+    - Must not contain any directories.
+    - Can contain at most ONE pickle file, in which information about recorded neural units is stored.
+    - The archive must contain valid Maestro trial data files with version >= 19. If the file version < 21, the
+    archive must contain the file 'setnames.csv' containing the trial set name (and, optionally, subset name) for every
+    trial data file in the archive. To check these requirements, the method processes all Maestro data files (and the
+    setnames.csv' file if necessary) to extract each distinct trial protocol presented in the session. This takes a
+    few seconds at most.
+    - If the archive has neural unit data, it must contain at least one Omniplex PL2 file OR the file 'timestamps.csv'.
+    In lieu of the PL2 data, the latter file provides the elapsed start time (in the same timeline as the unit spike
+    trains) for each trial recorded during the session. The file's contents are not checked.
+
+    Args:
+        zip_path: The path to the session archive ZIP.
+    Returns:
+        An empty string if the specified archive passes all checks, else a brief description of the problem.
+    """
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as archive:
+            archive_list: List[zipfile.ZipInfo] = archive.infolist()
+
+            got_pl2, got_pickle, got_ts_csv = False, False, False
+            for info in archive_list:
+                if info.is_dir() or (info.filename.find('/') > -1):
+                    raise Exception("A session archive must be flat list of files with no directory structure.")
+                elif info.filename == 'timestamps.csv':
+                    got_ts_csv = True
+                elif ((len(info.filename) > 7) and (info.filename[-7:].lower() == '.pickle')) or \
+                        ((len(info.filename) > 4) and (info.filename[-4:].lower() == '.pkl')):
+                    if got_pickle:
+                        raise Exception("A session archive can contain only one neural units 'pickle' file.")
+                    got_pickle = True
+                elif (len(info.filename) > 3) and (info.filename[-3:].lower() == 'pl2'):
+                    got_pl2 = True
+            if got_pickle and not (got_pl2 or got_ts_csv):
+                raise Exception("A session rchive with neural unit data must contain a PL2 file or timestamps.csv")
+
+            # extracting trial protocols doesn't take too long and verifies a lot!
+            _ , _ = Protocol.extract_protocols_from_session_data(archive, set())
+    except Exception as e:
+        return f"Session archive failed sanity check: {str(e)}"
+    return ""
 
 
 class PortalAccessor:
@@ -471,6 +520,9 @@ class PortalAccessor:
         neuron type names, the experimenter's username, the subject ID, and so on. The operation will fail if any
         metadata are invalid, and the error message will indicate the first problem encountered.
 
+        The session archive supplied must meet certain requirements which are checked before starting the time-consuming
+        task of uploading the archive to the portal repository. See check_session_archive().
+
         If the operation succeeds, you can use the commit job ID returned to monitor the progress of the commit, and
         cancel/remove the job if desired. However, once the experiment is fully committed to the database, the commit
         job is considered "done" and cannot be "rolled back".
@@ -516,6 +568,10 @@ class PortalAccessor:
         """
         if not (isinstance(zip_path, Path) and zip_path.is_file()):
             return False, "Archive file missing or path not specified"
+        err_msg = check_session_archive(zip_path)
+        if len(err_msg) > 0:
+            return False, err_msg
+
         zip_size = zip_path.stat().st_size
 
         if (out := self.authenticate()) is not None:

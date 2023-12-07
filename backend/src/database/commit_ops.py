@@ -50,10 +50,10 @@ seconds since the Omniplex recording started) for each unit, as a Numpy array.
 cannot be deduced, nor can the SNR or spike template waveform be calculated for each unit. Therefore, additional info
 must be supplied:
     - All Maestro trial files recorded during the experiment.
-    - A single CSV file containing the elapsed start time in the electrophysiological recording timeline (same timeline
-in which all unit spike times are recorded) for each Maestro trial. Format: Each text line should read "trial_file, T"
-where "trial_file" is the Maestro trial file name as it appears in the session archive and T is the start time for that
-trial in milliseconds. Any text line not conforming to this format is ignored.
+    - A CSV file named 'timestamps.csv' containing the elapsed start time in the electrophysiological recording timeline
+(same timeline in which all unit spike times are recorded) for each Maestro trial. Format: Each text line should read
+"trial_file,T" where "trial_file" is the Maestro trial file name as it appears in the session archive and T is the start
+time for that trial in milliseconds. Any text line not conforming to this format is ignored.
     - A pickle file containing spike times, estimated SNR, and the spike template waveform for each neural unit. The
 file must contain a dictionary with the fields 'channel', 'spiketimes', 'snr', and 'template'. Each field is a list of
 length N, where N is the number of neural units. The first two fields are the same as described above. The 'snr' field
@@ -63,6 +63,14 @@ contain 0.01 * R samples, where R is the ephys recording sampling rate (40KHz fo
 metadata supplied when the session commit is initiated, and all samples should be in microvolts. The dictionary COULD
 also contain the 'filename' field holding the name of the original Omniplex PL2 source file even though that file is
 not part of the session archive.
+
+Trial set and subset names were added to the Maestro data file header in file version 21. The set and subset names are
+part of a trial protocol's "path name", which is important for distinguishing trial protocols and organizing trials in
+the portal GUI. In order to support committing experiment sessions with pre-V21 Maestro data files, the session archive
+must contain a CSV file named 'setnames.csv' containing the trial set and subset names for each trial data file in the
+archive. Each text line in the file should read "trial_file.NNNN,set_name,subset_name" or "trial_file.NNNN,set_name".
+Any text line not conforming to this format is ignored. If the file is missing an entry for any data file found in the
+archive, the commmit job will fail.
 
 The workflow for committing an experiment session has the following stages:
     0) Initialization. A committer (a registered user with "commit"-level access on the portal) can initiate a session
@@ -1237,6 +1245,14 @@ def cancel_or_remove_commit_job(job_id: str) -> Tuple[bool, str, Optional[Commit
         return False, "An error occurred while trying to cancel/remove commit job on server", None
 
 
+ARCHIVE_TIMESTAMPS_FILE: str = 'timestamps.csv'
+"""
+In the alternative archive format, the archive must contain a CSV file with this filename. The file lists the
+elapsed session recording time (same timeline as neural unit spikes) at which each trial started, indexed by the 
+trial data file name.
+"""
+
+
 def preprocess_commit_job(job_id: str) -> bool:
     """
     This method, intended to be called on a background process independent from the backend server, preprocesses the
@@ -1382,11 +1398,8 @@ def preprocess_commit_job(job_id: str) -> bool:
                         units_zip_info = info
                     else:
                         raise Exception("Found more than one neural units file in session data archive!")
-                elif (len(info.filename) > 4) and (info.filename[-4:].lower() == '.csv'):
-                    if csv_ts_info is None:
-                        csv_ts_info = info
-                    else:
-                        raise Exception("Found more than one trial timestamps CSV file in session data archive!")
+                elif info.filename == ARCHIVE_TIMESTAMPS_FILE:
+                    csv_ts_info = info
 
             if (units_zip_info is not None) and (len(pl2s_archived) == 0):
                 if csv_ts_info is not None:

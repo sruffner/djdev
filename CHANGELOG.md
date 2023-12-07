@@ -1,5 +1,21 @@
 # Lisberger Lab Data Portal - Changelog
 
+## v0.5.3 (TBD)
+- Added support for committing experiment sessions containing pre-V21 _Maestro_ data files, which lack the set name 
+(and, optionally, subset name) for the trial presented. For such a session, the archive MUST contain a CSV file
+named `setnames.csv` containing the trial set and subset names for each Maestro trial data file in the archive. Each
+line in the file must have the format `trial_filename.NNNN,set_name` or, if the trial is part of a trial subset,
+`trial_filename.NNNN,set_name,subset_name`.
+- If present, the CSV file containing the starting time in milliseconds for each Maestro trial saved during the session 
+(see v0.5.0) must now be named `timestamps.csv` to distinguish it from `setnames.csv`.
+- Updated `sglportalapi.PortalAccessor.commit_start()` to perform a sanity check on the archive before attempting to
+start a commit and uploading the archive file to the portal repo. This should catch typical user errors that may occur
+when preparing an experiment session archive. 
+- For each API endpoint, wrapped implementation in try-except clause to catch unexpected errors so that, hopefully,
+the server returns a properly formatted response that the `sglportalapi` client can decode. Also, a stack trace for the
+unexpected exception is written to the application message log for debugging purposes.
+- Updated `API_VERSION` for `sglportalapi` package to 5 so that users must download the new release (0.7.0).
+
 ## v0.5.2 (11/7/2023)
 - Updated `API_VERSION` for `sglportalapi` package to 4 so that users must download the new release (0.6.0). This 
 ensures they are using the latest version of the `PL2.py` module from that package.

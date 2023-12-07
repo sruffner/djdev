@@ -15,16 +15,16 @@ given experiment session, it is imperative to identify "similar" trials that are
 trial protocol, so that we can "average" behavioral and neuronal responses across those repetitions.
 
 Limitations:
- - Only supports Trial-mode data files with file version >= 21 (since Maestro 4.0.0, released in Nov 2018). Cannot
- process Continuous-mode data files! Note that trial set and subset names and the trial start timestamp (in ms elapsed
- since Maestro started) were not added to the data file header until V=21. The set and subset names are important in
- listing trial protocols in the portal UI -- and are particularly helpful when users reuse trial names for different
- protocols that reside in different trial sets/subsets. The timestamp can help determine trial presentation order when
- Omniplex timestamps cannot be used.
+ - Only supports Trial-mode data files with file version >= 19 (since Maestro 3.0.0, released in Sep 2012). Cannot
+ process Continuous-mode data files!
+ - Note that trial set and subset names and the trial start timestamp (in ms elapsed since Maestro started) were not
+ added to the data file header until V=21. The set and subset names are important in listing trial protocols in the
+ portal UI -- and are particularly helpful when users reuse trial names for different protocols that reside in different
+ trial sets/subsets. The timestamp can help determine trial presentation order when Omniplex timestamps cannot be used.
  - Does not process JMWork/XWork action edit codes, but does parse out sorted spike train channel data.
  - The Trial class does not extract all available information in the trial codes. Notable omissions include info on
-   special operations, a failsafe segment, staircase sequencer-related parameters (rarely if ever used), and any
-   mid-trial rewards.
+ special operations, a failsafe segment, staircase sequencer-related parameters (rarely if ever used), and any
+ mid-trial rewards.
 
 SAMPLE USAGE::
 
@@ -40,7 +40,8 @@ Author: sruffner
 
 from __future__ import annotations  # Needed in Python 3.7y to type-hint a method with the type of enclosing class
 
-from io import StringIO
+import csv
+from io import StringIO, TextIOWrapper
 from typing import NamedTuple, List, Optional, Dict, Any, Tuple, Union, Set
 from datetime import date
 import struct
@@ -64,7 +65,7 @@ class DataFileError(Exception):
 
 
 # CONSTANTS
-MIN_SUPPORTED_VERSION = 21
+MIN_SUPPORTED_VERSION = 19
 CURRENT_VERSION = 23  # data file version number as of Maestro 4.1.0
 MAX_NAME_SIZE = 40  # fixed size of ASCII character fields in data file header (num bytes)
 MAX_AI_CHANNELS = 16   # size of analog input channel list in data file header
@@ -167,6 +168,21 @@ class DataFile(NamedTuple):
     """ EyeLink-recorded blink epochs in ms since trial start: [start1, end1, start2, end2, ....]. """
     sorted_spikes: Optional[Dict[int, List[float]]]
     """ Spike occurrence times in ms since trial start, keyed by sorted spike train channel index. """
+
+    @staticmethod
+    def get_version_number(content: bytes) -> int:
+        """
+        Get the version number of a Maestro data file. The version number is located in the file's header (first 1KB).
+
+        :param content: The file's binary contents as a sequence of bytes.
+        :return: The file version number.
+        :raises DataFileError: If unable to parse binary contents.
+        """
+        num_total_bytes = len(content)
+        if (num_total_bytes % RECORD_SIZE) != 0:
+            raise DataFileError(f"Data file size in bytes ({num_total_bytes}) is not a multiple of {RECORD_SIZE}")
+        header = DataFileHeader(content)
+        return header.version
 
     @staticmethod
     def load(content: bytes, file_name: str) -> DataFile:
@@ -3045,11 +3061,16 @@ class Trial:
     access to the trial's segment table, participating target list, any perturbations or tagged sections, and other
     trial properties.
 
-    Do not use the constructor directly to create a `Trial` instance; instead, use the static methods:
+    Do not use the constructor directly to create a Trial instance; instead, use the static methods:
 
     - `prepare_trial()`: To recreate the trial from the defining trial codes, participating target list, and any
       tagged sections culled from the original Maestro data file, along with the file's header record.
     - `from_bytes()`: To recreate the trial from an encoded byte sequence prepared by `to_bytes()`.
+
+    IMPORTANT: Pre-V21 Maestro data files lack the trial set and subset names associated with the trial presented. Since
+    the set and subset form the "trial pathname", which is an important part of the definition of a trial Protocol,
+    the set and subset names must be injected into the Trial object after it is constructed from the definining trial
+    codes via `prepare_trial()`.
     """
     _PARAM_DICT: Dict[str, type] = {
         'name': str, 'set_name': (str, type(None)), 'subset_name': (str, type(None)), 'segments': tuple,
@@ -3121,6 +3142,25 @@ class Trial:
         to the data file in version 21).
         """
         return self._definition['subset_name']
+
+    def set_path(self, set_name: str, subset_name: Optional[str] = None) -> None:
+        """
+        Pre-version 21 Maestro data files did not include the trial set and subset in the file header. Since the set
+        and subset names are very important in distinguishing trial protocols, this information may be injected into
+        the trial definition via this method.
+
+        Args:
+            set_name: The name of the trial set. May not exceed MAX_NAME_SIZE and cannot be empty string.
+            subset_name: The name of the trial subset, if any. May not exdeed MAX_NAME_SIZE, but can be an empty string
+                or None. Default = None.
+        """
+        if (not isinstance(set_name, str)) or not (0 < len(set_name) <= MAX_NAME_SIZE):
+            raise DataFileError("Bad trial set name")
+        self._definition['set_name'] = set_name
+        if isinstance(subset_name, str):
+            if not (0 <= len(subset_name) <= MAX_NAME_SIZE):
+                raise DataFileError("Bad subset name")
+            self._definition['subset_name'] = subset_name
 
     @property
     def num_segments(self) -> int:
@@ -3641,7 +3681,8 @@ class Trial:
         """
         The full "path name" of a Maestro trial includes the names of the trial set and, optionally, trial subset
         containing the trial. However, the set and subset names were not included in the Maestro data file until V=21;
-        for older files, the path name is simply the trial name itself.
+        for older files, the path name is simply the trial name itself -- unless the set and subset names are injected
+        into the Trial object via the set_path() method.
 
         Returns:
             Trial path name in the format "set/subset/trial". For trials culled from pre-version 21 data files, the
@@ -4410,6 +4451,12 @@ class Protocol:
             t_start += seg_dur
         return t_start
 
+    ARCHIVE_SETNAMES_FILE: str = 'setnames.csv'
+    """ 
+    An experiment session archive with pre-V21 Maestro data files must contain a CSV file with this filename. The
+    file must specify the trial set name (and subset name, if any) for every pre-V21 Maestro file in the archive.
+    """
+
     @staticmethod
     def extract_protocols_from_session_data(
             archive: zipfile.ZipFile, proto_set: Set[str]) -> Tuple[List[Protocol], Dict[str, int]]:
@@ -4423,25 +4470,65 @@ class Protocol:
         existing protocol stored in the lab database. Otherwise, the protocol is marked as a "candidate" and must be
         validated manually by the user during the 'review' phase of the session commit workflow.
 
+        Trial set and subset names are part of trial's "pathname", which is an important part of the trial protocol
+        definition. However, set and subset names were not included in the Maestro data file until version 21. In
+        order to commit experiment sessions containing data files recorded since the release of Maestro 3 (file version
+        19), the trial set and subset name for each trial must be specified in the file setnames.csv. Each line in
+        that file must be formatted as 'trial_filename.NNNN,set_name' or 'trial_filename.NNNN,set_name,subset_name'.
+        If the setnames.csv file is missing from an archive containing pre-V21 Maestro files, or if the file does not
+        specify the set name for any Maestro file in the archive, then this method will fail. If the archive contains
+        V>=21 data files, the method will ignore setnames.csv even if it is present in the archive.
+
         :param archive: An open ZIP archive containing the Maestro data files collected during an experiment session.
             Must be open for reading and is NOT closed on return.
         :param proto_set: This set contains the MD5 hash digests of all confirmed trial protocols currently stored in
             the lab database.
         :return: A 2-tuple: a list of all trial protocols culled from the session data, and a dictionary that maps the
-                filename of each trial data file to the list index identifying the trial protocol presented when that
-                file was recorded.
-        :raise
+            filename of each trial data file to the list index identifying the trial protocol presented when that
+            file was recorded.
         :raises DataFileError: If a problem occurs while reading the ZIP archive and processing the data files therein.
         """
+        # TODO: UPDATE TO HANDLE set_names.csv in archive (data file v < 21)
         try:
             archive_list = archive.infolist()
+
+            # if archive contains pre-V21 Maestro files, it must contain the CSV file listing trial set/subset names
+            # for every trial data file.
+            trial_path_map: Dict[str, List[str]] = dict()
+            is_pre_v21: Optional[bool] = None
             data_file_name_pattern = re.compile("[.]\\d\\d\\d\\d$")
+            for info in archive_list:
+                if data_file_name_pattern.search(info.filename) is not None:
+                    is_pre_v21 = (DataFile.get_version_number(archive.read(info)) < 21)
+                    break
+            if is_pre_v21 is None:
+                raise DataFileError("No Maestro data files found in archive!")
+            elif is_pre_v21:
+                if not Protocol.ARCHIVE_SETNAMES_FILE in [info.filename for info in archive_list]:
+                    raise DataFileError(f"Archive with pre-V21 Maestro files is missing {Protocol.ARCHIVE_SETNAMES_FILE}")
+                else:
+                    with archive.open(Protocol.ARCHIVE_SETNAMES_FILE, 'r') as csv_file:
+                        rdr = csv.reader(TextIOWrapper(csv_file, 'utf-8'))
+                        for line in rdr:
+                            if len(line) < 2 or (data_file_name_pattern.search(line[0]) is None) or not (0 < len(line[1]) <= MAX_NAME_SIZE):
+                                continue
+                            if len(line) > 2 and not (0 < len(line[2]) <= MAX_NAME_SIZE):
+                                continue
+                            set_name = line[1]
+                            subset_name = line[2] if len(line) > 2 else ""
+                            trial_path_map[line[0]] = [set_name, subset_name]
+
             proto_candidates: List[Protocol] = list()
             filename_to_protocol: Dict[str, int] = dict()
             for info in archive_list:
                 if data_file_name_pattern.search(info.filename) is not None:
                     try:
                         trial = DataFile.load_trial(archive.read(info), info.filename)
+                        # for pre-v21 archives, inject trial set/subset name in to trial object
+                        if is_pre_v21:
+                            if not (info.filename in trial_path_map):
+                                raise DataFileError(f'Missing trial set/subset for {info.filename} in {Protocol.ARCHIVE_SETNAMES_FILE}')
+                            trial.set_path(trial_path_map[info.filename][0], trial_path_map[info.filename][1])
                         found = False
                         proto: Protocol
                         for i, proto in enumerate(proto_candidates):

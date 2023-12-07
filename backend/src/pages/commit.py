@@ -1082,13 +1082,16 @@ def _layout_upload_modal(job_id: Optional[str] = None) -> Tuple[dbc.ModalHeader,
             ZIP archive (no subdirectories). Maximum supported file size is 10GB.
             * If the session includes behavioral data only, the archive should contain only the Maestro data files.
             * There is no support at this time for automatic spike sorting. For electrophysiological recordings, the
-            experimenter must supply neural unit data (spike trains) in a pickle file (.pkl or .pickle). This must be
-            the only pickle file in the archive.
+            experimenter must supply neural unit data (spike trains) in a pickle file (.pkl or .pickle). **_This must be
+            the only pickle file in the archive.**
             * The pickle file must contain a single dictionary with 3 keys: 'filename', 'channel', and 'spiketimes'.
             Each key value is a list of length N = the number of neural units. These contain the Omniplex PL2
             filenames, the source channel IDs ('WBnn' or 'SPKCnn'), and the spike timestamps (in seconds since the
             Omniplex recording started) for each neural unit. The 'filename' field may be omitted if all units were
             recorded in a single Omniplex file.
+            * For sessions containing pre-V21 Maestro data files, the archive must include setnames.csv, specifying the
+            trial set name (and, if applicable, subset name) for each trial file in the archive. This is not required
+            for V>=21 Maestro files, since the trial set and subset names are included in the file header.
 
             *Drag and drop the ZIP file onto the upload component below, or click on the component to browse the file
             system for the file. The upload should start automatically. Large (>1GB) archives will take a significant
