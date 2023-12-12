@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.7.0 (TBD)
+## v0.7.0 (12/12/2023)
 - Changes to support committing experiment sessions with pre-version 21 _Maestro_ data files. Trial set and subset
 names were added to the data file header in version 21, but these form the trial "pathname", which plays a role in 
 distinguishing trial protocols (some users have tended to reuse trial names despite changing the trial definition)
@@ -8,12 +8,13 @@ and in how trial data is explored in the portal. Min supported data file version
 - Session archives that include pre-V21 Maestro files MUST include a CSV file called `setnames.csv`.
 - For session archives that specify the elapsed start time for each trial (in lieu of a PL2 file) in a CSV file,
 that file must now have the name `timestamps.csv`.
-- Updated `sglportalapi.PortalAccessor.commit_start()` to perform a sanity check on the archive before attempting to
-start a commit and uploading the archive file to the portal repo. This should catch typical user errors that may occur
-when preparing an experiment session archive.
-- The `tests.py` module provides some useful tools for checking a session archive prior to attempting a commit. You
+- Updated `sglportalapi.clientside.PortalAccessor.commit_start()` to perform a sanity check -- see 
+`clientside.check_session_archive()` -- on the archive before attempting to start a commit and uploading the archive 
+file to the portal repo. This should catch typical user errors that may occur when preparing an experiment session 
+archive.
+- The `tests.py` module provides some useful methodds for examining a session archive prior to attempting a commit.  You
 can invoke the various methods defined in the module, or you can do `python run -m sglportalapi.tests` to run any of
-several tools from the command line.
+the methods from the command line.
 - Incremented API_VERSION to 5. **If you have already installed the `sglportalapi` package, you will need to upgrade
 to this release.**
 

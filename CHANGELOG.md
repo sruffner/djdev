@@ -1,13 +1,14 @@
 # Lisberger Lab Data Portal - Changelog
 
-## v0.5.3 (TBD)
+## 12/12/2023
+- Got rid of "version numbers" for the portal app. Only the `sglportalapi` clientside package is "versioned".
 - Added support for committing experiment sessions containing pre-V21 _Maestro_ data files, which lack the set name 
 (and, optionally, subset name) for the trial presented. For such a session, the archive MUST contain a CSV file
 named `setnames.csv` containing the trial set and subset names for each Maestro trial data file in the archive. Each
 line in the file must have the format `trial_filename.NNNN,set_name` or, if the trial is part of a trial subset,
 `trial_filename.NNNN,set_name,subset_name`.
 - If present, the CSV file containing the starting time in milliseconds for each Maestro trial saved during the session 
-(see v0.5.0) must now be named `timestamps.csv` to distinguish it from `setnames.csv`.
+(see changes dtd 10/31/2023) must now be named `timestamps.csv` to distinguish it from `setnames.csv`.
 - Updated `sglportalapi.PortalAccessor.commit_start()` to perform a sanity check on the archive before attempting to
 start a commit and uploading the archive file to the portal repo. This should catch typical user errors that may occur
 when preparing an experiment session archive. 
@@ -18,7 +19,7 @@ unexpected exception is written to the application message log for debugging pur
 `tests.py` module in that package provides some useful tools for checking a session archive prior to attempting 
 commit.
 
-## v0.5.2 (11/7/2023)
+## 11/7/2023
 - Updated `API_VERSION` for `sglportalapi` package to 4 so that users must download the new release (0.6.0). This 
 ensures they are using the latest version of the `PL2.py` module from that package.
 - Fixed a bug in database.data_plots.mean_firing_rate_figure().
@@ -30,13 +31,13 @@ its node by the Kubernetes cluster manager) -- so this change provides a mechani
 situation. Prior to this change, the commit job would be left stuck in the preprocessing or final commit phase; it
 could be "cancelled" but not removed.
 
-## v0.5.1 (11/2/2023)
+## 11/2/2023
 - Tested commit process on a couple sample archives from N. Hall and addressed programming errors in 
 `maestro.Perturbation.from_trial_codes()` and `commit_ops._SessionCommitMgr.insert_trials_for_session()`.
 - Given the minor changes to PL2.py and maestro.py, which are part of the `sglportalapi` package, that package
 has been rebuilt.
 
-## v0.5.0 (10/31/2023)
+## 10/31/2023
 
 - Began documenting changes. See Gitlab commit history for more information on how the project has evolved to this
 point. Also added a `README` for the portal app, distinct from the README for the `sglportalapi` Python package.
