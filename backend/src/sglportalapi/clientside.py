@@ -27,13 +27,16 @@ The server-side implementation of the endpoints is found in the companion module
 
 Author: saruffner
 """
+import pickle
 import re
 import sys
 import time
 import zipfile
 from datetime import date
 from pathlib import Path
-from typing import Optional, Union, List, Tuple
+from typing import Optional, Union, List, Tuple, Dict, Any
+
+import numpy as np
 
 import requests
 from requests import RequestException
@@ -52,7 +55,16 @@ def check_session_archive(zip_path: Union[str, Path]) -> str:
     While no means an exhaustive check, it can save time by avoiding the time-consuming upload of a multi-GB archive
     that fails to satisfy these requirements.
     - Must not contain any directories.
-    - Can contain at most ONE pickle file, in which information about recorded neural units is stored.
+    - Can contain at most ONE pickle file, in which information about recorded neural units is stored. If present, the
+    pickle file's content MUST be a dictionary D with the required fields 'channel' and 'spiketimes'. D['channel'][K] is
+    the name of the Omniplex source channel on which unit K’s spikes were recorded, “WBn” or “SPKCn”. D[‘spiketimes’[K]
+    is a 1D float64 Numpy array holding the spike times for unit K in seconds elapsed since the start of the Omniplex
+    recording. If the archive contains multiple Omniplex PL2 files (rare), the 'filename' field is required, and
+    D['filename'][K] is the name of the PL2 source file from which spikes for unit K were extracted. If no PL2 file is
+    the 'snr' and 'template' fields are required. D['snr'][K] is the estimated signal-to-noise ratio for unit K, while
+    D['template'][K] is a 1D float64 Numpy array holding the template waveform for unit K. The waveform should be 10ms
+    long (1-ms pre, 9-ms post spike timestamp) and the waveform samples should be in microvolts. When the origial PL2
+    source file is present in the archive, SNR and template waveforms are automatically computed by the portal.
     - All Maestro trial data files in the archive must have the same version and the same recording date (stored in the
     file header). The minimum supported file version is 19.
     - The Maestro data file version < 21, the archive must contain the file 'setnames.csv' containing the trial set name
@@ -72,7 +84,9 @@ def check_session_archive(zip_path: Union[str, Path]) -> str:
         with zipfile.ZipFile(zip_path, 'r') as archive:
             archive_list: List[zipfile.ZipInfo] = archive.infolist()
             data_file_name_pattern = re.compile("[.]\\d\\d\\d\\d$")
-            got_pl2, got_pickle, got_ts_csv = False, False, False
+            pickle_info: Optional[zipfile.ZipInfo] = None
+            pl2_filenames: List[str] = list()
+            got_ts_csv = False
             session_date: Optional[date] = None
             file_version: Optional[int] = None
             for info in archive_list:
@@ -96,15 +110,23 @@ def check_session_archive(zip_path: Union[str, Path]) -> str:
                     got_ts_csv = True
                 elif ((len(info.filename) > 7) and (info.filename[-7:].lower() == '.pickle')) or \
                         ((len(info.filename) > 4) and (info.filename[-4:].lower() == '.pkl')):
-                    if got_pickle:
+                    if pickle_info is None:
+                        pickle_info = info
+                    else:
                         raise Exception("A session archive can contain only one neural units 'pickle' file.")
-                    got_pickle = True
                 elif (len(info.filename) > 3) and (info.filename[-3:].lower() == 'pl2'):
-                    got_pl2 = True
-            if got_pickle and not (got_pl2 or got_ts_csv):
-                raise Exception("A session rchive with neural unit data must contain a PL2 file or timestamps.csv")
+                    pl2_filenames.append(info.filename)
+            if (pickle_info is not None) and (len(pl2_filenames) == 0) and not got_ts_csv:
+                raise Exception("A session archive with neural unit data must contain a PL2 file or timestamps.csv")
             if session_date is None:
                 raise Exception("No Maestro data files found in session archive")
+
+            # validate contents of the neural unit pickle file
+            if pickle_info is not None:
+                unit_data = pickle.loads(archive.read(pickle_info))
+                err_msg = validate_neural_unit_data(unit_data, pl2_filenames)
+                if err_msg is not None:
+                    raise Exception(err_msg)
 
             # extracting trial protocols doesn't take too long and verifies a lot!
             _ , _ = Protocol.extract_protocols_from_session_data(archive, set())
@@ -112,6 +134,69 @@ def check_session_archive(zip_path: Union[str, Path]) -> str:
         return f"Session archive failed sanity check: {str(e)}"
     return ""
 
+def validate_neural_unit_data(unit_data: Dict[str, List[Any]], pl2_filenames: List[str]) -> Optional[str]:
+    """
+    Helper method validates the object loaded from a single dedicated pickle file in the session ZIP archive that lists
+    all identified neurons and their spike times, and possibly some other information
+
+    When researchers prepare the ZIP archive containing all data files for an experiment session including neural
+    unit recordings, they must provide a single Python pickle file with the results of their spike-sorting analysis of
+    all units recorded during the session. This file contains a dictionary with 2-3 fields: 'channel', 'spiketimes', and
+    (optionally) 'filename'. The last field is required ONLY if there is more than one Omniplex PL2 file in the archive.
+    Each field is a list of length N, where N is the number of neural units. The 'channel' key holds the Omniplex
+    channel ID for the analog channel on which the unit was recorded, the 'filename' key holds the name of the Omniplex
+    PL2 file within the ZIP archive, and the 'spiketimes' key holds the spike times (in seconds since the Omniplex
+    recording started) for each unit, as a 1D float64 Numpy array.
+
+    In order to commit an archive when the original PL2 source file is no longer available, an alternative archive
+    format is supported in which the elapsed start times of each trial are listed in a CSV file in the archive, and the
+    dictionary within the neural units pickle file must contain additional fields 'snr' (signal-to-noise ratio for each
+    unit) and 'template' (spike template waveform for each unit, as a 1D float64 Numpy array). Note that, in this
+    scenario, the template length and the method for computing SNR may be different than what is done when the PL2 file
+    is available.
+
+    Args:
+        unit_data: The dictionary loaded from the neural units file.
+        pl2_filenames: List of all Omniplex PL2 files found in the session archive. If the archive lacks any PL2 files,
+            then the dictionary must contain the additional fields as described above.
+
+    Returns:
+        None if unit_data is validly formatted as described above; otherwise, brief description of the first format
+            error encountered.
+    """
+    required_keys = ['channel', 'spiketimes']
+    if len(pl2_filenames) == 0:
+        required_keys.extend(['snr', 'template'])
+    if len(pl2_filenames) > 1:
+        required_keys.append('filename')
+
+    ok = (isinstance(unit_data, dict) and
+          all((k in unit_data) and isinstance(unit_data[k], list) for k in required_keys))
+    if not ok:
+        return f"Content must be a dictionary with a list at each of these keys: {','.join(required_keys)}"
+    num_units = len(unit_data['channel'])
+    if num_units == 0:
+        return None
+
+    if not all(len(unit_data[k]) == num_units for k in required_keys):
+        return f"All field must be lists of the same length N={num_units}"
+    if not all(isinstance(x, str) for x in unit_data['channel']):
+        return f"Each element in the 'channel' list must be a string"
+    if not all((isinstance(x, np.ndarray) and (x.dtype == np.float64)) for x in unit_data['spiketimes']):
+        return f"Each element in the 'spiketimes' list must be a 1D float64 Numpy array"
+    if 'snr' in unit_data:
+        if not all(isinstance(x, float) for x in unit_data['snr']):
+            return f"Each element in the 'snr' list must be a float value"
+    if 'template' in unit_data:
+        if not all((isinstance(x, np.ndarray) and (x.dtype == np.float64)) for x in unit_data['template']):
+            return f"Each element in the 'template' list must be a 1D float64 Numpy array"
+
+    if len(pl2_filenames) > 0:
+        if 'filename' in unit_data:
+            if not all(x in pl2_filenames for x in unit_data['filename']):
+                return f"Each element in the 'filename' list must refer to a PL2 file in the archive."
+
+    return None
 
 class PortalAccessor:
     """

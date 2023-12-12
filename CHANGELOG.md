@@ -11,7 +11,7 @@ line in the file must have the format `trial_filename.NNNN,set_name` or, if the 
 - Updated `sglportalapi.PortalAccessor.commit_start()` to perform a sanity check on the archive before attempting to
 start a commit and uploading the archive file to the portal repo. This should catch typical user errors that may occur
 when preparing an experiment session archive. 
-- For each API endpoint, wrapped implementation in try-except clause to catch unexpected errors so that, hopefully,
+- For each API endpoint, wrapped implementation in `try-except` clause to catch unexpected errors so that, hopefully,
 the server returns a properly formatted response that the `sglportalapi` client can decode. Also, a stack trace for the
 unexpected exception is written to the application message log for debugging purposes.
 - Updated `API_VERSION` for `sglportalapi` package to 5 so that users must download the new release (0.7.0). The

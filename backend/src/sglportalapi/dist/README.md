@@ -115,8 +115,8 @@ omitted for behavior-only experiment sessions. The pickle file contains a **_sin
 keys. Each key holds a list of length `N`, where `N` is the number of identified neural units.
    - ‘channel’ (required) : The `K`-th element is the name of the Omniplex source channel on which unit K’s spikes were
    recorded - “WBn” or “SPKCn”.
-   - ‘spiketimes’ (required): The `K`-th element is a 1D Numpy array holding the spike times for unit `K` in seconds 
-   elapsed since the start of the electrophysiological (Omniplex) recording.
+   - ‘spiketimes’ (required): The `K`-th element is a 1D Numpy array (`float64` data type) holding the spike times for 
+   unit `K` in seconds elapsed since the start of the electrophysiological (Omniplex) recording.
    - ‘filename’: If the archive contains multiple Omniplex PL2 files, this field is required and the `K`-th element 
    specifies the name of the PL2 source file from which spikes for unit `K` were extracted. If the archive contains a 
    single PL2 file or none at all, this can be omitted. 
@@ -124,14 +124,17 @@ keys. Each key holds a list of length `N`, where `N` is the number of identified
    signal-to-noise ratio for unit `K`. If the PL2 file is present, the portal automaticaly computes the unit SNR from
    the supplied spike times and the Omniplex recording on the specified channel. 
    - ‘template’: If no PL2 file is present in the archive, this field is required. The `K`-th element is a 1D Numpy 
-   array holding unit `K`’s template waveform. The waveform should be 10ms long (1-ms pre, 9-ms post spike timestamp) 
-   and the waveform samples should be microvolts. Again, this is automatically computed by the portal if the PL2 file
-   is present.
+   array (`float64` data type) holding unit `K`’s template waveform. The waveform should be 10ms long (1-ms pre, 9-ms 
+   post spike timestamp) and the waveform samples should be microvolts. Again, this is automatically computed by the 
+   portal if the PL2 file is present.
 3. The Omniplex PL2 file(s) in which neural unit activity was recorded, if available. If not, you **_must_** instead 
 supply the file `timestamps.csv` containing the start times for every Maestro trial file in the archive. Each line in 
-this CSV file has the form `trial_file_name.NNNN,timestamp_in_ms`. In this scenario, a trial’s “stop time” is simply the 
-start time in the CSV plus the trial duration. Obviously, for behavior-only experiments, neither the PL2 file nor the
-CSV file are required.
+this CSV file has the form `trial_file_name.NNNN,timestamp_in_ms`, where the timestamps are time elapsed (in millisecs) 
+since the start of the electrode recording (presumably on the Omniplex system, though theoretically this could be some 
+other system for timestamping spikes on multiple neural units). In this scenario, a trial’s “stop time” is simply the 
+start time in the CSV plus the trial duration. Without this trial timing information, it is not possible to extract the
+spike train for each neural unit during each trial. Obviously, for behavior-only experiments, neither the PL2 file nor 
+the CSV file are required.
 4. For experiment sessions containing pre-V21 Maestro data files, the archive must also contain the file `setnames.csv`
 containing the trial set and subset corresponding to the trial recorded in each Maestro data file in the archive. Each
 line in this CSV file has the form `trial_file_name.NNNN,set_name,subset_name` or `trial_file_name.NNNN,set_name` if the

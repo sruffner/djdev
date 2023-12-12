@@ -158,6 +158,7 @@ import shutil
 import struct
 import sys
 import time
+import traceback
 import zipfile
 from io import TextIOWrapper
 
@@ -184,6 +185,7 @@ from database.table_ops import fetch_attribute_values, fetch_rows, check_row, fe
     update_mapping_table
 from database.user_ops import validate_username, PASSWORD_HASH_METHOD, validate_password
 from sglportalapi.PL2 import get_analog_channel_record_index
+from sglportalapi.clientside import check_session_archive
 from sglportalapi.data_containers import SessionInfo
 from sglportalapi.util import DocEnum
 
@@ -590,6 +592,8 @@ class OmniplexUnit:
         """
         try:
             hdr_len, spks_len, template_len = struct.unpack_from("<3i", raw, offset=0)
+            get_application_logger().debug(f"In OmniplexUnit.from_bytes: buffer size = {len(raw)}, hdr_len={hdr_len},"
+                                           f"spks_len={spks_len}, template_len={template_len}")  # TODO: DEBUG
             offset = struct.calcsize("<3i")
             hdr = json.loads(raw[offset:offset+hdr_len].decode())
             offset += hdr_len
@@ -602,6 +606,7 @@ class OmniplexUnit:
                                 rate=float.fromhex(hdr['firing_rate']), snr=float.fromhex(hdr['snr']),
                                 template=template, neuron_type=hdr['neuron_type'])
         except Exception as e:
+            get_application_logger().error(traceback.format_exc())  # TODO: DEBUG
             raise ValueError(f"Failed to deserialize _OmniplexUnit record: {str(e)}")
 
 
@@ -924,8 +929,9 @@ def transfer_archive_to_repo(job_id: str) -> bool:
     When a commit job is initiated on the Dash/Flask frontend, a Dash-based component uploads the session archive in
     "chunks" to the job's subfolder in the portal's workspace in local cluster storage. Upon completion, the frontend
     informs the server, and `on_archive_uploaded_to_workspace()` updates the commit job and queues a background task to
-    run this method, which reassembles the chunks into the original file, uploads that file to the S3 repository
-    at /staging/<job_id>/archive.zip, and cleans out uploaded chunks from the job's workspace folder. Finally, it calls
+    run this method, which reassembles the chunks into the original file, runs some sanity check on the file to catch
+    invalid archives early in the commit workflow, uploads the ZIP file to the S3 repository at
+    /staging/<job_id>/archive.zip, and cleans out uploaded chunks from the job's workspace folder. Finally, it calls
     `on_archive_uploaded_to_repo()`, which transitions the job to the "Preprocessing" phase and queues a new background
     task to begin processing the archive.
 
@@ -971,6 +977,15 @@ def transfer_archive_to_repo(job_id: str) -> bool:
             msg_pfx = f"Cannot find archive file for commit job {job_id}: "
             _logger.debug(f"{msg_pfx}: {str(zip_path)}")
             _background_job_update(job_id, f"{msg_pfx}: {zip_path.name}", CommitStateEnum.FAIL)
+            return False
+
+        # before we move archive to S3, run a sanity check on it now so we don't waste time with a bad archive
+        if _background_job_update(job_id, "Running sanity check on uploaded archive...", log=True):
+            raise Exception("Operation cancelled")
+        err_msg = check_session_archive(zip_path)
+        if len(err_msg) > 0:
+            _logger.error(err_msg)
+            _background_job_update(job_id, err_msg, CommitStateEnum.FAIL)
             return False
 
         # move archive to S3 -- can take a while -- so check for user cancel
@@ -1363,6 +1378,15 @@ def preprocess_commit_job(job_id: str) -> bool:
             _logger.error(f"Failed to download session archive from S3 repo for commit job {job_id}")
             raise Exception("Failed to download session archive from portal repo")
 
+        # run sanity check on archive. While this check is done before the archive is pushed to the staging area in S3,
+        # regardless if the commit is initiated vis the API endpoint or interactively vis the portal web page, we run
+        # the check once more in case the ZIP was corrupted on download.
+        if _background_job_update(job_id, f"Running sanity check on downloaded archive..."):
+            raise Exception("Operation cancelled")
+        err_msg = check_session_archive(zip_path)
+        if len(err_msg) > 0:
+            raise Exception(err_msg)
+
         # preprocess the archive
         if _background_job_update(job_id, f"Preprocessing session archive...", log=True):
             raise Exception("Operation cancelled")
@@ -1418,15 +1442,13 @@ def preprocess_commit_job(job_id: str) -> bool:
             for filename, proto_index in file_to_proto.items():
                 trial_info[filename].proto_index = proto_index
 
-            # load and validate the neural unit data from pickle file, if there is one.
+            # load the neural unit data from pickle file, if there is one.
             unit_data: Optional[Dict[str, List[Any]]] = None
             if units_zip_info is not None:
                 if _background_job_update(job_id, f"Loading neural units file {units_zip_info.filename}...", log=True):
                     raise Exception("Operation cancelled")
                 unit_data = pickle.loads(archive.read(units_zip_info))
                 pl2_filenames = [x.filename for x in pl2s_archived]  # will be empty if archive lacks PL2 file
-                if not _validate_neural_unit_data(unit_data, pl2_filenames):
-                    raise Exception(f"Invalid format for neural units file: {units_zip_info.filename}")
                 # if 'filename' field missing, assume all units recorded in same Omniplex file. If no PL2 file found
                 # in archive (alternate scheme), then set 'filename' field to 'unavailable'
                 if 'filename' not in unit_data:
@@ -1574,7 +1596,7 @@ def _reassemble_archive_from_chunked_upload(job_id: str) -> bool:
                 target_file.write(stored_chunk_file.read())
             if (time.time() - t0) > 10:
                 msg = f"Reassembling session archive from chunked upload: {i} of {num_chunks} chunks processed."
-                if _background_job_update(job_id, msg, overwrite=True, log=((i == 1) or (i == num_chunks - 1))):
+                if _background_job_update(job_id, msg, overwrite=True, log=True):
                     return False
                 t0 = time.time()
     shutil.rmtree(temp_dir)
@@ -1634,58 +1656,6 @@ def _background_job_update(job_id: str, msg: str, next_state: Optional[CommitSta
 
     return was_cancelled
 
-
-def _validate_neural_unit_data(unit_data: Dict[str, List[Any]], pl2_filenames: List[str]) -> bool:
-    """
-    Helper method validates the object loaded from a single dedicated pickle file in the session ZIP archive that lists
-    all identified neurons and their spike times, and possibly some other information
-
-    When researchers prepare the ZIP archive containing all data files for an experiment session including neural
-    unit recordings, they must provide a single Python pickle file with the results of their spike-sorting analysis of
-    all units recorded during the session. This file contains a dictionary with 2-3 fields: 'channel', 'spiketimes', and
-    (optionally) 'filename'. The last field is required ONLY if there is more than one Omniplex PL2 file in the archive.
-    Each field is a list of length N, where N is the number of neural units. The 'channel' key holds the Omniplex
-    channel ID for the analog channel on which the unit was recorded, the 'filename' key holds the name of the Omniplex
-    PL2 file within the ZIP archive, and the 'spiketimes' key holds the spike times (in seconds since the Omniplex
-    recording started) for each unit, as a Numpy array.
-
-    In order to commit an archive when the original PL2 source file is no longer available, an alternative archive
-    format is supported in which the elapsed start times of each trial are listed in a CSV file in the archive, and the
-    dictionary within the neural units pickle file must contain additional fields 'snr' (signal-to-noise ratio for each
-    unit) and 'template' (spike template waveform for each unit, as a Numpy array). Note that, in this scenario, the
-    template length and the method for computing SNR may be different than what is done when the PL2 file is available.
-
-    Args:
-        unit_data: The dictionary loaded from the neural units file.
-        pl2_filenames: List of all Omniplex PL2 files found in the session archive. If the archive lacks any PL2 files,
-            then the dictionary must contain the additional fields as described above.
-
-    Returns:
-        True if unit_data is validly formatted as described above, false otherwise.
-    """
-    required_keys = ['channel', 'spiketimes']
-    if len(pl2_filenames) == 0:
-        required_keys.extend(['snr', 'template'])
-
-    ok = (isinstance(unit_data, dict) and
-          all((k in unit_data) and isinstance(unit_data[k], list) for k in required_keys))
-    num_units = len(unit_data['channel']) if ok else 0
-    if ok:
-        ok = all(len(unit_data[k]) == num_units for k in required_keys) and \
-             all(isinstance(x, str) for x in unit_data['channel']) and \
-             all(isinstance(x, np.ndarray) for x in unit_data['spiketimes']) and \
-             (('snr' not in unit_data) or all(isinstance(x, float) for x in unit_data['snr'])) and \
-             (('template' not in unit_data) or all(isinstance(x, np.ndarray) for x in unit_data['template']))
-    if ok and (len(pl2_filenames) > 0):
-        if 'filename' in unit_data:
-            ok = isinstance(unit_data['filename'], list) and (len(unit_data['filename']) == num_units) \
-                 and all(x in pl2_filenames for x in unit_data['filename'])
-        else:
-            ok = (len(pl2_filenames) == 1)
-
-    return ok
-
-
 def _chunked_extract_from_archive(job_id: str, archive: zipfile.ZipFile, pl2_info: zipfile.ZipInfo,
                                   dst: Path) -> Optional[Path]:
     """
@@ -1715,7 +1685,7 @@ def _chunked_extract_from_archive(job_id: str, archive: zipfile.ZipFile, pl2_inf
         return save_path
 
     # Large file extract in chunks
-    t0 = time.time()
+    pct_last_update = 0.0
     msg = f"Extracting Omniplex file {pl2_info.filename}: 0 of {size_in_mb:.1f} MB ..."
     if _background_job_update(job_id, msg, log=True):
         return None
@@ -1729,11 +1699,12 @@ def _chunked_extract_from_archive(job_id: str, archive: zipfile.ZipFile, pl2_inf
             target.write(buffer)
             bytes_written += len(buffer)
             written_mb: float = bytes_written / (1024 * 1024)
-            if (time.time() - t0) > 5:
+            pct_done = 100.0 * written_mb / size_in_mb
+            if pct_done - pct_last_update >= 10.0:
+                pct_last_update = pct_done
                 msg = f"Extracting Omniplex file {pl2_info.filename}: {written_mb:.1f} of {size_in_mb:.1f} MB ..."
-                if _background_job_update(job_id, msg, overwrite=True):
+                if _background_job_update(job_id, msg, overwrite=True, log=True):
                     return None
-                t0 = time.time()
 
 
 def _process_omniplex_file(job_id: str, omniplex_file: Path, unit_data: Dict[str, List[Any]],
@@ -2066,7 +2037,7 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
         if (time.time() - t0) > 5:
             msg = f"Calculating metrics for {len(spikes)} neural unit(s) on Omniplex channel {channel_id} ... " \
                   f"{100.0*block_idx/num_blocks:.1f}%"
-            if _background_job_update(job_id, msg, overwrite=True):
+            if _background_job_update(job_id, msg, overwrite=True, log=True):
                 return None
             t0 = time.time()
 
