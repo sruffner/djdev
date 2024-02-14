@@ -185,7 +185,7 @@ from database.table_ops import fetch_attribute_values, fetch_rows, check_row, fe
     update_mapping_table
 from database.user_ops import validate_username, PASSWORD_HASH_METHOD, validate_password
 from sglportalapi.PL2 import get_analog_channel_record_index
-from sglportalapi.clientside import check_session_archive
+from sglportalapi.clientside import check_session_archive, get_trial_timing_from_pl2_file
 from sglportalapi.data_containers import SessionInfo
 from sglportalapi.util import DocEnum
 
@@ -592,8 +592,6 @@ class OmniplexUnit:
         """
         try:
             hdr_len, spks_len, template_len = struct.unpack_from("<3i", raw, offset=0)
-            get_application_logger().debug(f"In OmniplexUnit.from_bytes: buffer size = {len(raw)}, hdr_len={hdr_len},"
-                                           f"spks_len={spks_len}, template_len={template_len}")  # TODO: DEBUG
             offset = struct.calcsize("<3i")
             hdr = json.loads(raw[offset:offset+hdr_len].decode())
             offset += hdr_len
@@ -606,7 +604,7 @@ class OmniplexUnit:
                                 rate=float.fromhex(hdr['firing_rate']), snr=float.fromhex(hdr['snr']),
                                 template=template, neuron_type=hdr['neuron_type'])
         except Exception as e:
-            get_application_logger().error(traceback.format_exc())  # TODO: DEBUG
+            get_application_logger().error(traceback.format_exc())
             raise ValueError(f"Failed to deserialize _OmniplexUnit record: {str(e)}")
 
 
@@ -1383,7 +1381,7 @@ def preprocess_commit_job(job_id: str) -> bool:
         # the check once more in case the ZIP was corrupted on download.
         if _background_job_update(job_id, f"Running sanity check on downloaded archive..."):
             raise Exception("Operation cancelled")
-        err_msg = check_session_archive(zip_path)
+        err_msg = check_session_archive(zip_path, check_pl2=False)
         if len(err_msg) > 0:
             raise Exception(err_msg)
 
@@ -1750,7 +1748,7 @@ def _process_omniplex_file(job_id: str, omniplex_file: Path, unit_data: Dict[str
         if _background_job_update(job_id, msg, log=True):
             return True
         info = PL2.load_file_information(fp)
-        timings_dict = _get_trial_timing_from_pl2_file(fp, info)
+        timings_dict = get_trial_timing_from_pl2_file(fp, info)
         for key in (timings_dict.keys() & trial_info.keys()):
             t_info = trial_info[key]
             t_info.omniplex_start, t_info.omniplex_stop = timings_dict[key]
@@ -1807,98 +1805,6 @@ def _get_trial_timing_from_csv_file(
         if trial_info[k].omniplex_start is None:
             raise Exception(f"No timestamp found for {k} in CSV file {csv_info.filename}")
 
-def _get_trial_timing_from_pl2_file(fp: IO, info: Optional[Dict[str, Any]] = None) -> Dict[str, Tuple[float, float]]:
-    """
-    Analyze the strobed character events and the XS2 events in the PL2 file's event streams in order to find the
-    file names of all Maestro data files successfully saved during the Omniplex recording session, along with the
-    timestamps marking the start and end of each trial presented. This information is needed to align neural unit
-    responses recorded on the Omniplex with the individual trial timelines.
-
-    For each Maestro trial that is successfully saved, Maestro delivers a sequence of ASCII characters along with pulses
-    on XS2 ("EVT02" channel on Omniplex): a "trial start" character code 0x02, followed by null-terminated trial name
-    and null-terminated filename, a pulse on XS2 immediately after the trial commences, a second pulse on XS2
-    immediately after the trial ends, then a 0x06 character to indicate the file was saved, and finally a "trial stop"
-    character code 0x03.
-
-    This method loads and parses the relevant event data channels to extract, for each successfully saved data file,
-    the filename, and the timestamps of the two XS2 pulses bracketing the trial duration.
-
-    **NOTE:** During testing, we discovered a number of sessions where the Omniplex system was stopped in the middle of
-    a running trial. As a result, the last "start" code recorded by the Omniplex is not matched with a "stop" code.
-    Instead of throwing an exception in this case, we now simply skip that "start" code -- just as we skip any
-    "start-stop" event sequence that doesn't include the "file saved" code, corresponding to the many aborted trials
-    that happen in a typical Maestro recording session.
-
-    Args:
-        fp: The PL2 file object. It must be open and is NOT closed upon return.
-        info: Header and footer information from the PL2 file, for navigating a potentially multi-GB file. If None,
-            the method will read in that information first.
-    Returns:
-        A dictionary mapping the name of each saved data file to a 2-tuple (start, stop) containing the start and stop
-            timestamps of the corresponding Maestro trial in seconds since the start of the Omniplex recording. The
-            dictionary will be empty if the expected event channel data is not found in the PL2 file.
-    Raises:
-        Exception: If a problem is detected while analyzing the Omniplex strobed character and event channels.
-            The exception message is the error description.
-    """
-    result: Dict[str, Tuple[float, float]] = dict()
-    if info is None:
-        info = PL2.load_file_information(fp)
-    timestamp_frequency = info['timestamp_frequency']  # To convert timestamps from raw tick counts to seconds
-
-    # get strobed character data and convert to uint8. Timestamps are in raw tick counts. We'll scale to seconds later.
-    strobed_index = [ch['name'] for ch in info['event_channels']].index('Strobed')
-    strobed_data = PL2.load_event_channel(fp, strobed_index, info)
-    if strobed_data is None:
-        return result
-    for i in range(len(strobed_data["strobed"])):
-        strobed_data["strobed"][i] &= 0xFF
-    strobed_data["strobed"] = strobed_data["strobed"].astype("uint8")
-
-    # get timestamps for all pulses on XS2
-    event2_index = [ch['name'] for ch in info['event_channels']].index('EVT02')
-    event2_ts = PL2.load_event_channel(fp, event2_index, info)['timestamps']
-    if event2_ts is None:
-        return result
-    event2_ts = event2_ts.astype('int64')
-
-    # get filename and XS2 start and stop timestamps for each data file successfully saved (character code 0x06). This
-    # code uses Numpy array operations to (hopefully) speed up the process
-    start_code_mask = np.equal(strobed_data["strobed"], 0x02)
-    stop_code_mask = np.equal(strobed_data["strobed"], 0x03)
-    null_code_mask = np.equal(strobed_data["strobed"], 0x00)
-    start_code_indices = np.where(start_code_mask)[0]
-
-    # helper function used to find, eg, the stop code character after a start code character. Returns -1 if not found!
-    def find_next(mask: np.ndarray, after: int) -> int:
-        for _i in range(after + 1, len(mask)):
-            if mask[_i]:
-                return _i
-        return -1
-
-    for idx, start_code_index in enumerate(start_code_indices):
-        first_null_index = find_next(null_code_mask, start_code_index)
-        second_null_index = -1 if first_null_index == -1 else find_next(null_code_mask, first_null_index+1)
-        stop_code_index = -1 if second_null_index == -1 else find_next(stop_code_mask, second_null_index)
-        if stop_code_index == -1:
-            continue   # see NOTE in function header
-
-        file_name = "".join([chr(code) for code in strobed_data['strobed'][first_null_index + 1:second_null_index]])
-        file_was_saved = (any(np.equal(strobed_data["strobed"][second_null_index + 1:stop_code_index], 0x06)))
-        if file_was_saved:
-            start_code_ts = int(strobed_data['timestamps'][start_code_index])
-            stop_code_ts = int(strobed_data['timestamps'][stop_code_index])
-            xs2_indices = np.where((event2_ts >= start_code_ts) & (event2_ts < stop_code_ts))[0]
-            if len(xs2_indices) < 2:
-                raise Exception(f"Missing trial start or stop pulse on XS2 for saved file: {file_name}")
-            xs2_start_ts = event2_ts[xs2_indices[0]]
-            xs2_stop_ts = event2_ts[xs2_indices[-1]]
-            if (xs2_start_ts - start_code_ts)/timestamp_frequency > 0.100:
-                raise Exception(f"XS2 start pulse is more than 100ms after start code for saved file: {file_name}")
-            result[file_name] = (float(xs2_start_ts)/timestamp_frequency, float(xs2_stop_ts)/timestamp_frequency)
-
-    return result
-
 
 def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray], filename: str,
                           fp: IO, info: Dict[str, Any]) -> Optional[List[OmniplexUnit]]:
@@ -1911,7 +1817,7 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
     with "WB" (wide band data) or "SPKC" (narrow band data). Wide band data is preferred because the filtering
     parameters for SPKC can be changed during an Omniplex session and are not stored in the PL2 file. If the
     specified channel ID is "SPKC<num>", the method first looks for the wide-band channel "WB<num>". If that is
-    available, the analog trace is bandpass-filtered between 300-8000Hz using a econd-order Butterworth filter via the
+    available, the analog trace is bandpass-filtered between 300-8000Hz using a second-order Butterworth filter via the
     SciPy package. If not, the analog trace on "SPKC<num>" is used as is (it should already have been filtered).
 
     [NOTE: In the channel ID string "SPKC<num>" or "WB<num>", "<num>" should evaluate to a 1-, 2- or 3-digit positive
@@ -1944,7 +1850,7 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
             channel number 8.
         spikes: List of Numpy arrays; each array holds the spike timestamps (in seconds during Omniplex recording)
             for a distinct neural unit recorded on the specified analog channel. It is assumed that each array
-            contains at least two spike times.
+            contains at least two spike times, and that the spike times are in chronological order.
         filename: The source PL2 filename.
         fp: The PL2 file object. The file must be open and is NOT closed on return.
         info: Dictionary containing "table of contents" for the PL2 file (see PL2.load_file_information).
@@ -1985,6 +1891,9 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
         raise Exception(f"Did not find Omniplex analog channel data for channel ID: {channel_id}")
 
     num_blocks = len(info["analog_channels"][idx]["block_num_items"])
+    if num_blocks == 0:
+        raise Exception(f"No recorded data on Omniplex analog channel {channel_id}!")
+
     samples_per_sec: float = info['analog_channels'][idx]['samples_per_second']
     to_volts: float = info['analog_channels'][idx]['coeff_to_convert_to_units']
     samples_in_template = int(samples_per_sec * 0.01)
@@ -1995,6 +1904,7 @@ def _prepare_neural_units(job_id: str, channel_id: str, spikes: List[np.ndarray]
     num_spikes = [len(spike_times) for spike_times in spikes]
     sample_idx = 0
     block_idx = 0
+
 
     # prepare bandpass filter in case analog signal is wide-band. The filter delays are initialized with zero-vector
     # initial condition and the delays are updated as each block is filtered...

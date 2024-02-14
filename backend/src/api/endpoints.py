@@ -245,7 +245,6 @@ def _retrieve_session_info(experimenter: Optional[str], subj_id: Optional[str], 
     # behavior-only sessions, all EPhys-related fields are set to None.
     for r in rows:
         r['study_title'] = study_map[r['study_id']]
-        r.pop('committed')   # not exposed in SessionInfo.
         found = -1
         for i, ephys in enumerate(ephys_rows):
             if (ephys['experimenter'] == r['experimenter']) and (ephys['subj_id'] == r['subj_id']) and \
@@ -262,8 +261,6 @@ def _retrieve_session_info(experimenter: Optional[str], subj_id: Optional[str], 
             r['probe_depth'] = ephys['probe_depth']
             r['brain_area'] = area_map[ephys['ba_id']]
             r['ba_id'] = ephys['ba_id']
-        if isinstance(r['session_date'], date):
-            r['session_date'] = r['session_date'].isoformat()
 
     return 200, '', [SessionInfo(r) for r in rows]
 

@@ -693,6 +693,37 @@ def get_analog_channel_record_index(data: Dict[str, Any], is_wide_band: bool, ch
         idx = -1
     return idx
 
+def was_wide_or_narrowband_analog_channel_recorded(data: Dict[str, Any], ch: str) -> bool:
+    """
+    Was a specific wideband ("WB") or narrowband ("SPKC") analog channel recorded in this PL2 file?
+
+    Args:
+        data: Dictionary holding PL2 file contents.
+        ch: The channel name in the form "WB<n>" for a wideband analog channel and "SPKC<n>" for a narrowband channel,
+            where <n> is an integer indicating the channel number.
+    Returns:
+        True if the file contains recorded data for the channel specified; False if channel name is invalid or the
+        channel was not recorded.
+    """
+    # wide-band or narrow-band channel. Extract Plexon-assigned channel number (a positive integer)
+    is_wide_band = (len(ch) > 2) and (ch[0:2].lower() == 'wb')
+    is_narrow_band = (len(ch) > 4) and (ch[0:4].lower() == 'spkc')
+    if not (is_wide_band or is_narrow_band):
+        return False
+    try:
+        channel_num = int(ch[(2 if is_wide_band else 4):])
+    except Exception:
+        return False
+    if channel_num < 1:
+        return False
+
+    # find zero-based index of the channel record in the Plexon file's list of analog channel records. If narrow-band
+    # channel SPKC<num> was specified, try to use corresponding wide band channel WB<num>, IF it is available
+    idx = get_analog_channel_record_index(data, is_wide_band=True, channel_number=channel_num)
+    if (idx < 0) and is_narrow_band:
+        idx = get_analog_channel_record_index(data, is_wide_band=False, channel_number=channel_num)
+
+    return False if idx < 0 else (data['analog_channels'][idx]['num_values'] > 0)
 
 def _get_channel_offset(data: Dict[str, Any], data_subtype: int, channel_number: int) -> int:
     """

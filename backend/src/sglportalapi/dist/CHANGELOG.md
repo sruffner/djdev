@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.8.0 (TBD)
+- If the server response is badly formed in response to a request for a commit job's status, it may be that the request
+was rejected by some agent prior to reaching the server, which may be due to a transient network issue. Rather than
+failing immediately, the `sglportalapi.PortalAccessor.commit_status()` method will resend the request up to 3 times
+before giving up.
+- Modified the `Route.SESSIONINFO` API endpoint and the `SessionInfo` object to expose the date/time when an experiment
+session was committed to the portal repository. 
+- Added session archive test function to `tests.py`: `show_pl2_info_in_archive()` extracts the Omniplex PL2 file from
+the archive ZIP and lists trial timing information and all wideband (WB<n>) and narrowband (SPKC<n>) analog channels
+recorded in the file. The PL2 file is extracted to the same directory as the ZIP and then deleted after use.
+- Modified `check_session_archive()` to perform some checks on the PL2 file in the ZIP archive. It reads the file 
+metadata, verifies it can extract Maestro trial timing information from the file, and verifies that every wideband and
+narrowband analog channel identified as the source channel for a neural unit in the pickle file was indeed recorded in
+the Omniplex file. This requires extracting the PL2 file from the ZIP (it's deleted afterward), so it can take a
+minute or more for multi-GB archives.
+- Modified `check_session_archive()` to verify that unit spike trains in the Pickle file are in chronological order.
+
+
 ## v0.7.0 (12/12/2023)
 - Changes to support committing experiment sessions with pre-version 21 _Maestro_ data files. Trial set and subset
 names were added to the data file header in version 21, but these form the trial "pathname", which plays a role in 
@@ -12,7 +30,7 @@ that file must now have the name `timestamps.csv`.
 `clientside.check_session_archive()` -- on the archive before attempting to start a commit and uploading the archive 
 file to the portal repo. This should catch typical user errors that may occur when preparing an experiment session 
 archive.
-- The `tests.py` module provides some useful methodds for examining a session archive prior to attempting a commit.  You
+- The `tests.py` module provides some useful methods for examining a session archive prior to attempting a commit.  You
 can invoke the various methods defined in the module, or you can do `python run -m sglportalapi.tests` to run any of
 the methods from the command line.
 - Incremented API_VERSION to 5. **If you have already installed the `sglportalapi` package, you will need to upgrade

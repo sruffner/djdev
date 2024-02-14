@@ -34,13 +34,14 @@ import time
 import zipfile
 from datetime import date
 from pathlib import Path
-from typing import Optional, Union, List, Tuple, Dict, Any
+from typing import Optional, Union, List, Tuple, Dict, Any, IO
 
 import numpy as np
 
 import requests
 from requests import RequestException
 
+from sglportalapi import PL2
 from sglportalapi.data_containers import SessionInfo, NeuronInfo, TrialRep, Route, APISerializeError, MetadataTable, \
     RequestedData
 from sglportalapi.maestro import Protocol, DataFileHeader
@@ -49,34 +50,44 @@ _REQ_TIMEOUT_SECONDS: float = 20
 """ Any request to a portal API endpoint will timeout after this many seconds. """
 
 
-def check_session_archive(zip_path: Union[str, Path]) -> str:
+def check_session_archive(zip_path: Union[str, Path], check_pl2: bool = True) -> str:
     """
-    Helper method examines the contents of a session archive to verify it meets the following minimum requirements.
-    While no means an exhaustive check, it can save time by avoiding the time-consuming upload of a multi-GB archive
-    that fails to satisfy these requirements.
+    Examine the contents of a session archive to verify it meets the following minimum requirements. While no means an
+    exhaustive check, it can save time by avoiding the time-consuming upload of a multi-GB archive that fails to satisfy
+    these requirements.
     - Must not contain any directories.
     - Can contain at most ONE pickle file, in which information about recorded neural units is stored. If present, the
     pickle file's content MUST be a dictionary D with the required fields 'channel' and 'spiketimes'. D['channel'][K] is
-    the name of the Omniplex source channel on which unit K’s spikes were recorded, “WBn” or “SPKCn”. D[‘spiketimes’[K]
+    the name of the Omniplex source channel on which unit K’s spikes were recorded, “WBn” or “SPKCn”. D[‘spiketimes’][K]
     is a 1D float64 Numpy array holding the spike times for unit K in seconds elapsed since the start of the Omniplex
-    recording. If the archive contains multiple Omniplex PL2 files (rare), the 'filename' field is required, and
-    D['filename'][K] is the name of the PL2 source file from which spikes for unit K were extracted. If no PL2 file is
-    the 'snr' and 'template' fields are required. D['snr'][K] is the estimated signal-to-noise ratio for unit K, while
-    D['template'][K] is a 1D float64 Numpy array holding the template waveform for unit K. The waveform should be 10ms
-    long (1-ms pre, 9-ms post spike timestamp) and the waveform samples should be in microvolts. When the origial PL2
-    source file is present in the archive, SNR and template waveforms are automatically computed by the portal.
+    recording, in chronological order (although multiple spikes at the same time are permitted). If the archive contains
+    multiple Omniplex PL2 files (rare), the 'filename' field is required, and D['filename'][K] is the name of the PL2
+    source file from which spikes for unit K were extracted. If no PL2 file is available, the 'snr' and 'template'
+    fields are required. D['snr'][K] is the estimated signal-to-noise ratio for unit K, while D['template'][K] is a 1D
+    float64 Numpy array holding the template waveform for unit K. The waveform should be 10ms long (1-ms pre, 9-ms post
+    spike timestamp) and the waveform samples should be in microvolts. When the origial PL2 source file is present in
+    the archive, SNR and template waveforms are automatically computed by the portal.
     - All Maestro trial data files in the archive must have the same version and the same recording date (stored in the
     file header). The minimum supported file version is 19.
-    - The Maestro data file version < 21, the archive must contain the file 'setnames.csv' containing the trial set name
-    (and, optionally, subset name) for every trial data file in the archive. To check this requirement, the method
-    actually processes all Maestro data files (and the setnames.csv' file if necessary) to extract each distinct trial
+    - If the Maestro data file version < 21, the archive must have the file 'setnames.csv' containing the trial set
+    name (and, optionally, subset name) for every trial data file in the archive. To check this requirement, the method
+    actually processes all Maestro data files (and the 'setnames.csv' file if necessary) to extract each distinct trial
     protocol presented during the session. This takes a few seconds at most.
     - If the archive has neural unit data, it must contain at least one Omniplex PL2 file OR the file 'timestamps.csv'.
-    In lieu of the PL2 data, the latter file provides the elapsed start time (in the same timeline as the unit spike
-    trains) for each trial recorded during the session. The file's contents are not checked.
+    In lieu of the PL2 data, the latter file provides the elapsed start time in milliseconds (in the same timeline as
+    the unit spike trains) for each trial recorded during the session. The file's contents are not checked.
+    - Optionally: Extract and read the metadata for each PL2 file in the archive. Verify that each Omniplex analog
+    channel identified in the neural units dictionary was indeed recorded in a PL2 file, and verify that trial timing
+    information can be extracted from the PL2 file(s). This validation step is time-consuming because the PL2 file(s)
+    must be extracted from the ZIP archive (reading without extracting is even slower). The extracted files are
+    deleted after use.
 
     Args:
         zip_path: The path to the session archive ZIP.
+        check_pl2: If True, extract PL2 file(s) from archive and verify the file(s) can be parsed, contains valid
+            trial timing information, and includes recorded data for any analog channel specified as the channel from
+            which a neural unit's spike train was "spike-sorted". This is an optional check because it will take many
+            seconds to complete. Default = True.
     Returns:
         An empty string if the specified archive passes all checks, else a brief description of the problem.
     """
@@ -85,7 +96,7 @@ def check_session_archive(zip_path: Union[str, Path]) -> str:
             archive_list: List[zipfile.ZipInfo] = archive.infolist()
             data_file_name_pattern = re.compile("[.]\\d\\d\\d\\d$")
             pickle_info: Optional[zipfile.ZipInfo] = None
-            pl2_filenames: List[str] = list()
+            pl2_zip_info: List[zipfile.ZipInfo] = list()
             got_ts_csv = False
             session_date: Optional[date] = None
             file_version: Optional[int] = None
@@ -115,8 +126,8 @@ def check_session_archive(zip_path: Union[str, Path]) -> str:
                     else:
                         raise Exception("A session archive can contain only one neural units 'pickle' file.")
                 elif (len(info.filename) > 3) and (info.filename[-3:].lower() == 'pl2'):
-                    pl2_filenames.append(info.filename)
-            if (pickle_info is not None) and (len(pl2_filenames) == 0) and not got_ts_csv:
+                    pl2_zip_info.append(info)
+            if (pickle_info is not None) and (len(pl2_zip_info) == 0) and not got_ts_csv:
                 raise Exception("A session archive with neural unit data must contain a PL2 file or timestamps.csv")
             if session_date is None:
                 raise Exception("No Maestro data files found in session archive")
@@ -124,20 +135,51 @@ def check_session_archive(zip_path: Union[str, Path]) -> str:
             # validate contents of the neural unit pickle file
             if pickle_info is not None:
                 unit_data = pickle.loads(archive.read(pickle_info))
-                err_msg = validate_neural_unit_data(unit_data, pl2_filenames)
+                err_msg = validate_neural_unit_data(unit_data, [z.filename for z in pl2_zip_info])
                 if err_msg is not None:
                     raise Exception(err_msg)
 
             # extracting trial protocols doesn't take too long and verifies a lot!
             _ , _ = Protocol.extract_protocols_from_session_data(archive, set())
+
+            # optional check of contents of PL2 file(s) in archive (time-consuming!)
+            if check_pl2:
+                # each Omniplex channel identified as a source for neural unit data must be recorded in PL2 file(s)
+                channels_found: Dict[str, bool] = dict()
+                for ch_id in unit_data['channel']:
+                    channels_found[ch_id] = False
+
+                for info in pl2_zip_info:
+                    pl2_temp: Optional[Path] = None
+                    try:
+                        path_str = archive.extract(info, Path(zip_path).parent)
+                        pl2_temp = Path(path_str)
+                        with open(pl2_temp, 'rb') as fp:
+                            pl2_info = PL2.load_file_information(fp)
+                            timings_dict = get_trial_timing_from_pl2_file(fp, pl2_info)
+                            if len(timings_dict) == 0:
+                                raise Exception(f'Missing trial timing information in {info.filename}')
+
+                            for ch_id in channels_found.keys():
+                                if PL2.was_wide_or_narrowband_analog_channel_recorded(pl2_info, ch_id):
+                                    channels_found[ch_id] = True
+                    finally:
+                        if isinstance(pl2_temp, Path) and pl2_temp.is_file():
+                            pl2_temp.unlink(missing_ok=True)
+
+                for ch_id, found in channels_found.items():
+                    if not found:
+                        raise Exception(f"Omniplex analog channel {ch_id} was not recorded but was specified as the "
+                                        f"source for a neural unit")
     except Exception as e:
         return f"Session archive failed sanity check: {str(e)}"
     return ""
 
+
 def validate_neural_unit_data(unit_data: Dict[str, List[Any]], pl2_filenames: List[str]) -> Optional[str]:
     """
     Helper method validates the object loaded from a single dedicated pickle file in the session ZIP archive that lists
-    all identified neurons and their spike times, and possibly some other information
+    all identified neurons and their spike times, and possibly some other information.
 
     When researchers prepare the ZIP archive containing all data files for an experiment session including neural
     unit recordings, they must provide a single Python pickle file with the results of their spike-sorting analysis of
@@ -146,7 +188,8 @@ def validate_neural_unit_data(unit_data: Dict[str, List[Any]], pl2_filenames: Li
     Each field is a list of length N, where N is the number of neural units. The 'channel' key holds the Omniplex
     channel ID for the analog channel on which the unit was recorded, the 'filename' key holds the name of the Omniplex
     PL2 file within the ZIP archive, and the 'spiketimes' key holds the spike times (in seconds since the Omniplex
-    recording started) for each unit, as a 1D float64 Numpy array.
+    recording started) for each unit, as a 1D float64 Numpy array. The spike times must be in chronological order, but
+    identical spike times are permitted.
 
     In order to commit an archive when the original PL2 source file is no longer available, an alternative archive
     format is supported in which the elapsed start times of each trial are listed in a CSV file in the archive, and the
@@ -179,11 +222,14 @@ def validate_neural_unit_data(unit_data: Dict[str, List[Any]], pl2_filenames: Li
         return None
 
     if not all(len(unit_data[k]) == num_units for k in required_keys):
-        return f"All field must be lists of the same length N={num_units}"
+        return f"All fields must be lists of the same length N={num_units}"
     if not all(isinstance(x, str) for x in unit_data['channel']):
         return f"Each element in the 'channel' list must be a string"
     if not all((isinstance(x, np.ndarray) and (x.dtype == np.float64)) for x in unit_data['spiketimes']):
         return f"Each element in the 'spiketimes' list must be a 1D float64 Numpy array"
+    for i, x in enumerate(unit_data['spiketimes']):
+        if not np.all(x[:-1] <= x[1:]):
+            return f"Timestamps in 'spiketimes' array for unit {i} are not in chronological order."
     if 'snr' in unit_data:
         if not all(isinstance(x, float) for x in unit_data['snr']):
             return f"Each element in the 'snr' list must be a float value"
@@ -197,6 +243,100 @@ def validate_neural_unit_data(unit_data: Dict[str, List[Any]], pl2_filenames: Li
                 return f"Each element in the 'filename' list must refer to a PL2 file in the archive."
 
     return None
+
+
+def get_trial_timing_from_pl2_file(fp: IO, info: Optional[Dict[str, Any]] = None) -> Dict[str, Tuple[float, float]]:
+    """
+    Analyze the strobed character events and the XS2 events in the PL2 file's event streams in order to find the
+    file names of all Maestro data files successfully saved during the Omniplex recording session, along with the
+    timestamps marking the start and end of each trial presented. This information is needed to align neural unit
+    responses recorded on the Omniplex with the individual trial timelines.
+
+    For each Maestro trial that is successfully saved, Maestro delivers a sequence of ASCII characters along with pulses
+    on XS2 ("EVT02" channel on Omniplex): a "trial start" character code 0x02, followed by null-terminated trial name
+    and null-terminated filename, a pulse on XS2 immediately after the trial commences, a second pulse on XS2
+    immediately after the trial ends, then a 0x06 character to indicate the file was saved, and finally a "trial stop"
+    character code 0x03.
+
+    This method loads and parses the relevant event data channels to extract, for each successfully saved data file,
+    the filename, and the timestamps of the two XS2 pulses bracketing the trial duration.
+
+    **NOTE:** During testing, we discovered a number of sessions where the Omniplex system was stopped in the middle of
+    a running trial. As a result, the last "start" code recorded by the Omniplex is not matched with a "stop" code.
+    Instead of throwing an exception in this case, we now simply skip that "start" code -- just as we skip any
+    "start-stop" event sequence that doesn't include the "file saved" code, corresponding to the many aborted trials
+    that happen in a typical Maestro recording session.
+
+    Args:
+        fp: The PL2 file object. It must be open and is NOT closed upon return.
+        info: Header and footer information from the PL2 file, for navigating a potentially multi-GB file. If None,
+            the method will read in that information first.
+    Returns:
+        A dictionary mapping the name of each saved data file to a 2-tuple (start, stop) containing the start and stop
+            timestamps of the corresponding Maestro trial in seconds since the start of the Omniplex recording. The
+            dictionary will be empty if the expected event channel data is not found in the PL2 file.
+    Raises:
+        Exception: If a problem is detected while analyzing the Omniplex strobed character and event channels.
+            The exception message is the error description.
+    """
+    result: Dict[str, Tuple[float, float]] = dict()
+    if info is None:
+        info = PL2.load_file_information(fp)
+    timestamp_frequency = info['timestamp_frequency']  # To convert timestamps from raw tick counts to seconds
+
+    # get strobed character data and convert to uint8. Timestamps are in raw tick counts. We'll scale to seconds later.
+    strobed_index = [ch['name'] for ch in info['event_channels']].index('Strobed')
+    strobed_data = PL2.load_event_channel(fp, strobed_index, info)
+    if strobed_data is None:
+        return result
+    for i in range(len(strobed_data["strobed"])):
+        strobed_data["strobed"][i] &= 0xFF
+    strobed_data["strobed"] = strobed_data["strobed"].astype("uint8")
+
+    # get timestamps for all pulses on XS2
+    event2_index = [ch['name'] for ch in info['event_channels']].index('EVT02')
+    event2_ts = PL2.load_event_channel(fp, event2_index, info)['timestamps']
+    if event2_ts is None:
+        return result
+    event2_ts = event2_ts.astype('int64')
+
+    # get filename and XS2 start and stop timestamps for each data file successfully saved (character code 0x06). This
+    # code uses Numpy array operations to (hopefully) speed up the process
+    start_code_mask = np.equal(strobed_data["strobed"], 0x02)
+    stop_code_mask = np.equal(strobed_data["strobed"], 0x03)
+    null_code_mask = np.equal(strobed_data["strobed"], 0x00)
+    start_code_indices = np.where(start_code_mask)[0]
+
+    # helper function used to find, eg, the stop code character after a start code character. Returns -1 if not found!
+    def find_next(mask: np.ndarray, after: int) -> int:
+        for _i in range(after + 1, len(mask)):
+            if mask[_i]:
+                return _i
+        return -1
+
+    for idx, start_code_index in enumerate(start_code_indices):
+        first_null_index = find_next(null_code_mask, start_code_index)
+        second_null_index = -1 if first_null_index == -1 else find_next(null_code_mask, first_null_index+1)
+        stop_code_index = -1 if second_null_index == -1 else find_next(stop_code_mask, second_null_index)
+        if stop_code_index == -1:
+            continue   # see NOTE in function header
+
+        file_name = "".join([chr(code) for code in strobed_data['strobed'][first_null_index + 1:second_null_index]])
+        file_was_saved = (any(np.equal(strobed_data["strobed"][second_null_index + 1:stop_code_index], 0x06)))
+        if file_was_saved:
+            start_code_ts = int(strobed_data['timestamps'][start_code_index])
+            stop_code_ts = int(strobed_data['timestamps'][stop_code_index])
+            xs2_indices = np.where((event2_ts >= start_code_ts) & (event2_ts < stop_code_ts))[0]
+            if len(xs2_indices) < 2:
+                raise Exception(f"Missing trial start or stop pulse on XS2 for saved file: {file_name}")
+            xs2_start_ts = event2_ts[xs2_indices[0]]
+            xs2_stop_ts = event2_ts[xs2_indices[-1]]
+            if (xs2_start_ts - start_code_ts)/timestamp_frequency > 0.100:
+                raise Exception(f"XS2 start pulse is more than 100ms after start code for saved file: {file_name}")
+            result[file_name] = (float(xs2_start_ts)/timestamp_frequency, float(xs2_stop_ts)/timestamp_frequency)
+
+    return result
+
 
 class PortalAccessor:
     """
@@ -673,6 +813,9 @@ class PortalAccessor:
         """
         if not (isinstance(zip_path, Path) and zip_path.is_file()):
             return False, "Archive file missing or path not specified"
+        if show_progress:
+            sys.stdout.write("\nPerforming sanity check on archive. This will take a while...")
+            sys.stdout.flush()
         err_msg = check_session_archive(zip_path)
         if len(err_msg) > 0:
             return False, err_msg
@@ -805,20 +948,25 @@ class PortalAccessor:
             return False, out
 
         req_body = dict(action='status', job_id="" if not isinstance(job_id, str) else job_id)
-        try:
-            response = requests.post(f"{self._base_url}{Route.COMMIT}",
-                                     json=req_body,
-                                     headers={'Authorization': f"Bearer {self._token}"},
-                                     allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
-            content = Route.deserialize_api_response(Route.COMMIT, response.content)
-            if response.status_code == 200:
-                return True, content['jobs']
-            else:
-                return False, content['error']
-        except APISerializeError as e:
-            return False, f"Failed to decode server response: {str(e)}"
-        except RequestException as e:
-            return False, f"Request failed on send: {str(e)}"
+        retries = 3
+        while retries > 0:
+            retries = retries - 1
+            try:
+                response = requests.post(f"{self._base_url}{Route.COMMIT}",
+                                         json=req_body,
+                                         headers={'Authorization': f"Bearer {self._token}"},
+                                         allow_redirects=False, timeout=_REQ_TIMEOUT_SECONDS)
+                content = Route.deserialize_api_response(Route.COMMIT, response.content)
+                if response.status_code == 200:
+                    return True, content['jobs']
+                else:
+                    return False, content['error']
+            except APISerializeError as e:
+                # Retry up to 3 times, in case server's failure to respond is due to a transient network issue
+                if retries <= 0:
+                    return False, f"Failed to decode server response: {str(e)}"
+            except RequestException as e:
+                return False, f"Request failed on send: {str(e)}"
 
     def commit_remove(self, job_id: str) -> Tuple[bool, str, bool]:
         """

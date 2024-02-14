@@ -20,7 +20,7 @@ import base64
 import functools
 import json
 import struct
-from datetime import date
+from datetime import date, datetime
 from enum import IntFlag
 from typing import Dict, Any, Optional, Tuple, List, Union, Final, Type
 
@@ -201,6 +201,10 @@ class MetadataTable:
 class SessionInfo:
     """
     Information about an experiment session stored in the Lisberger lab portal database.
+
+    12feb2024: Added 'committed' timestamp. This is an **optional(( field that is present only when :class:`SessionInfo`
+    serves as a data container for session metadata retrieved from the portal. If present, it should be a Python
+    datetime object or a string in a supported datetime ISO format.
     """
 
     @staticmethod
@@ -217,12 +221,39 @@ class SessionInfo:
         try:
             if not isinstance(info, dict):
                 raise ValueError(f'Expected a dictionary, got {type(info)}')
-            for k in ['experimenter', 'subj_id', 'session_date', 'rig_id', 'study_title', 'session_notes']:
+
+            # recognize 'session_date' as Python date or ISO date string. Convert date to ISO string format
+            if isinstance(info['session_date'], str):
+                try:
+                    date.fromisoformat(info['session_date'])
+                except Exception:
+                    raise ValueError("Invalid date string for session metadata field 'session_date'")
+            elif isinstance(info['session_date'], date):
+                info['session_date'] = info['session_date'].isoformat()
+
+            # if present, recognize 'committed' as Python datetime or ISO datetime string, but convert datetime to
+            # ISO string format. If not present, set to None
+            if 'committed' in info:
+                if isinstance(info['committed'], datetime):
+                    dt: datetime = info['committed']
+                    info['committed'] = dt.isoformat(sep=' ', timespec="seconds")
+                elif isinstance(info['committed'], str):
+                    try:
+                        datetime.fromisoformat(info['committed'])
+                    except ValueError:
+                        raise ValueError(f"Invalid session commit datetime string: {str(info['committed'])}")
+                elif not (info['committed'] is None):
+                    raise ValueError("Invalid value for session metadata field 'committed'")
+            else:
+                info['committed'] = None
+
+            for k in ['experimenter', 'subj_id', 'rig_id', 'study_title', 'session_notes']:
                 if not isinstance(info[k], str):
                     raise ValueError(f"Invalid type for session metadata field '{k}': {str(type(info[k]))}")
             for k in ['session_sfx', 'study_id', 'num_trials', 'num_units']:
                 if not isinstance(info[k], int):
                     raise ValueError(f"Invalid type for session metadata field '{k}': {str(type(info[k]))}")
+
             if info['num_units'] > 0:
                 for k in ['ephys_src', 'probe_type', 'brain_area']:
                     if not isinstance(info[k], str):
@@ -239,10 +270,7 @@ class SessionInfo:
         except KeyError as ke:
             raise ValueError(f'Missing session metadata field: {str(ke)}')
 
-        try:
-            date.fromisoformat(info['session_date'])
-        except Exception:
-            raise ValueError("Invalid date string for session metadata field 'session_date'")
+
 
     def __init__(self, info: Dict[str, Any]):
         """
@@ -318,9 +346,18 @@ class SessionInfo:
         """ Title of the larger research study to which this experiment session belongs. """
         return self._info['study_title']
 
+    @property
     def notes(self) -> str:
         """ Specific notes regarding this experiment session, as supplied by the experimenter or committer. """
         return self._info['session_notes']
+
+    @property
+    def committed_on(self) -> Optional[datetime]:
+        """
+        The date and time when the experiment session was committed to the portal repository. Returns None if this
+        information is unknown or if the session has not yet been committed.
+        """
+        return None if (self._info['committed'] is None) else datetime.fromisoformat(self._info['committed'])
 
     @property
     def brain_area(self) -> Optional[str]:

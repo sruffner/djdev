@@ -1,5 +1,16 @@
 # Lisberger Lab Data Portal - Changelog
 
+## TBD release date
+- Modified the `SessionInfo` data container and `sessions()` in `api/endpoints.py` to include the `committed` timestamp 
+with other session metadata. Note that `SessionInfo` is also used to represent metadata for a session that is not yet
+committed to the portal database, so the `commmitted` timestamp will be `None` in this scenario. It is NOT included
+in the internal commit information file that is persisted with the session archive in the portal repository when the
+session is committed to the database.
+- The code that performs a sanity check on the contents of an experiment session archive now also checks the content of 
+the PL2 file(s) in the archive. See `check_session_archive()` in the `sglportalapi.clientside` package. This 
+substantially increases the amount of time it takes to perform the sanity check, from a few seconds to a minute or more 
+for multi-GB archives.
+
 ## 12/12/2023
 - Got rid of "version numbers" for the portal app. Only the `sglportalapi` clientside package is "versioned".
 - Added support for committing experiment sessions containing pre-V21 _Maestro_ data files, which lack the set name 
