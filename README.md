@@ -3,6 +3,10 @@
 A web application for archiving, viewing, and sharing neuroscience data collected in Dr. Stephen G. Lisberger's
 laboratory at Duke University.
 
+<mark>**_NOTE: I am no longer actively developing or maintaining this application. The Lisberger lab is shutting
+down as of June 2025, and the test version of the data portal on Duke's Azure cluster will likely be taken offline soon. 
+This repo is maintained on my Github account for reference purposes only._**</mark>
+
 ## Background
 The Lisberger lab data portal ('sglportal') is a distributed application used to archive experimental
 data recorded in the lab in an underlying MySQL-esque MariaDB database, along with "metadata" that
@@ -76,7 +80,7 @@ For addition details on how the portal application is deployed, see `deploy-dkst
 When you commit an experiment's worth of behavioral and neural response data to the portal, you must supply various
 metadata: the recording date, the experimenter, the subject, and other information. If you commit the experiment session
 interactively through the portal, the web interface displays the various fields that must be "filled in" before 
-proceeding with the commit. In addition, you must prepare an_experiment session data archive_ (ZIP file) containing all
+proceeding with the commit. In addition, you must prepare an _experiment session data archive_ (ZIP file) containing all
 of the data files required by the portal:
 1. All Maestro trial data files recorded during the experiment. Note that the portal only handles Maestro data files 
 with version >= 21 (since Maestro 4.0.0, Nov 2018).
